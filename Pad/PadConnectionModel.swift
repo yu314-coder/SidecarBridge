@@ -1,0 +1,406 @@
+import SwiftUI
+import UIKit
+
+@MainActor
+final class PadConnectionModel: ObservableObject {
+    @Published var status = "Looking for your Mac…"
+    @Published var detail = "Keep SidecarBridge open on the Mac."
+    @Published var frame: UIImage?
+    @Published var isConnected = false
+    @Published var isStreaming = false
+    @Published var preferTrackpadControl: Bool = {
+        let defaults = UserDefaults.standard
+        let key = "preferTrackpadControl"
+        guard defaults.object(forKey: key) != nil else {
+            defaults.set(true, forKey: key)
+            return true
+        }
+        return defaults.bool(forKey: key)
+    }()
+    @Published var localNetworkAccess: LocalNetworkAccessState = .checking
+    @Published var connectionTransport = "Direct P2P preferred"
+    @Published var streamAspectRatio: CGFloat = 16.0 / 9.0
+    @Published var remoteInputAuthorized = false
+    @Published var controlLatencyMS: Int?
+    @Published var lastInputAccepted = true
+    @Published var remotePointer: CGPoint?
+    @Published var pointerIsPressed = false
+    @Published var showClickIndicator = false
+    @Published var streamFPS = 0
+    @Published var isPictureInPicturePossible = false
+    @Published var isPictureInPictureActive = false
+    @Published private(set) var discoveryElapsedSeconds = 0
+    @Published private(set) var discoveryAttempt = 1
+    @Published private(set) var lastDiscoveryIssue: String?
+    @Published private(set) var connectedUsingDirectLAN = false
+
+    let videoDisplay = VideoDisplayController()
+
+    var localNetworkPermissionNeeded: Bool { localNetworkAccess.needsPermission }
+
+    private let peers = PadPeerService()
+    private var started = false
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var inputSequence: UInt64 = 0
+    private var inputSentAt: [UInt64: TimeInterval] = [:]
+    private var clickFeedbackTask: Task<Void, Never>?
+    private var initialFrameRetryTask: Task<Void, Never>?
+    private var frameWindowStart = ProcessInfo.processInfo.systemUptime
+    private var frameWindowCount = 0
+    private var discoveryStartedAt = ProcessInfo.processInfo.systemUptime
+    private var discoveryClockTask: Task<Void, Never>?
+
+    var isDiscoveryTakingLonger: Bool {
+        !isConnected && discoveryElapsedSeconds >= 8
+    }
+
+    var nearbyDiscoveryIsActive: Bool {
+        !isConnected && discoveryElapsedSeconds >= 2 && !localNetworkPermissionNeeded
+    }
+
+    init() {
+        videoDisplay.onPictureInPictureStateChanged = { [weak self] possible, active in
+            self?.isPictureInPicturePossible = possible
+            self?.isPictureInPictureActive = active
+        }
+
+        peers.onLocalNetworkStateChanged = { [weak self] state in
+            guard let self else { return }
+            self.localNetworkAccess = state
+            if state.needsPermission && !self.isConnected {
+                self.status = "Allow Local Network access"
+                self.detail = "iPadOS blocked direct discovery. Enable Local Network for SidecarBridge in Settings."
+            }
+        }
+
+        peers.onConnectionChanged = { [weak self] connected, peerOrError in
+            guard let self else { return }
+            self.isConnected = connected
+            if connected {
+                let isDirectLAN = peerOrError?.hasPrefix("LAN:") == true
+                self.connectedUsingDirectLAN = isDirectLAN
+                self.lastDiscoveryIssue = nil
+                self.stopDiscoveryClock()
+                self.connectionTransport = isDirectLAN ? "Direct local link / AWDL" : "Nearby P2P fallback"
+                self.status = isDirectLAN ? "Mac found on same Wi-Fi" : "Mac found nearby"
+                self.sendDisplayCapabilities()
+                if self.preferTrackpadControl {
+                    self.detail = isDirectLAN
+                        ? "Direct encrypted local link; requesting the input-capable stream."
+                        : "Requesting the input-capable app stream."
+                    self.peers.send(ControlMessage(.startFallback))
+                } else {
+                    self.detail = isDirectLAN
+                        ? "Direct local link ready. System Sidecar requires an explicit button press."
+                        : "Mac found. Tap Open System Sidecar only if you want to leave this app."
+                }
+            } else {
+                self.connectedUsingDirectLAN = false
+                self.startDiscoveryClockIfNeeded()
+                self.isStreaming = false
+                self.remoteInputAuthorized = false
+                self.remotePointer = nil
+                self.pointerIsPressed = false
+                self.frame = nil
+                self.initialFrameRetryTask?.cancel()
+                self.videoDisplay.stopPictureInPicture()
+                self.videoDisplay.flush()
+                if let peerOrError, peerOrError.localizedCaseInsensitiveContains("NoAuth") {
+                    self.localNetworkAccess = .denied
+                    self.status = "Allow Local Network access"
+                    self.detail = "iPadOS blocked same-Wi-Fi discovery. Open Settings and enable Local Network for SidecarBridge."
+                } else {
+                    self.status = "Looking for your Mac…"
+                    self.detail = peerOrError ?? "Keep SidecarBridge open on the Mac."
+                    if let peerOrError, !peerOrError.isEmpty {
+                        self.lastDiscoveryIssue = peerOrError
+                    }
+                }
+                self.connectionTransport = "Searching direct P2P"
+            }
+        }
+        peers.onCommand = { [weak self] command in self?.handle(command) }
+        peers.onFrame = { [weak self] data in
+            guard let self, let image = UIImage(data: data) else { return }
+            self.frame = image
+            self.streamAspectRatio = image.size.width / max(image.size.height, 1)
+            self.isStreaming = true
+            self.status = "Mac screen"
+            self.detail = "Using the SidecarBridge fallback stream."
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
+        peers.onVideoFrame = { [weak self] frame in
+            guard let self else { return }
+            self.frame = nil
+            self.streamAspectRatio = CGFloat(frame.width) / CGFloat(max(frame.height, 1))
+            let displayed = self.videoDisplay.enqueue(frame)
+            if displayed { self.recordVideoFrame() }
+            self.isStreaming = true
+            self.status = "Mac screen"
+            self.detail = "Hardware-decoded H.264 HiDPI stream."
+            UIApplication.shared.isIdleTimerDisabled = true
+            if displayed {
+                self.peers.send(ControlMessage(.status, detail: "video-ack:\(frame.sequence)"))
+            } else if frame.isKeyFrame {
+                self.retryInitialKeyFrameAfterDisplayAppears(frame)
+            }
+        }
+    }
+
+    func start() {
+        guard !started else { return }
+        started = true
+        beginDiscoveryClock(incrementAttempt: false)
+        peers.start()
+    }
+
+    func retry() {
+        status = "Looking for your Mac…"
+        detail = "Restarting direct local-network, AWDL, and nearby discovery."
+        lastDiscoveryIssue = nil
+        beginDiscoveryClock(incrementAttempt: true)
+        peers.restart()
+    }
+
+    func scenePhaseChanged(_ phase: ScenePhase) {
+        switch phase {
+        case .active:
+            endBackgroundTask()
+            if started && !isConnected { retry() }
+        case .background:
+            if !isPictureInPictureActive {
+                beginBackgroundGracePeriod()
+            }
+        case .inactive:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    func openAppSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    func requestFallback() {
+        peers.send(ControlMessage(.startFallback))
+        status = "Requesting app stream…"
+        detail = "Approve Screen Recording on the Mac if asked."
+    }
+
+    func requestSystemSidecar() {
+        guard isConnected else { return }
+        status = "Requesting System Sidecar…"
+        detail = "Apple's Sidecar app will replace this app while the native session is active."
+        peers.send(ControlMessage(.trySidecar, detail: UIDevice.current.name))
+    }
+
+    func setPreferTrackpadControl(_ enabled: Bool) {
+        preferTrackpadControl = enabled
+        UserDefaults.standard.set(enabled, forKey: "preferTrackpadControl")
+        guard isConnected else { return }
+        if enabled {
+            requestFallback()
+        } else {
+            status = "System Sidecar selected"
+            detail = "It will not launch automatically. Tap Open System Sidecar when you want Apple's separate display session."
+        }
+    }
+
+    func stopStreaming() {
+        peers.send(ControlMessage(.stopFallback))
+        frame = nil
+        videoDisplay.stopPictureInPicture()
+        videoDisplay.flush()
+        isStreaming = false
+        remotePointer = nil
+        pointerIsPressed = false
+        showClickIndicator = false
+        status = "App stream paused"
+        detail = "Choose App Stream to reconnect."
+        UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    func togglePictureInPicture() {
+        guard isStreaming else { return }
+        videoDisplay.togglePictureInPicture()
+    }
+
+    func sendInput(_ input: RemoteInputEvent) {
+        guard isStreaming else { return }
+        updatePointerFeedback(for: input)
+        inputSequence &+= 1
+        var sequenced = input
+        sequenced.sequence = inputSequence
+        inputSentAt[inputSequence] = ProcessInfo.processInfo.systemUptime
+        if inputSentAt.count > 120 {
+            inputSentAt = inputSentAt.filter { inputSequence &- $0.key < 60 }
+        }
+        peers.sendInput(sequenced)
+    }
+
+    func sendLeftClick() {
+        sendInput(.click())
+    }
+
+    func sendDoubleClick() {
+        sendInput(.doubleClick())
+    }
+
+    func sendRightClick() {
+        sendInput(.click(secondary: true))
+    }
+
+    private func updatePointerFeedback(for input: RemoteInputEvent) {
+        if let x = input.x, let y = input.y {
+            remotePointer = CGPoint(
+                x: min(max(x, 0), 1),
+                y: min(max(y, 0), 1)
+            )
+        }
+
+        switch input.kind {
+        case .primaryDown:
+            pointerIsPressed = true
+            showClickIndicator = true
+        case .primaryDrag:
+            pointerIsPressed = true
+        case .primaryUp:
+            pointerIsPressed = false
+            flashClickIndicator()
+        case .primaryClick, .primaryDoubleClick, .secondaryClick:
+            flashClickIndicator()
+        default:
+            break
+        }
+    }
+
+    private func recordVideoFrame() {
+        frameWindowCount += 1
+        let now = ProcessInfo.processInfo.systemUptime
+        let duration = now - frameWindowStart
+        guard duration >= 0.5 else { return }
+        streamFPS = Int((Double(frameWindowCount) / duration).rounded())
+        frameWindowCount = 0
+        frameWindowStart = now
+    }
+
+    private func retryInitialKeyFrameAfterDisplayAppears(_ frame: VideoFrame) {
+        initialFrameRetryTask?.cancel()
+        initialFrameRetryTask = Task { [weak self] in
+            // isStreaming changes the SwiftUI hierarchy and creates the
+            // AVSampleBufferDisplayLayer. Retry the same keyframe after that
+            // render pass instead of making the sender wait for a timeout.
+            for _ in 0..<4 {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled, let self, self.isStreaming else { return }
+                if self.videoDisplay.enqueue(frame) {
+                    self.recordVideoFrame()
+                    self.peers.send(ControlMessage(.status, detail: "video-ack:\(frame.sequence)"))
+                    return
+                }
+            }
+        }
+    }
+
+    private func flashClickIndicator() {
+        clickFeedbackTask?.cancel()
+        showClickIndicator = true
+        clickFeedbackTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            self?.showClickIndicator = false
+        }
+    }
+
+    private func sendDisplayCapabilities() {
+        let nativeBounds = UIScreen.main.nativeBounds
+        let nativeWidth = Int(max(nativeBounds.width, nativeBounds.height))
+        peers.send(ControlMessage(.hello, detail: "display-width:\(nativeWidth)"))
+    }
+
+    private func startDiscoveryClockIfNeeded() {
+        guard discoveryClockTask == nil else { return }
+        beginDiscoveryClock(incrementAttempt: false)
+    }
+
+    private func beginDiscoveryClock(incrementAttempt: Bool) {
+        discoveryClockTask?.cancel()
+        if incrementAttempt { discoveryAttempt += 1 }
+        discoveryStartedAt = ProcessInfo.processInfo.systemUptime
+        discoveryElapsedSeconds = 0
+        discoveryClockTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self, !self.isConnected else { return }
+                self.discoveryElapsedSeconds = max(
+                    0,
+                    Int(ProcessInfo.processInfo.systemUptime - self.discoveryStartedAt)
+                )
+            }
+        }
+    }
+
+    private func stopDiscoveryClock() {
+        discoveryClockTask?.cancel()
+        discoveryClockTask = nil
+    }
+
+    private func beginBackgroundGracePeriod() {
+        guard backgroundTask == .invalid else { return }
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SidecarBridge connection") { [weak self] in
+            Task { @MainActor in self?.endBackgroundTask() }
+        }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
+    private func handle(_ command: ControlMessage) {
+        guard command.kind == .status, let value = command.detail else { return }
+        switch value {
+        case "sidecar-wired":
+            status = "Trying wired Sidecar…"
+            detail = "The Mac detected an iPad USB connection."
+        case "sidecar-wireless":
+            status = "Trying wireless Sidecar…"
+            detail = "Using Apple Continuity discovery."
+        case "sidecar-unavailable", "sidecar-failed":
+            status = "Native Sidecar unavailable"
+            detail = "The Mac is starting the app stream."
+        case "fallback-active":
+            status = "App stream connected"
+            detail = "Waiting for the first frame."
+        case "sidecar-connected":
+            status = "System Sidecar connected"
+            detail = "iPadOS is switching to Apple's separate Sidecar display app."
+        case "accessibility-required":
+            remoteInputAuthorized = false
+            status = "Allow remote input on the Mac"
+            detail = "Enable SidecarBridge under Privacy & Security → Accessibility. Video can continue meanwhile."
+        case "accessibility-passed":
+            remoteInputAuthorized = true
+            if isStreaming {
+                status = "Mac screen"
+                detail = "Hardware-decoded H.264 HiDPI stream with remote input."
+            }
+        default:
+            if value.hasPrefix("input-ack:") {
+                let parts = value.split(separator: ":")
+                guard parts.count == 3, let sequence = UInt64(parts[1]) else { return }
+                if let sentAt = inputSentAt.removeValue(forKey: sequence) {
+                    controlLatencyMS = max(0, Int((ProcessInfo.processInfo.systemUptime - sentAt) * 1_000))
+                }
+                lastInputAccepted = parts[2] == "1"
+                remoteInputAuthorized = lastInputAccepted
+            } else if value.hasPrefix("fallback-error:") {
+                status = "Mac permission required"
+                detail = String(value.dropFirst("fallback-error:".count))
+            }
+        }
+    }
+}

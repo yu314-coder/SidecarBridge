@@ -1,0 +1,124 @@
+name: SidecarBridge
+options:
+  bundleIdPrefix: io.sidecarbridge
+  deploymentTarget:
+    macOS: "14.0"
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: LYK4LV2859
+targets:
+  SidecarBridgeMac:
+    type: application
+    platform: macOS
+    sources:
+      - Shared
+      - Mac
+    info:
+      path: Mac/Info.plist
+      properties:
+        CFBundleDisplayName: SidecarBridge
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.utilities
+        NSBonjourServices:
+          - _sb-screen._tcp
+          - _sb-direct._tcp
+        NSLocalNetworkUsageDescription: SidecarBridge finds your iPad and sends the Mac screen when native Sidecar is unavailable.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
+        PRODUCT_NAME: SidecarBridge
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Mac/SidecarBridgeMac.entitlements
+        ENABLE_APP_SANDBOX: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Accessibility/TCC must identify the real app executable, not Xcode's
+        # debug-dylib launcher arrangement.
+        ENABLE_DEBUG_DYLIB: NO
+    dependencies:
+      - sdk: ScreenCaptureKit.framework
+      - sdk: MultipeerConnectivity.framework
+      - sdk: ServiceManagement.framework
+      - sdk: IOKit.framework
+      - sdk: Network.framework
+      - sdk: VideoToolbox.framework
+
+  SidecarBridgePad:
+    type: application
+    platform: iOS
+    sources:
+      - Shared
+      - Pad
+    info:
+      path: Pad/Info.plist
+      properties:
+        CFBundleDisplayName: SidecarBridge
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
+        NSBonjourServices:
+          - _sb-screen._tcp
+          - _sb-direct._tcp
+        NSLocalNetworkUsageDescription: SidecarBridge finds your Mac and receives its screen when native Sidecar is unavailable.
+        UIBackgroundModes:
+          - audio
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+        "UISupportedInterfaceOrientations~ipad":
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
+        PRODUCT_NAME: SidecarBridge
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "2"
+        SUPPORTS_MACCATALYST: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - sdk: MultipeerConnectivity.framework
+      - sdk: Network.framework
+      - sdk: AVFoundation.framework
+      - sdk: AVKit.framework
+
+  SidecarBridgeTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  SidecarBridgeMac:
+    build:
+      targets:
+        SidecarBridgeMac: all
+        SidecarBridgeTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - SidecarBridgeTests
+  SidecarBridgePad:
+    build:
+      targets:
+        SidecarBridgePad: all
+    run:
+      config: Debug

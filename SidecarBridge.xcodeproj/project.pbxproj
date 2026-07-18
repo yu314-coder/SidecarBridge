@@ -1,0 +1,655 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		05C40EDEFB916FC2A2DEB7A4 /* MacPeerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 068FB904EF6CA41BBDCF4992 /* MacPeerService.swift */; };
+		0A6EC89FFFAC699185EA8EB6 /* PacketCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C270B0D7506B1B8A83205AC3 /* PacketCodecTests.swift */; };
+		0F1A65FF0EB6D78056A41646 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6931674BFB3F75F81BCA5C59 /* Network.framework */; };
+		136F9FBF23D970658AD94CAD /* ScreenStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */; };
+		28409B33478CD0C30D1765CC /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
+		34BD90A03AAF1334454D9850 /* PadContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B074CA5AC5C67EC30F9A42EA /* PadContentView.swift */; };
+		35BF87461BAD13C706604E5A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 722C341A866CEB112E6AE410 /* Assets.xcassets */; };
+		3B3347A2045CD1A250163F3B /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C128FA50735B8EF865A75273 /* BridgeProtocol.swift */; };
+		4179193B540F02A36A7DF0DF /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
+		44778D308D034459FF6C8C19 /* PadLANService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D9BF92830E37416BC52E328 /* PadLANService.swift */; };
+		4682C7105E7B6FAA8AA0113E /* PadConnectionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E700FBB5674124211D2524 /* PadConnectionModel.swift */; };
+		4785F5679556954F23F87DBB /* PadPeerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C4B161D91984971FF7309C /* PadPeerService.swift */; };
+		4C8E982163B11BFE3240B06C /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C128FA50735B8EF865A75273 /* BridgeProtocol.swift */; };
+		5021588D18791766FA8C613E /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 09EF8EAB93178074C7D6559D /* ServiceManagement.framework */; };
+		605E1E80BBA2869CC7BD4D80 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2688DB8C49E0676ABEF1A885 /* PrivacyInfo.xcprivacy */; };
+		6611C2566550F8C25E509AC5 /* MacConnectionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */; };
+		6E72D6AC0274182E61F5780D /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 74310F8BF9315A1BF696394D /* IOKit.framework */; };
+		6F1F78888D0A2E48006FFAAF /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6931674BFB3F75F81BCA5C59 /* Network.framework */; };
+		80FA3B6C5CA37DA293EDEE78 /* MacContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4316F908EA1732F27087B925 /* MacContentView.swift */; };
+		875EB2F7C4A025AC74DAA63F /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 487CD2D42D52E0E526CCA155 /* AVKit.framework */; };
+		8BF65511D829825BA5768DE3 /* H264Encoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C55DE7760B526EE98A4C2A /* H264Encoder.swift */; };
+		8D467B67CF7786EEA5045A38 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B5BBAA34470E4D405231752F /* AVFoundation.framework */; };
+		92B2D5720EB7A79457B2308D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5BFDF69103D50AB830DBBC34 /* Assets.xcassets */; };
+		A11C3D60796289052EEE84A5 /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */; };
+		A461F9BE2A202A46BD1AB1E1 /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C128FA50735B8EF865A75273 /* BridgeProtocol.swift */; };
+		AE58CE3B6126833BE8F35893 /* SidecarBridgePadApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0498686ABD4560A441EB7B0A /* SidecarBridgePadApp.swift */; };
+		B6EEF0774D2870D93A451FCE /* SidecarConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875676002A874A36BB721BDD /* SidecarConnector.swift */; };
+		B813704EF97E4288E3747C1E /* SidecarBridgeMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A47529E9BB2E0E36EC5D5C4 /* SidecarBridgeMacApp.swift */; };
+		B83F67487E628FE3195562CA /* MacLANService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74E92BAEB461529898894895 /* MacLANService.swift */; };
+		BB94E33810371F48190B51FF /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */; };
+		BBA7648FF13001D11AAE23D6 /* CableDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FD847309C3C8668764BE555 /* CableDetector.swift */; };
+		CBA6AC2A4CAF9A726B4852BD /* ScreenCaptureKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C215B5E7806DF0EE7746B9C6 /* ScreenCaptureKit.framework */; };
+		D2ABD59672AAD0121B799154 /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
+		DBFF6D618AFB812BC3F5EDC0 /* RemoteInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD3847ACDC7DFFDCCBAC490 /* RemoteInputController.swift */; };
+		DDD681F579FE17C68A57FF20 /* RemoteInputSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */; };
+		EF96FEDBEB9021AEBB5607E4 /* VideoDisplaySurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECEBB8AE7F4ECF8E0D6ADF61 /* VideoDisplaySurface.swift */; };
+		FBDC2A47CAC1ACB40AA3BCDF /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0498686ABD4560A441EB7B0A /* SidecarBridgePadApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidecarBridgePadApp.swift; sourceTree = "<group>"; };
+		068FB904EF6CA41BBDCF4992 /* MacPeerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPeerService.swift; sourceTree = "<group>"; };
+		09EF8EAB93178074C7D6559D /* ServiceManagement.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ServiceManagement.framework; path = System/Library/Frameworks/ServiceManagement.framework; sourceTree = SDKROOT; };
+		0D9BF92830E37416BC52E328 /* PadLANService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadLANService.swift; sourceTree = "<group>"; };
+		0DD3847ACDC7DFFDCCBAC490 /* RemoteInputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteInputController.swift; sourceTree = "<group>"; };
+		1D42BDECCE5EF18BD39F0173 /* SidecarBridgePad.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SidecarBridgePad.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2688DB8C49E0676ABEF1A885 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		34875BE7BD3F9883AEFE56C5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		3FD847309C3C8668764BE555 /* CableDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CableDetector.swift; sourceTree = "<group>"; };
+		4316F908EA1732F27087B925 /* MacContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacContentView.swift; sourceTree = "<group>"; };
+		46C55DE7760B526EE98A4C2A /* H264Encoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = H264Encoder.swift; sourceTree = "<group>"; };
+		487CD2D42D52E0E526CCA155 /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = System/Library/Frameworks/AVKit.framework; sourceTree = SDKROOT; };
+		5BFDF69103D50AB830DBBC34 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteInputSurface.swift; sourceTree = "<group>"; };
+		6931674BFB3F75F81BCA5C59 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		722C341A866CEB112E6AE410 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		74310F8BF9315A1BF696394D /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = System/Library/Frameworks/IOKit.framework; sourceTree = SDKROOT; };
+		74E92BAEB461529898894895 /* MacLANService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacLANService.swift; sourceTree = "<group>"; };
+		796A25DB4ABDCDB1108CC28F /* SidecarBridgeMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SidecarBridgeMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		83E1072643E5526D82D2EFE9 /* SidecarBridgeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SidecarBridgeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		875676002A874A36BB721BDD /* SidecarConnector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidecarConnector.swift; sourceTree = "<group>"; };
+		8A47529E9BB2E0E36EC5D5C4 /* SidecarBridgeMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidecarBridgeMacApp.swift; sourceTree = "<group>"; };
+		9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MultipeerConnectivity.framework; path = System/Library/Frameworks/MultipeerConnectivity.framework; sourceTree = SDKROOT; };
+		93CB5164889E245469D18E50 /* SidecarBridgeMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SidecarBridgeMac.entitlements; sourceTree = "<group>"; };
+		A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacConnectionModel.swift; sourceTree = "<group>"; };
+		ADB37E6EB752E6F75FD00F27 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenStreamer.swift; sourceTree = "<group>"; };
+		B074CA5AC5C67EC30F9A42EA /* PadContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadContentView.swift; sourceTree = "<group>"; };
+		B5BBAA34470E4D405231752F /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		C128FA50735B8EF865A75273 /* BridgeProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeProtocol.swift; sourceTree = "<group>"; };
+		C215B5E7806DF0EE7746B9C6 /* ScreenCaptureKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ScreenCaptureKit.framework; path = System/Library/Frameworks/ScreenCaptureKit.framework; sourceTree = SDKROOT; };
+		C270B0D7506B1B8A83205AC3 /* PacketCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketCodecTests.swift; sourceTree = "<group>"; };
+		CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LANProtocol.swift; sourceTree = "<group>"; };
+		CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
+		E5E700FBB5674124211D2524 /* PadConnectionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadConnectionModel.swift; sourceTree = "<group>"; };
+		E7C4B161D91984971FF7309C /* PadPeerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadPeerService.swift; sourceTree = "<group>"; };
+		ECEBB8AE7F4ECF8E0D6ADF61 /* VideoDisplaySurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDisplaySurface.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		29F29B683E6FB58FD8C3D8D2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FBDC2A47CAC1ACB40AA3BCDF /* MultipeerConnectivity.framework in Frameworks */,
+				0F1A65FF0EB6D78056A41646 /* Network.framework in Frameworks */,
+				8D467B67CF7786EEA5045A38 /* AVFoundation.framework in Frameworks */,
+				875EB2F7C4A025AC74DAA63F /* AVKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		660E7E0DBCEF7B69F7E4659C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CBA6AC2A4CAF9A726B4852BD /* ScreenCaptureKit.framework in Frameworks */,
+				A11C3D60796289052EEE84A5 /* MultipeerConnectivity.framework in Frameworks */,
+				5021588D18791766FA8C613E /* ServiceManagement.framework in Frameworks */,
+				6E72D6AC0274182E61F5780D /* IOKit.framework in Frameworks */,
+				6F1F78888D0A2E48006FFAAF /* Network.framework in Frameworks */,
+				BB94E33810371F48190B51FF /* VideoToolbox.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		17A41FFB4B4E0CC562D370CA /* Mac */ = {
+			isa = PBXGroup;
+			children = (
+				722C341A866CEB112E6AE410 /* Assets.xcassets */,
+				3FD847309C3C8668764BE555 /* CableDetector.swift */,
+				46C55DE7760B526EE98A4C2A /* H264Encoder.swift */,
+				34875BE7BD3F9883AEFE56C5 /* Info.plist */,
+				A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */,
+				4316F908EA1732F27087B925 /* MacContentView.swift */,
+				74E92BAEB461529898894895 /* MacLANService.swift */,
+				068FB904EF6CA41BBDCF4992 /* MacPeerService.swift */,
+				0DD3847ACDC7DFFDCCBAC490 /* RemoteInputController.swift */,
+				AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */,
+				93CB5164889E245469D18E50 /* SidecarBridgeMac.entitlements */,
+				8A47529E9BB2E0E36EC5D5C4 /* SidecarBridgeMacApp.swift */,
+				875676002A874A36BB721BDD /* SidecarConnector.swift */,
+			);
+			path = Mac;
+			sourceTree = "<group>";
+		};
+		1BFFF2B5957C119E772679CF /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				C270B0D7506B1B8A83205AC3 /* PacketCodecTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		4C996E142DD155C07BFC7535 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				C128FA50735B8EF865A75273 /* BridgeProtocol.swift */,
+				CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		6155FFD017549B8362184311 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				B5BBAA34470E4D405231752F /* AVFoundation.framework */,
+				487CD2D42D52E0E526CCA155 /* AVKit.framework */,
+				74310F8BF9315A1BF696394D /* IOKit.framework */,
+				9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */,
+				6931674BFB3F75F81BCA5C59 /* Network.framework */,
+				C215B5E7806DF0EE7746B9C6 /* ScreenCaptureKit.framework */,
+				09EF8EAB93178074C7D6559D /* ServiceManagement.framework */,
+				CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		9725C8E6FE4B194423068989 /* Pad */ = {
+			isa = PBXGroup;
+			children = (
+				5BFDF69103D50AB830DBBC34 /* Assets.xcassets */,
+				ADB37E6EB752E6F75FD00F27 /* Info.plist */,
+				E5E700FBB5674124211D2524 /* PadConnectionModel.swift */,
+				B074CA5AC5C67EC30F9A42EA /* PadContentView.swift */,
+				0D9BF92830E37416BC52E328 /* PadLANService.swift */,
+				E7C4B161D91984971FF7309C /* PadPeerService.swift */,
+				2688DB8C49E0676ABEF1A885 /* PrivacyInfo.xcprivacy */,
+				5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */,
+				0498686ABD4560A441EB7B0A /* SidecarBridgePadApp.swift */,
+				ECEBB8AE7F4ECF8E0D6ADF61 /* VideoDisplaySurface.swift */,
+			);
+			path = Pad;
+			sourceTree = "<group>";
+		};
+		A50EB500704B7043D58102F8 = {
+			isa = PBXGroup;
+			children = (
+				17A41FFB4B4E0CC562D370CA /* Mac */,
+				9725C8E6FE4B194423068989 /* Pad */,
+				4C996E142DD155C07BFC7535 /* Shared */,
+				1BFFF2B5957C119E772679CF /* Tests */,
+				6155FFD017549B8362184311 /* Frameworks */,
+				E0B66FA8564D3E19CA89223B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E0B66FA8564D3E19CA89223B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				796A25DB4ABDCDB1108CC28F /* SidecarBridgeMac.app */,
+				1D42BDECCE5EF18BD39F0173 /* SidecarBridgePad.app */,
+				83E1072643E5526D82D2EFE9 /* SidecarBridgeTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		13D5AEC0CBFE55D643E7DAEA /* SidecarBridgePad */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BBA5845E5E43E40207541B9B /* Build configuration list for PBXNativeTarget "SidecarBridgePad" */;
+			buildPhases = (
+				559AA34B89EED3742E846C2A /* Sources */,
+				CB512BAD681CCD8C2C4D8129 /* Resources */,
+				29F29B683E6FB58FD8C3D8D2 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SidecarBridgePad;
+			packageProductDependencies = (
+			);
+			productName = SidecarBridgePad;
+			productReference = 1D42BDECCE5EF18BD39F0173 /* SidecarBridgePad.app */;
+			productType = "com.apple.product-type.application";
+		};
+		AA42C4F067082A54E6D97C29 /* SidecarBridgeMac */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ED1971FAAFEEAE1DBF711085 /* Build configuration list for PBXNativeTarget "SidecarBridgeMac" */;
+			buildPhases = (
+				222CAE529461DE34310E9562 /* Sources */,
+				B0946C9E112B64C88501E66F /* Resources */,
+				660E7E0DBCEF7B69F7E4659C /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SidecarBridgeMac;
+			packageProductDependencies = (
+			);
+			productName = SidecarBridgeMac;
+			productReference = 796A25DB4ABDCDB1108CC28F /* SidecarBridgeMac.app */;
+			productType = "com.apple.product-type.application";
+		};
+		AC888CE8BE4AF79DBFE5116F /* SidecarBridgeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 970A21E03E42CA5E188712C4 /* Build configuration list for PBXNativeTarget "SidecarBridgeTests" */;
+			buildPhases = (
+				18B3B3B6F790E8C052813167 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SidecarBridgeTests;
+			packageProductDependencies = (
+			);
+			productName = SidecarBridgeTests;
+			productReference = 83E1072643E5526D82D2EFE9 /* SidecarBridgeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		947B8000995B50AB3A54588A /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					13D5AEC0CBFE55D643E7DAEA = {
+						DevelopmentTeam = LYK4LV2859;
+						ProvisioningStyle = Automatic;
+					};
+					AA42C4F067082A54E6D97C29 = {
+						DevelopmentTeam = LYK4LV2859;
+						ProvisioningStyle = Automatic;
+					};
+					AC888CE8BE4AF79DBFE5116F = {
+						DevelopmentTeam = LYK4LV2859;
+					};
+				};
+			};
+			buildConfigurationList = F1A448513221B3F607F3F884 /* Build configuration list for PBXProject "SidecarBridge" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = A50EB500704B7043D58102F8;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = E0B66FA8564D3E19CA89223B /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AA42C4F067082A54E6D97C29 /* SidecarBridgeMac */,
+				13D5AEC0CBFE55D643E7DAEA /* SidecarBridgePad */,
+				AC888CE8BE4AF79DBFE5116F /* SidecarBridgeTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B0946C9E112B64C88501E66F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				35BF87461BAD13C706604E5A /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CB512BAD681CCD8C2C4D8129 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				92B2D5720EB7A79457B2308D /* Assets.xcassets in Resources */,
+				605E1E80BBA2869CC7BD4D80 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		18B3B3B6F790E8C052813167 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A461F9BE2A202A46BD1AB1E1 /* BridgeProtocol.swift in Sources */,
+				D2ABD59672AAD0121B799154 /* LANProtocol.swift in Sources */,
+				0A6EC89FFFAC699185EA8EB6 /* PacketCodecTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		222CAE529461DE34310E9562 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3B3347A2045CD1A250163F3B /* BridgeProtocol.swift in Sources */,
+				BBA7648FF13001D11AAE23D6 /* CableDetector.swift in Sources */,
+				8BF65511D829825BA5768DE3 /* H264Encoder.swift in Sources */,
+				28409B33478CD0C30D1765CC /* LANProtocol.swift in Sources */,
+				6611C2566550F8C25E509AC5 /* MacConnectionModel.swift in Sources */,
+				80FA3B6C5CA37DA293EDEE78 /* MacContentView.swift in Sources */,
+				B83F67487E628FE3195562CA /* MacLANService.swift in Sources */,
+				05C40EDEFB916FC2A2DEB7A4 /* MacPeerService.swift in Sources */,
+				DBFF6D618AFB812BC3F5EDC0 /* RemoteInputController.swift in Sources */,
+				136F9FBF23D970658AD94CAD /* ScreenStreamer.swift in Sources */,
+				B813704EF97E4288E3747C1E /* SidecarBridgeMacApp.swift in Sources */,
+				B6EEF0774D2870D93A451FCE /* SidecarConnector.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		559AA34B89EED3742E846C2A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4C8E982163B11BFE3240B06C /* BridgeProtocol.swift in Sources */,
+				4179193B540F02A36A7DF0DF /* LANProtocol.swift in Sources */,
+				4682C7105E7B6FAA8AA0113E /* PadConnectionModel.swift in Sources */,
+				34BD90A03AAF1334454D9850 /* PadContentView.swift in Sources */,
+				44778D308D034459FF6C8C19 /* PadLANService.swift in Sources */,
+				4785F5679556954F23F87DBB /* PadPeerService.swift in Sources */,
+				DDD681F579FE17C68A57FF20 /* RemoteInputSurface.swift in Sources */,
+				AE58CE3B6126833BE8F35893 /* SidecarBridgePadApp.swift in Sources */,
+				EF96FEDBEB9021AEBB5607E4 /* VideoDisplaySurface.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		0DE2B1826D2F6D3F88A9E2DD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = LYK4LV2859;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		18D2BC1A97E173B0105FD2A8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Mac/SidecarBridgeMac.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_DEBUG_DYLIB = NO;
+				INFOPLIST_FILE = Mac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
+				PRODUCT_NAME = SidecarBridge;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		34CCEA7AB1D4F3E66651A5C9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.tests;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		42F299BD0DB8335B914773AE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = Pad/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
+				PRODUCT_NAME = SidecarBridge;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Release;
+		};
+		5E3DEBE061AEE4E7AD5E7B82 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.tests;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		DD63900372DF422720D65C72 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = Pad/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
+				PRODUCT_NAME = SidecarBridge;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Debug;
+		};
+		DFF35C928A034BDF3777BDF8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Mac/SidecarBridgeMac.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_DEBUG_DYLIB = NO;
+				INFOPLIST_FILE = Mac/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
+				PRODUCT_NAME = SidecarBridge;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		F7BA2F229FABFCD02A4E2017 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = LYK4LV2859;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		970A21E03E42CA5E188712C4 /* Build configuration list for PBXNativeTarget "SidecarBridgeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5E3DEBE061AEE4E7AD5E7B82 /* Debug */,
+				34CCEA7AB1D4F3E66651A5C9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BBA5845E5E43E40207541B9B /* Build configuration list for PBXNativeTarget "SidecarBridgePad" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DD63900372DF422720D65C72 /* Debug */,
+				42F299BD0DB8335B914773AE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		ED1971FAAFEEAE1DBF711085 /* Build configuration list for PBXNativeTarget "SidecarBridgeMac" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DFF35C928A034BDF3777BDF8 /* Debug */,
+				18D2BC1A97E173B0105FD2A8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F1A448513221B3F607F3F884 /* Build configuration list for PBXProject "SidecarBridge" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F7BA2F229FABFCD02A4E2017 /* Debug */,
+				0DE2B1826D2F6D3F88A9E2DD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 947B8000995B50AB3A54588A /* Project object */;
+}
