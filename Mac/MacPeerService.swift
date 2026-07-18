@@ -39,8 +39,6 @@ final class MacPeerService: NSObject {
     private var advertiserRunning = false
     private var fallbackWorkItem: DispatchWorkItem?
     private var mcConnectionWatchdog: DispatchWorkItem?
-    private var advertiserRefreshWorkItem: DispatchWorkItem?
-    private let idleAdvertiserRefreshInterval: TimeInterval = 90
     private let mcVideoQueue = DispatchQueue(label: "SidecarBridge.MCVideo")
     private var mcVideoInFlight: UInt64?
     private var pendingMCVideo: [PendingMCVideo] = []
@@ -214,7 +212,6 @@ final class MacPeerService: NSObject {
             self.advertiserRunning = true
             advertiser.startAdvertisingPeer()
             self.onP2PStateChanged?(.advertising)
-            self.armIdleAdvertiserRefresh()
         }
         fallbackWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
@@ -226,8 +223,6 @@ final class MacPeerService: NSObject {
         fallbackWorkItem = nil
         mcConnectionWatchdog?.cancel()
         mcConnectionWatchdog = nil
-        advertiserRefreshWorkItem?.cancel()
-        advertiserRefreshWorkItem = nil
         if advertiserRunning {
             advertiser?.stopAdvertisingPeer()
             advertiserRunning = false
@@ -259,29 +254,6 @@ final class MacPeerService: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: workItem)
     }
 
-    /// Republish an idle nearby service occasionally. A short refresh interval
-    /// made the Mac disappear for part of every discovery cycle and could
-    /// interrupt an iPad just as it began resolving the service.
-    private func armIdleAdvertiserRefresh() {
-        advertiserRefreshWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self,
-                  self.started,
-                  !self.lanConnected,
-                  !self.mcConnected,
-                  self.advertiserRunning else { return }
-            self.advertiserRefreshWorkItem = nil
-            self.advertiser?.stopAdvertisingPeer()
-            self.advertiserRunning = false
-            self.advertiser?.delegate = nil
-            self.advertiser = nil
-            self.onP2PStateChanged?(.recovering("Refreshing nearby advertisement…"))
-            self.scheduleMultipeerFallback()
-        }
-        advertiserRefreshWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + idleAdvertiserRefreshInterval, execute: workItem)
-    }
-
     private func restartMultipeerAdvertisingAfterDisconnect() {
         guard started, !lanConnected else { return }
         if advertiserRunning {
@@ -303,8 +275,6 @@ extension MacPeerService: MCNearbyServiceAdvertiserDelegate {
         withContext context: Data?,
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
-        advertiserRefreshWorkItem?.cancel()
-        advertiserRefreshWorkItem = nil
         onP2PStateChanged?(.connecting(peerID.displayName))
         let paired = UserDefaults.standard.string(forKey: "pairedPeerName")
         if paired == peerID.displayName {
@@ -330,8 +300,6 @@ extension MacPeerService: MCNearbyServiceAdvertiserDelegate {
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
         DispatchQueue.main.async {
             guard self.advertiser === advertiser else { return }
-            self.advertiserRefreshWorkItem?.cancel()
-            self.advertiserRefreshWorkItem = nil
             advertiser.delegate = nil
             self.advertiser = nil
             self.advertiserRunning = false
@@ -348,8 +316,6 @@ extension MacPeerService: MCSessionDelegate {
             self.mcConnected = !session.connectedPeers.isEmpty
             self.mcPeerName = self.mcConnected ? (session.connectedPeers.first?.displayName ?? peerID.displayName) : nil
             if state == .connected {
-                self.advertiserRefreshWorkItem?.cancel()
-                self.advertiserRefreshWorkItem = nil
                 self.onP2PStateChanged?(.connected(peerID.displayName))
                 self.mcConnectionWatchdog?.cancel()
                 self.mcConnectionWatchdog = nil

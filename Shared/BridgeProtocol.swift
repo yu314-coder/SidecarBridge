@@ -3,6 +3,7 @@ import Foundation
 enum BridgeConstants {
     static let serviceType = "sb-screen"
     static let lanServiceType = "_sb-direct._tcp"
+    static let directPort: UInt16 = 45_454
 }
 
 enum LocalNetworkAccessState: Equatable {

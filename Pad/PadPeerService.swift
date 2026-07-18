@@ -26,8 +26,6 @@ final class PadPeerService: NSObject {
     private var browserRunning = false
     private var fallbackWorkItem: DispatchWorkItem?
     private var mcConnectionWatchdog: DispatchWorkItem?
-    private var browserRefreshWorkItem: DispatchWorkItem?
-    private let idleBrowserRefreshInterval: TimeInterval = 45
 
     override init() {
         super.init()
@@ -113,7 +111,6 @@ final class PadPeerService: NSObject {
             self.browserRunning = true
             print("[SidecarBridge/P2P] Starting nearby fallback browser")
             browser.startBrowsingForPeers()
-            self.armIdleBrowserRefresh()
         }
         fallbackWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
@@ -124,8 +121,6 @@ final class PadPeerService: NSObject {
         fallbackWorkItem = nil
         mcConnectionWatchdog?.cancel()
         mcConnectionWatchdog = nil
-        browserRefreshWorkItem?.cancel()
-        browserRefreshWorkItem = nil
         if browserRunning {
             browser?.stopBrowsingForPeers()
             browserRunning = false
@@ -161,31 +156,6 @@ final class PadPeerService: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: workItem)
     }
 
-    /// MCNearbyServiceBrowser can occasionally keep running without producing
-    /// callbacks after an interface change. Keep a long stable discovery
-    /// window before cycling it so a valid advertisement can be resolved.
-    private func armIdleBrowserRefresh() {
-        browserRefreshWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self,
-                  self.started,
-                  !self.lanConnected,
-                  !self.mcConnected,
-                  self.browserRunning,
-                  self.invitedPeers.isEmpty else { return }
-            print("[SidecarBridge/P2P] No nearby peers; refreshing browser")
-            self.browser?.stopBrowsingForPeers()
-            self.browserRunning = false
-            self.browser?.delegate = nil
-            self.browser = nil
-            self.browserRefreshWorkItem = nil
-            self.onConnectionChanged?(false, "Refreshing nearby P2P discovery automatically.")
-            self.scheduleMultipeerFallback()
-        }
-        browserRefreshWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + idleBrowserRefreshInterval, execute: workItem)
-    }
-
     private func restartMultipeerBrowserAfterDisconnect() {
         guard started, !lanConnected else { return }
         if browserRunning {
@@ -203,8 +173,6 @@ final class PadPeerService: NSObject {
 extension PadPeerService: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         guard !invitedPeers.contains(peerID.displayName), session.connectedPeers.isEmpty else { return }
-        browserRefreshWorkItem?.cancel()
-        browserRefreshWorkItem = nil
         print("[SidecarBridge/P2P] Found and inviting \(peerID.displayName)")
         invitedPeers.insert(peerID.displayName)
         browser.invitePeer(peerID, to: session, withContext: nil, timeout: 30)
@@ -218,8 +186,6 @@ extension PadPeerService: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
         DispatchQueue.main.async {
             guard self.browser === browser else { return }
-            self.browserRefreshWorkItem?.cancel()
-            self.browserRefreshWorkItem = nil
             browser.delegate = nil
             self.browser = nil
             self.browserRunning = false
@@ -236,8 +202,6 @@ extension PadPeerService: MCSessionDelegate {
             self.mcConnected = !session.connectedPeers.isEmpty
             self.mcPeerName = self.mcConnected ? (session.connectedPeers.first?.displayName ?? peerID.displayName) : nil
             if state == .connected {
-                self.browserRefreshWorkItem?.cancel()
-                self.browserRefreshWorkItem = nil
                 self.mcConnectionWatchdog?.cancel()
                 self.mcConnectionWatchdog = nil
             } else if state == .connecting {

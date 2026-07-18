@@ -11,6 +11,7 @@ final class MacLANService {
     private let queue = DispatchQueue(label: "SidecarBridge.MacLAN")
     private var listener: NWListener?
     private var listenerRestartWorkItem: DispatchWorkItem?
+    private var handshakeTimeoutWorkItem: DispatchWorkItem?
     private var connection: NWConnection?
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
     private var sessionKey: SymmetricKey?
@@ -35,6 +36,8 @@ final class MacLANService {
         queue.async { [weak self] in
             self?.listenerRestartWorkItem?.cancel()
             self?.listenerRestartWorkItem = nil
+            self?.handshakeTimeoutWorkItem?.cancel()
+            self?.handshakeTimeoutWorkItem = nil
             self?.listener?.cancel()
             self?.listener = nil
             self?.connection?.cancel()
@@ -78,7 +81,10 @@ final class MacLANService {
             let parameters = lowLatencyParameters()
             parameters.allowLocalEndpointReuse = true
             parameters.includePeerToPeer = true
-            let listener = try NWListener(using: parameters)
+            guard let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort) else {
+                throw POSIXError(.EINVAL)
+            }
+            let listener = try NWListener(using: parameters, on: port)
             let name = Host.current().localizedName ?? "SidecarBridge Mac"
             listener.service = NWListener.Service(name: name, type: BridgeConstants.lanServiceType)
             listener.newConnectionHandler = { [weak self] in self?.accept($0) }
@@ -119,8 +125,15 @@ final class MacLANService {
     }
 
     private func accept(_ newConnection: NWConnection) {
-        connection?.cancel()
-        clearConnection(notify: false)
+        // A Mac can advertise the same listener over Ethernet, Wi-Fi, and
+        // AWDL. The iPad may reach two of those addresses at nearly the same
+        // instant. Replacing the first connection here made each duplicate
+        // cancel the handshake that had just won. Keep the first candidate;
+        // the client cancels the redundant probes after one becomes ready.
+        guard connection == nil else {
+            newConnection.cancel()
+            return
+        }
         connection = newConnection
         privateKey = Curve25519.KeyAgreement.PrivateKey()
         newConnection.stateUpdateHandler = { [weak self, weak newConnection] state in
@@ -137,6 +150,7 @@ final class MacLANService {
             }
         }
         newConnection.start(queue: queue)
+        armHandshakeTimeout(for: newConnection)
     }
 
     private func receive(on activeConnection: NWConnection) {
@@ -165,6 +179,8 @@ final class MacLANService {
     private func handle(_ payload: Data, from activeConnection: NWConnection) throws {
         if sessionKey == nil {
             let hello = try LANWire.decodeHandshake(payload, marker: LANWire.clientHello)
+            handshakeTimeoutWorkItem?.cancel()
+            handshakeTimeoutWorkItem = nil
             requestApproval(for: hello.deviceName) { [weak self, weak activeConnection] accepted in
                 guard let self, let activeConnection, self.connection === activeConnection else { return }
                 guard accepted else {
@@ -311,6 +327,8 @@ final class MacLANService {
 
     private func clearConnection(notify shouldNotify: Bool, error: String? = nil) {
         let wasConnected = isConnected
+        handshakeTimeoutWorkItem?.cancel()
+        handshakeTimeoutWorkItem = nil
         connection = nil
         privateKey = nil
         sessionKey = nil
@@ -321,6 +339,20 @@ final class MacLANService {
         pendingVideo.removeAll(keepingCapacity: true)
         isConnected = false
         if shouldNotify && (wasConnected || error != nil) { notify(connected: false, value: error) }
+    }
+
+    private func armHandshakeTimeout(for activeConnection: NWConnection) {
+        handshakeTimeoutWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self, weak activeConnection] in
+            guard let self,
+                  let activeConnection,
+                  self.connection === activeConnection,
+                  self.sessionKey == nil else { return }
+            activeConnection.cancel()
+            self.clearConnection(notify: true, error: "Direct handshake timed out.")
+        }
+        handshakeTimeoutWorkItem = workItem
+        queue.asyncAfter(deadline: .now() + 4, execute: workItem)
     }
 
     private func notify(connected: Bool, value: String?) {

@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Network
 import UIKit
@@ -17,6 +18,10 @@ final class PadLANService {
     private var browserRestartWorkItem: DispatchWorkItem?
     private var idleDiscoveryRefreshWorkItem: DispatchWorkItem?
     private var connectionAttemptWorkItem: DispatchWorkItem?
+    private var subnetProbeStartWorkItem: DispatchWorkItem?
+    private var subnetProbeBatchWorkItems: [DispatchWorkItem] = []
+    private var subnetProbeConnections: [String: NWConnection] = [:]
+    private var subnetProbeGeneration = 0
     private var nextEndpointIndex = 0
     private let idleDiscoveryRefreshInterval: TimeInterval = 30
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
@@ -37,6 +42,7 @@ final class PadLANService {
             self.idleDiscoveryRefreshWorkItem = nil
             self.connectionAttemptWorkItem?.cancel()
             self.connectionAttemptWorkItem = nil
+            self.cancelSubnetProbes()
             self.browser?.cancel()
             self.browser = nil
             self.connection?.cancel()
@@ -55,6 +61,7 @@ final class PadLANService {
             self?.idleDiscoveryRefreshWorkItem = nil
             self?.connectionAttemptWorkItem?.cancel()
             self?.connectionAttemptWorkItem = nil
+            self?.cancelSubnetProbes()
             self?.browser?.cancel()
             self?.browser = nil
             self?.connection?.cancel()
@@ -86,12 +93,14 @@ final class PadLANService {
             print("[SidecarBridge/LAN] Bonjour results: \(results.count)")
             self.endpoints = results.map(\.endpoint)
             if !self.endpoints.isEmpty {
+                self.cancelSubnetProbes()
                 self.idleDiscoveryRefreshWorkItem?.cancel()
                 self.idleDiscoveryRefreshWorkItem = nil
                 self.browserRestartWorkItem?.cancel()
                 self.browserRestartWorkItem = nil
             } else {
                 self.scheduleIdleDiscoveryRefresh()
+                self.scheduleSubnetProbe(after: 1.5)
             }
             self.connectNextAvailable()
         }
@@ -103,7 +112,10 @@ final class PadLANService {
                 self.browserRestartWorkItem?.cancel()
                 self.browserRestartWorkItem = nil
                 self.notifyLocalNetwork(.granted)
-                if self.endpoints.isEmpty { self.scheduleIdleDiscoveryRefresh() }
+                if self.endpoints.isEmpty {
+                    self.scheduleIdleDiscoveryRefresh()
+                    self.scheduleSubnetProbe(after: 1.5)
+                }
             case .failed(let error):
                 let access = self.accessState(for: error)
                 self.notifyLocalNetwork(access)
@@ -258,6 +270,204 @@ final class PadLANService {
         queue.asyncAfter(deadline: .now() + 1) { [weak self] in self?.connectNextAvailable() }
     }
 
+    /// Bonjour can be filtered by some access points even when devices can
+    /// still open normal TCP connections to one another. Probe a fixed,
+    /// encrypted SidecarBridge port on the iPad's local /24 as a bounded
+    /// discovery fallback. The normal Curve25519 handshake and Mac pairing
+    /// approval still run before any app data is accepted.
+    private func scheduleSubnetProbe(after delay: TimeInterval) {
+        guard !isConnected,
+              connection == nil,
+              endpoints.isEmpty,
+              subnetProbeStartWorkItem == nil,
+              subnetProbeConnections.isEmpty else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.subnetProbeStartWorkItem = nil
+            self.startSubnetProbe()
+        }
+        subnetProbeStartWorkItem = workItem
+        queue.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func startSubnetProbe() {
+        guard !isConnected, connection == nil, endpoints.isEmpty else { return }
+        let hosts = Self.privateIPv4ProbeHosts()
+        guard !hosts.isEmpty,
+              let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort) else { return }
+
+        subnetProbeGeneration &+= 1
+        let generation = subnetProbeGeneration
+        notify(
+            connected: false,
+            value: "Bonjour is empty; probing the encrypted same-Wi-Fi fallback."
+        )
+
+        let batchSize = 24
+        for offset in stride(from: 0, to: hosts.count, by: batchSize) {
+            let batch = Array(hosts[offset..<min(offset + batchSize, hosts.count)])
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self,
+                      self.subnetProbeGeneration == generation,
+                      !self.isConnected,
+                      self.connection == nil else { return }
+                for host in batch {
+                    self.probe(host: host, port: port, generation: generation)
+                }
+            }
+            subnetProbeBatchWorkItems.append(workItem)
+            let batchIndex = offset / batchSize
+            queue.asyncAfter(deadline: .now() + (Double(batchIndex) * 0.25), execute: workItem)
+        }
+
+        let batchCount = Int(ceil(Double(hosts.count) / Double(batchSize)))
+        let finish = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.subnetProbeGeneration == generation,
+                  !self.isConnected,
+                  self.connection == nil else { return }
+            self.cancelSubnetProbes()
+            self.notify(
+                connected: false,
+                value: "No direct address answered; Bonjour and nearby P2P remain active."
+            )
+            self.scheduleSubnetProbe(after: 12)
+        }
+        subnetProbeBatchWorkItems.append(finish)
+        queue.asyncAfter(
+            deadline: .now() + (Double(batchCount) * 0.25) + 1.2,
+            execute: finish
+        )
+    }
+
+    private func probe(host: String, port: NWEndpoint.Port, generation: Int) {
+        guard subnetProbeConnections[host] == nil else { return }
+        let probe = NWConnection(host: NWEndpoint.Host(host), port: port, using: lowLatencyParameters())
+        subnetProbeConnections[host] = probe
+        probe.stateUpdateHandler = { [weak self, weak probe] state in
+            guard let self,
+                  let probe,
+                  self.subnetProbeGeneration == generation else { return }
+            switch state {
+            case .ready:
+                self.promoteSubnetProbe(probe, host: host)
+            case .failed, .cancelled:
+                if self.subnetProbeConnections[host] === probe {
+                    self.subnetProbeConnections.removeValue(forKey: host)
+                }
+            default:
+                break
+            }
+        }
+        probe.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 0.9) { [weak self, weak probe] in
+            guard let self,
+                  let probe,
+                  self.subnetProbeGeneration == generation,
+                  self.subnetProbeConnections[host] === probe else { return }
+            self.subnetProbeConnections.removeValue(forKey: host)
+            probe.cancel()
+        }
+    }
+
+    private func promoteSubnetProbe(_ directConnection: NWConnection, host: String) {
+        guard connection == nil, !isConnected else {
+            directConnection.cancel()
+            return
+        }
+
+        cancelSubnetProbes(except: directConnection)
+        print("[SidecarBridge/LAN] Fixed-port fallback found \(host):\(BridgeConstants.directPort)")
+        connection = directConnection
+        privateKey = Curve25519.KeyAgreement.PrivateKey()
+        directConnection.stateUpdateHandler = { [weak self, weak directConnection] state in
+            guard let self,
+                  let directConnection,
+                  self.connection === directConnection else { return }
+            switch state {
+            case .failed(let error):
+                self.clearConnection(notify: true, error: error.localizedDescription)
+                self.scheduleSubnetProbe(after: 1)
+            case .cancelled:
+                self.clearConnection(notify: true)
+                self.scheduleSubnetProbe(after: 1)
+            default:
+                break
+            }
+        }
+        beginHandshake(on: directConnection)
+        receive(on: directConnection)
+    }
+
+    private func cancelSubnetProbes(except retained: NWConnection? = nil) {
+        subnetProbeGeneration &+= 1
+        subnetProbeStartWorkItem?.cancel()
+        subnetProbeStartWorkItem = nil
+        subnetProbeBatchWorkItems.forEach { $0.cancel() }
+        subnetProbeBatchWorkItems.removeAll(keepingCapacity: true)
+        for probe in subnetProbeConnections.values where probe !== retained {
+            probe.cancel()
+        }
+        subnetProbeConnections.removeAll(keepingCapacity: true)
+    }
+
+    private static func privateIPv4ProbeHosts() -> [String] {
+        var pointer: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&pointer) == 0, let first = pointer else { return [] }
+        defer { freeifaddrs(pointer) }
+
+        var localAddresses: [String] = []
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+        while let interface = current {
+            defer { current = interface.pointee.ifa_next }
+            guard let address = interface.pointee.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_INET),
+                  (interface.pointee.ifa_flags & UInt32(IFF_UP)) != 0,
+                  (interface.pointee.ifa_flags & UInt32(IFF_LOOPBACK)) == 0 else { continue }
+
+            let name = String(cString: interface.pointee.ifa_name)
+            guard name.hasPrefix("en") || name.hasPrefix("bridge") else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                address,
+                socklen_t(address.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+            guard result == 0 else { continue }
+            let value = String(cString: host)
+            let parts = value.split(separator: ".").compactMap { Int($0) }
+            guard parts.count == 4,
+                  parts.allSatisfy({ (0...255).contains($0) }),
+                  isPrivateIPv4(parts) else { continue }
+            localAddresses.append(value)
+        }
+
+        var hosts: [String] = []
+        var seen = Set<String>()
+        for localAddress in localAddresses {
+            let parts = localAddress.split(separator: ".")
+            guard parts.count == 4 else { continue }
+            let prefix = parts.prefix(3).joined(separator: ".")
+            for suffix in 1...254 {
+                let candidate = "\(prefix).\(suffix)"
+                guard candidate != localAddress, seen.insert(candidate).inserted else { continue }
+                hosts.append(candidate)
+            }
+        }
+        return hosts
+    }
+
+    private static func isPrivateIPv4(_ parts: [Int]) -> Bool {
+        parts[0] == 10 ||
+            (parts[0] == 172 && (16...31).contains(parts[1])) ||
+            (parts[0] == 192 && parts[1] == 168)
+    }
+
     /// Bonjour can remain in `.ready` with an empty, stale result set after a
     /// Wi-Fi or AWDL transition. Recreating the browser forces mDNS discovery
     /// without requiring the user to close and reopen the iPad app.
@@ -299,6 +509,7 @@ final class PadLANService {
         browserRestartWorkItem?.cancel()
         idleDiscoveryRefreshWorkItem?.cancel()
         idleDiscoveryRefreshWorkItem = nil
+        cancelSubnetProbes()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, !self.isConnected else { return }
             self.browser?.cancel()

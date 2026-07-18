@@ -35,8 +35,10 @@ The latest live verification confirmed:
 - both targets compile;
 - the Mac app is signed and runs from `/Volumes/D/Applications/SidecarBridge.app`;
 - direct Bonjour service publication is visible on active interfaces;
-- the nearby advertisement remains stable beyond the former 12-second reset window;
-- the iPad finds and connects to the Mac on the same Wi-Fi;
+- the nearby advertisement remains continuously active instead of being cycled on an idle timer;
+- when Bonjour results were absent on the iPad, its fixed-port probe reached both Mac interfaces;
+- the Mac preserved the first handshake, rejected the duplicate interface arrival, and established the encrypted stream;
+- the iPad displayed the live Mac screen over the same-Wi-Fi direct path;
 - all 12 protocol tests pass.
 
 ## 3. High-level architecture
@@ -88,6 +90,7 @@ SidecarBridge prioritizes a stable direct local connection while retaining a nea
 The Mac starts `MacLANService`, which:
 
 - creates a Network.framework TCP listener;
+- binds the encrypted direct listener to TCP port `45454`;
 - publishes `_sb-direct._tcp` through Bonjour;
 - includes peer-to-peer interfaces so AWDL can participate;
 - accepts a single active iPad connection;
@@ -100,7 +103,12 @@ The iPad starts `PadLANService`, which:
 - cycles through discovered endpoints;
 - times out stale connection attempts after seven seconds;
 - rebuilds an empty Bonjour browser after a stable 30-second discovery window;
+- probes only port `45454` across the iPad's private local `/24` when Bonjour is ready but empty;
 - reconnects automatically after a connection ends.
+
+The fixed-port probe is a discovery fallback for access points that filter multicast DNS while still allowing ordinary device-to-device TCP. It does not weaken the protocol: the Mac still requires the Curve25519 handshake and remembered or explicit pairing approval before accepting control or video traffic. Probes are batched, time-bounded, restricted to private IPv4 addresses on active Ethernet-style interfaces, and stopped immediately after one path succeeds.
+
+Macs can expose the same listener through Ethernet, Wi-Fi, and AWDL at once. The listener keeps the first active handshake and rejects duplicate arrivals. Replacing the first candidate with a nearly simultaneous second connection previously caused a two-interface cancellation race.
 
 ### 4.2 Nearby fallback
 
@@ -110,10 +118,10 @@ If direct LAN has not connected, the Mac and iPad start Multipeer Connectivity a
 - the iPad browses and invites a discovered Mac;
 - the MCSession requires encryption;
 - a 12-second watchdog resets an actual stalled handshake;
-- an idle Mac advertisement remains stable for 90 seconds before refresh;
-- an idle iPad browser remains stable for 45 seconds before refresh.
+- healthy advertiser and browser objects stay active continuously;
+- a real failure, interface transition, foreground return, or explicit retry rebuilds discovery.
 
-The longer idle windows are important. Earlier builds restarted healthy advertisement and browsing objects every 8–12 seconds. That created repeated service gaps and could make devices on the same Wi-Fi miss each other indefinitely.
+Earlier builds periodically restarted healthy advertisement and browsing objects. That created repeated service gaps and could make devices on the same Wi-Fi miss each other indefinitely. Healthy discovery now remains stable; only a confirmed failure or lifecycle event triggers recovery.
 
 ### 4.3 System Sidecar
 

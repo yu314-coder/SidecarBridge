@@ -49,7 +49,7 @@ The code automatically falls back instead of trying to bypass iPadOS security:
 - `SidecarConnector` uses the private native connection path.
 - `CableDetector` checks the USB registry and prefers wired transport.
 - `ScreenStreamer` uses Apple's public ScreenCaptureKit API.
-- `MacLANService` and `PadLANService` use Bonjour plus Network.framework so the paired apps can connect on the same Wi-Fi even if Apple's Sidecar device list is empty.
+- `MacLANService` and `PadLANService` use Bonjour plus Network.framework so the paired apps can connect on the same Wi-Fi even if Apple's Sidecar device list is empty. If a router filters Bonjour multicast, the iPad automatically performs a bounded private-`/24` probe for SidecarBridge's fixed encrypted port `45454`.
 - The two apps use an encrypted Multipeer Connectivity session and remember the approved iPad name for automatic reconnection.
 
 The fallback is a hardware-encoded H.264 HiDPI stream sized from the iPad's native display width (clamped to 1440–2880 pixels, up to 30 fps) with optional remote keyboard, trackpad, touch, and Apple Pencil input. JPEG packets remain supported for compatibility. It mirrors the main display rather than creating a true extra macOS display. Native Sidecar remains the preferred path for a true virtual Retina display, native Apple Pencil behavior, audio, and extended-desktop support.
