@@ -68,6 +68,15 @@ Remote input requires enabling SidecarBridge in **System Settings → Privacy & 
 
 The iPad viewer recognizes one primary tap as left click, two primary taps as a true macOS double-click, and a secondary trackpad click as right click. The right-edge viewer drawer also exposes clearly labeled **Left**, **Double**, and **Right** buttons that act at the current Mac pointer position.
 
+### Viewer zoom and file transfer
+
+- Swipe with two fingers to scroll the remote Mac.
+- Pinch with two fingers to zoom the viewer from 100% to 400%.
+- Drag with three fingers to pan while zoomed. Pointer and click coordinates are translated through the zoom so they continue to target the visible Mac content.
+- Use the right-edge drawer's zoom buttons to step in, step out, or reset to 100%.
+
+Files can move in either direction over the active encrypted same-Wi-Fi/AWDL or nearby P2P session. Transfers use 128 KB acknowledged chunks, preserve video/input responsiveness, and are limited to 512 MB. Files received by the Mac are saved in `Downloads/SidecarBridge Transfers`; files received by the iPad can be exported with **Share Received**.
+
 ## Research
 
 - [Apple: Use your iPad as a second display for your Mac](https://support.apple.com/guide/mac-help/use-your-ipad-as-a-second-display-mchlf3c6f7ae/mac)
@@ -80,6 +89,7 @@ The iPad viewer recognizes one primary tap as left click, two primary taps as a 
 ## Security notes
 
 - Multipeer Connectivity encryption is required.
+- Direct-LAN file chunks use the same Curve25519/HKDF/ChaChaPoly session as display and input packets.
 - The Mac asks before pairing with a new iPad peer name and automatically accepts that name later.
 - Peer names are convenient identifiers, not strong cryptographic device identities. Use this on a trusted local network.
 - Public-Internet streaming would need authenticated identities, certificate pinning, a relay/VPN path, and stronger session authorization; it is deliberately outside this MVP.

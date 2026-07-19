@@ -6,6 +6,7 @@ final class PadPeerService: NSObject {
     var onFrame: ((Data) -> Void)?
     var onVideoFrame: ((VideoFrame) -> Void)?
     var onCommand: ((ControlMessage) -> Void)?
+    var onFilePacket: ((FileTransferPacket) -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
 
@@ -33,6 +34,7 @@ final class PadPeerService: NSObject {
         lan.onFrame = { [weak self] frame in self?.onFrame?(frame) }
         lan.onVideoFrame = { [weak self] frame in self?.onVideoFrame?(frame) }
         lan.onCommand = { [weak self] command in self?.onCommand?(command) }
+        lan.onFilePacket = { [weak self] transfer in self?.onFilePacket?(transfer) }
         lan.onLocalNetworkStateChanged = { [weak self] state in
             self?.onLocalNetworkStateChanged?(state)
         }
@@ -84,6 +86,15 @@ final class PadPeerService: NSObject {
                   let data = try? PacketCodec.encode(.control(message)) {
             let mode: MCSessionSendDataMode = (input.kind == .pointerMove || input.kind == .scroll) ? .unreliable : .reliable
             try? session.send(data, toPeers: session.connectedPeers, with: mode)
+        }
+    }
+
+    func sendFilePacket(_ transfer: FileTransferPacket) {
+        if lanConnected {
+            lan.sendFilePacket(transfer)
+        } else if !session.connectedPeers.isEmpty,
+                  let data = try? PacketCodec.encode(.file(transfer)) {
+            try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
         }
     }
 
@@ -225,6 +236,8 @@ extension PadPeerService: MCSessionDelegate {
             DispatchQueue.main.async { self.onFrame?(frame) }
         case .video(let frame):
             DispatchQueue.main.async { self.onVideoFrame?(frame) }
+        case .file(let transfer):
+            DispatchQueue.main.async { self.onFilePacket?(transfer) }
         }
     }
 

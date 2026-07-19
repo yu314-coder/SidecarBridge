@@ -19,6 +19,7 @@ final class MacPeerService: NSObject {
     }
 
     var onCommand: ((ControlMessage) -> Void)?
+    var onFilePacket: ((FileTransferPacket) -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
     var onP2PStateChanged: ((MacP2PState) -> Void)?
@@ -48,6 +49,7 @@ final class MacPeerService: NSObject {
         super.init()
         session.delegate = self
         lan.onCommand = { [weak self] command in self?.onCommand?(command) }
+        lan.onFilePacket = { [weak self] transfer in self?.onFilePacket?(transfer) }
         lan.onLocalNetworkStateChanged = { [weak self] state in
             self?.onLocalNetworkStateChanged?(state)
         }
@@ -99,6 +101,15 @@ final class MacPeerService: NSObject {
         } else if !session.connectedPeers.isEmpty,
                   let data = try? PacketCodec.encode(.jpeg(jpeg)) {
             try? session.send(data, toPeers: session.connectedPeers, with: .unreliable)
+        }
+    }
+
+    func sendFilePacket(_ transfer: FileTransferPacket) {
+        if lanConnected {
+            lan.sendFilePacket(transfer)
+        } else if !session.connectedPeers.isEmpty,
+                  let data = try? PacketCodec.encode(.file(transfer)) {
+            try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
         }
     }
 
@@ -286,7 +297,7 @@ extension MacPeerService: MCNearbyServiceAdvertiserDelegate {
             NSApplication.shared.activate(ignoringOtherApps: true)
             let alert = NSAlert()
             alert.messageText = "Pair with \(peerID.displayName)?"
-            alert.informativeText = "Allow this iPad to request Sidecar and receive your Mac screen when Sidecar is unavailable."
+            alert.informativeText = "Allow this iPad to request Sidecar, receive your Mac screen, send input, and exchange files you choose."
             alert.addButton(withTitle: "Pair")
             alert.addButton(withTitle: "Cancel")
             let accepted = alert.runModal() == .alertFirstButtonReturn
@@ -338,8 +349,15 @@ extension MacPeerService: MCSessionDelegate {
     }
 
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        guard case .control(let command) = try? PacketCodec.decode(data) else { return }
-        DispatchQueue.main.async { self.onCommand?(command) }
+        guard let packet = try? PacketCodec.decode(data) else { return }
+        switch packet {
+        case .control(let command):
+            DispatchQueue.main.async { self.onCommand?(command) }
+        case .file(let transfer):
+            DispatchQueue.main.async { self.onFilePacket?(transfer) }
+        case .jpeg, .video:
+            break
+        }
     }
 
     func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) {}

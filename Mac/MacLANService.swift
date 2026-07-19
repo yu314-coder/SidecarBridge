@@ -5,6 +5,7 @@ import Network
 
 final class MacLANService {
     var onCommand: ((ControlMessage) -> Void)?
+    var onFilePacket: ((FileTransferPacket) -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
 
@@ -47,6 +48,11 @@ final class MacLANService {
 
     func send(_ message: ControlMessage) {
         guard let data = try? PacketCodec.encode(.control(message)) else { return }
+        sendPacket(data, isFrame: false)
+    }
+
+    func sendFilePacket(_ transfer: FileTransferPacket) {
+        guard let data = try? PacketCodec.encode(.file(transfer)) else { return }
         sendPacket(data, isFrame: false)
     }
 
@@ -195,8 +201,14 @@ final class MacLANService {
 
         guard let sessionKey else { return }
         let packetData = try LANWire.decrypt(payload, key: sessionKey)
-        guard case .control(let command) = try PacketCodec.decode(packetData) else { return }
-        DispatchQueue.main.async { self.onCommand?(command) }
+        switch try PacketCodec.decode(packetData) {
+        case .control(let command):
+            DispatchQueue.main.async { self.onCommand?(command) }
+        case .file(let transfer):
+            DispatchQueue.main.async { self.onFilePacket?(transfer) }
+        case .jpeg, .video:
+            break
+        }
     }
 
     private func finishHandshake(client: LANHandshake, connection: NWConnection) {
@@ -240,7 +252,7 @@ final class MacLANService {
             NSApplication.shared.activate(ignoringOtherApps: true)
             let alert = NSAlert()
             alert.messageText = "Pair with \(deviceName) over Wi-Fi?"
-            alert.informativeText = "Allow this iPad to receive the Mac screen and send keyboard or trackpad input on this local network."
+            alert.informativeText = "Allow this iPad to receive the Mac screen, send keyboard or trackpad input, and exchange files you choose on this local network."
             alert.addButton(withTitle: "Pair")
             alert.addButton(withTitle: "Cancel")
             let accepted = alert.runModal() == .alertFirstButtonReturn

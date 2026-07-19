@@ -39,7 +39,7 @@ The latest live verification confirmed:
 - when Bonjour results were absent on the iPad, its fixed-port probe reached both Mac interfaces;
 - the Mac preserved the first handshake, rejected the duplicate interface arrival, and established the encrypted stream;
 - the iPad displayed the live Mac screen over the same-Wi-Fi direct path;
-- all 12 protocol tests pass.
+- all 14 protocol and chunked-transfer tests pass.
 
 ## 3. High-level architecture
 
@@ -224,6 +224,13 @@ The Mac converts the normalized coordinates to the captured display and posts CG
 
 A single primary tap is delayed until the double-tap recognizer fails, so a double-click cannot also produce an accidental single click. macOS receives a dedicated double-click event and emits two left-button down/up pairs with click-state values 1 and 2. The viewer drawer provides separate **Left**, **Double**, and **Right** controls at the current pointer position for users who prefer explicit buttons.
 
+The viewer also supports DeskIn-style navigation without changing remote input semantics:
+
+- two-finger translation remains remote macOS scrolling;
+- a two-finger pinch changes local viewer magnification between 100% and 400%;
+- a three-finger drag pans the magnified viewport;
+- the inverse zoom transform is applied before normalizing pointer coordinates, keeping clicks aligned with visible targets.
+
 The iPad UI includes an AnyDesk-style right-edge control drawer for:
 
 - virtual cursor visibility;
@@ -232,8 +239,14 @@ The iPad UI includes an AnyDesk-style right-edge control drawer for:
 - bottom help visibility;
 - Picture in Picture;
 - explicit left-click, double-click, and right-click buttons;
+- zoom step, reset, and current zoom controls;
+- encrypted file-transfer progress and file selection;
 - input permission and latency status;
 - stopping the stream.
+
+### 7.1 File transfer
+
+`FileTransferEngine` sends files in either direction over the active paired transport. Each 128 KB chunk is acknowledged before the next chunk is read, bounding memory and preventing a large transfer queue from starving video or input. Transfers are limited to 512 MB, validate offsets and sizes, sanitize destination names, and use the existing authenticated encryption layer. The Mac saves received files in `Downloads/SidecarBridge Transfers`; the iPad stores them in its Documents container and exposes the system share sheet.
 
 ## 8. Permission model
 
@@ -244,6 +257,7 @@ The iPad UI includes an AnyDesk-style right-edge control drawer for:
 | App Sandbox | Required for Mac App Store validation |
 | Network client | Outgoing local and peer connections |
 | Network server | Incoming Bonjour/TCP connections |
+| Downloads read/write | Save files explicitly received from the paired iPad |
 | USB device access | Detect a trusted wired iPad |
 | Local Network | Bonjour and nearby discovery |
 | Screen Recording | Capture the Mac display |
@@ -294,9 +308,10 @@ On iPadOS:
 | `Pad/PadContentView.swift` | Discovery, streaming, permission, and control UI |
 | `Pad/VideoDisplaySurface.swift` | Hardware video display and Picture in Picture |
 | `Pad/RemoteInputSurface.swift` | Touch, Pencil, pointer, keyboard, and gesture input |
-| `Shared/BridgeProtocol.swift` | Control messages, input events, packets, and video metadata |
+| `Shared/BridgeProtocol.swift` | Control messages, input events, packets, video metadata, and file chunks |
+| `Shared/FileTransferEngine.swift` | Bidirectional chunk flow control, validation, and received-file storage |
 | `Shared/LANProtocol.swift` | Encrypted handshake and TCP framing |
-| `Tests/PacketCodecTests.swift` | Protocol, framing, encryption, permission, drag, and input tests |
+| `Tests/PacketCodecTests.swift` | Protocol, file transfer, framing, encryption, permission, drag, and input tests |
 | `scripts/build.sh` | Reproducible local Mac/iPad builds and Mac tests |
 
 ## 11. Build entirely on `/Volumes/D`

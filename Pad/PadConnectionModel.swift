@@ -33,12 +33,21 @@ final class PadConnectionModel: ObservableObject {
     @Published private(set) var discoveryAttempt = 1
     @Published private(set) var lastDiscoveryIssue: String?
     @Published private(set) var connectedUsingDirectLAN = false
+    @Published var fileTransferSnapshot: FileTransferSnapshot?
+    @Published var lastReceivedFile: URL?
+    @Published var fileTransferError: String?
 
     let videoDisplay = VideoDisplayController()
 
     var localNetworkPermissionNeeded: Bool { localNetworkAccess.needsPermission }
 
     private let peers = PadPeerService()
+    private lazy var fileTransfer = FileTransferEngine {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return documents.appendingPathComponent("SidecarBridge Transfers", isDirectory: true)
+    }
     private var started = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var inputSequence: UInt64 = 0
@@ -117,9 +126,11 @@ final class PadConnectionModel: ObservableObject {
                     }
                 }
                 self.connectionTransport = "Searching direct P2P"
+                self.fileTransfer.cancelAll(reason: "Connection ended.")
             }
         }
         peers.onCommand = { [weak self] command in self?.handle(command) }
+        peers.onFilePacket = { [weak self] transfer in self?.fileTransfer.handle(transfer) }
         peers.onFrame = { [weak self] data in
             guard let self, let image = UIImage(data: data) else { return }
             self.frame = image
@@ -145,6 +156,28 @@ final class PadConnectionModel: ObservableObject {
                 self.retryInitialKeyFrameAfterDisplayAppears(frame)
             }
         }
+        configureFileTransfer()
+    }
+
+    var isFileTransferring: Bool { fileTransfer.isBusy }
+
+    func sendFile(at url: URL) {
+        guard isConnected else {
+            fileTransferError = "Connect the Mac before sending a file."
+            return
+        }
+        fileTransferError = nil
+        fileTransfer.sendFile(at: url)
+    }
+
+    private func configureFileTransfer() {
+        fileTransfer.sendPacket = { [weak self] packet in self?.peers.sendFilePacket(packet) }
+        fileTransfer.onSnapshot = { [weak self] snapshot in self?.fileTransferSnapshot = snapshot }
+        fileTransfer.onReceived = { [weak self] url in
+            self?.lastReceivedFile = url
+            self?.fileTransferError = nil
+        }
+        fileTransfer.onError = { [weak self] message in self?.fileTransferError = message }
     }
 
     func start() {

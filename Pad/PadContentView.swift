@@ -1,9 +1,13 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct PadContentView: View {
     @ObservedObject var model: PadConnectionModel
     @State private var controlDrawerOpen = false
+    @State private var showingFileImporter = false
+    @State private var viewerScale: CGFloat = 1
+    @State private var viewerOffset: CGSize = .zero
     @State private var showVirtualCursor: Bool = {
         UserDefaults.standard.object(forKey: "showVirtualCursor") as? Bool ?? true
     }()
@@ -45,6 +49,21 @@ struct PadContentView: View {
         .onChange(of: showBottomHint) { _, value in
             UserDefaults.standard.set(value, forKey: "showBottomHint")
         }
+        .onChange(of: model.isStreaming) { _, streaming in
+            if !streaming { resetViewerZoom() }
+        }
+        .fileImporter(
+            isPresented: $showingFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first { model.sendFile(at: url) }
+            case .failure(let error):
+                model.fileTransferError = error.localizedDescription
+            }
+        }
     }
 
     private var dashboard: some View {
@@ -60,6 +79,7 @@ struct PadContentView: View {
                     permissionStrip
                     modeChooser
                     actionBar
+                    fileTransferCard
                     requirementStrip
                 }
                 .frame(maxWidth: 920)
@@ -382,36 +402,96 @@ struct PadContentView: View {
         .padding(.top, 2)
     }
 
-    private var streamingView: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            if let frame = model.frame {
-                Image(uiImage: frame)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .ignoresSafeArea()
-            } else {
-                VideoDisplaySurface(controller: model.videoDisplay)
-                    .ignoresSafeArea()
+    private var fileTransferCard: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "arrow.left.arrow.right.square.fill")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(.cyan)
+                .frame(width: 52, height: 52)
+                .background(.cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Encrypted file transfer").font(.headline)
+                if let transfer = model.fileTransferSnapshot {
+                    Text("\(transfer.message): \(transfer.fileName)")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                    ProgressView(value: transfer.progress).tint(.cyan)
+                } else if let error = model.fileTransferError {
+                    Text(error).font(.caption).foregroundStyle(.orange)
+                } else {
+                    Text("Transfer through the same encrypted local connection used by the display.")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.55))
+                }
             }
 
-            RemoteInputSurface(
-                contentAspectRatio: model.streamAspectRatio,
-                onInput: model.sendInput
-            )
-            .ignoresSafeArea()
+            Spacer(minLength: 10)
+            if let received = model.lastReceivedFile {
+                ShareLink(item: received) {
+                    Label("Share Received", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.bordered)
+            }
+            Button {
+                showingFileImporter = true
+            } label: {
+                Label("Send File", systemImage: "paperplane.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.cyan)
+            .disabled(!model.isConnected || model.isFileTransferring)
+        }
+        .padding(17)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.08)))
+    }
 
-            if showVirtualCursor {
-                RemoteCursorOverlay(
-                    normalizedPosition: model.remotePointer,
+    private var streamingView: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                ZStack {
+                    if let frame = model.frame {
+                        Image(uiImage: frame)
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                            .ignoresSafeArea()
+                    } else {
+                        VideoDisplaySurface(controller: model.videoDisplay)
+                            .ignoresSafeArea()
+                    }
+
+                    if showVirtualCursor {
+                        RemoteCursorOverlay(
+                            normalizedPosition: model.remotePointer,
+                            contentAspectRatio: model.streamAspectRatio,
+                            isPressed: model.pointerIsPressed,
+                            showClickIndicator: showClickFeedback && model.showClickIndicator
+                        )
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                    }
+                }
+                .scaleEffect(viewerScale)
+                .offset(viewerOffset)
+                .clipped()
+
+                RemoteInputSurface(
                     contentAspectRatio: model.streamAspectRatio,
-                    isPressed: model.pointerIsPressed,
-                    showClickIndicator: showClickFeedback && model.showClickIndicator
+                    zoomScale: viewerScale,
+                    zoomOffset: viewerOffset,
+                    onInput: model.sendInput,
+                    onZoom: { factor, anchor in
+                        adjustViewerZoom(factor: factor, anchor: anchor, size: geometry.size)
+                    },
+                    onViewportPan: { delta in
+                        panViewer(by: delta, size: geometry.size)
+                    }
                 )
                 .ignoresSafeArea()
-                .allowsHitTesting(false)
-            }
 
             VStack {
                 if showTopStatusBar { streamTopStatusBar }
@@ -420,7 +500,7 @@ struct PadContentView: View {
 
                 if showBottomHint {
                     Text(model.remoteInputAuthorized
-                         ? "Hover • left-click • double-click • right-click • two-finger scroll"
+                         ? "Two-finger scroll • pinch zoom • three-finger pan • left/right click"
                          : "On the Mac: SidecarBridge → Enable Remote Input → allow Accessibility")
                         .font(.caption)
                         .padding(.horizontal, 14)
@@ -431,7 +511,8 @@ struct PadContentView: View {
                 }
             }
 
-            streamingControlDrawer
+                streamingControlDrawer
+            }
         }
     }
 
@@ -489,6 +570,51 @@ struct PadContentView: View {
                     }
 
                     Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label("Display zoom", systemImage: "magnifyingglass")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(Int((viewerScale * 100).rounded()))%")
+                                .font(.caption.monospacedDigit().bold())
+                                .foregroundStyle(.cyan)
+                        }
+                        HStack(spacing: 8) {
+                            Button { zoomViewer(by: 0.8) } label: { Image(systemName: "minus.magnifyingglass") }
+                            Button("Reset") { resetViewerZoom() }
+                                .frame(maxWidth: .infinity)
+                            Button { zoomViewer(by: 1.25) } label: { Image(systemName: "plus.magnifyingglass") }
+                        }
+                        .buttonStyle(.bordered)
+                        Text("Pinch with two fingers to zoom. Drag with three fingers to pan; two-finger swipes still scroll the Mac.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("File transfer", systemImage: "arrow.left.arrow.right.square")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        if let transfer = model.fileTransferSnapshot {
+                            Text("\(transfer.message): \(transfer.fileName)")
+                                .font(.caption2)
+                                .lineLimit(1)
+                            ProgressView(value: transfer.progress).tint(.cyan)
+                        }
+                        Button {
+                            showingFileImporter = true
+                        } label: {
+                            Label("Send File to Mac", systemImage: "paperplane.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.cyan)
+                        .disabled(model.isFileTransferring)
+                    }
 
                     Button {
                         model.togglePictureInPicture()
@@ -570,7 +696,7 @@ struct PadContentView: View {
                 .overlay(alignment: .leading) { Divider() }
             }
         }
-        .frame(height: 570)
+        .frame(height: 760)
         .clipShape(UnevenRoundedRectangle(
             topLeadingRadius: 18,
             bottomLeadingRadius: 18
@@ -615,6 +741,61 @@ struct PadContentView: View {
         guard model.remoteInputAuthorized, model.lastInputAccepted else { return "MAC PERMISSION REQUIRED" }
         guard let latency = model.controlLatencyMS else { return "TRACKPAD READY" }
         return "INPUT \(latency) MS"
+    }
+
+    private func adjustViewerZoom(factor: CGFloat, anchor: CGPoint, size: CGSize) {
+        let oldScale = viewerScale
+        let newScale = min(max(oldScale * factor, 1), 4)
+        guard abs(newScale - oldScale) > 0.001 else { return }
+        if newScale <= 1.001 {
+            viewerScale = 1
+            viewerOffset = .zero
+            return
+        }
+
+        let anchorPoint = CGPoint(x: anchor.x * size.width, y: anchor.y * size.height)
+        let centered = CGPoint(x: anchorPoint.x - size.width / 2, y: anchorPoint.y - size.height / 2)
+        let ratio = newScale / oldScale
+        let proposed = CGSize(
+            width: centered.x - ratio * (centered.x - viewerOffset.width),
+            height: centered.y - ratio * (centered.y - viewerOffset.height)
+        )
+        viewerScale = newScale
+        viewerOffset = clampedViewerOffset(proposed, scale: newScale, size: size)
+    }
+
+    private func panViewer(by delta: CGSize, size: CGSize) {
+        guard viewerScale > 1 else { return }
+        viewerOffset = clampedViewerOffset(
+            CGSize(width: viewerOffset.width + delta.width, height: viewerOffset.height + delta.height),
+            scale: viewerScale,
+            size: size
+        )
+    }
+
+    private func zoomViewer(by factor: CGFloat) {
+        let newScale = min(max(viewerScale * factor, 1), 4)
+        if newScale <= 1.001 {
+            resetViewerZoom()
+        } else {
+            let ratio = newScale / viewerScale
+            viewerScale = newScale
+            viewerOffset = CGSize(width: viewerOffset.width * ratio, height: viewerOffset.height * ratio)
+        }
+    }
+
+    private func resetViewerZoom() {
+        viewerScale = 1
+        viewerOffset = .zero
+    }
+
+    private func clampedViewerOffset(_ offset: CGSize, scale: CGFloat, size: CGSize) -> CGSize {
+        let maximumX = max(0, size.width * (scale - 1) / 2)
+        let maximumY = max(0, size.height * (scale - 1) / 2)
+        return CGSize(
+            width: min(max(offset.width, -maximumX), maximumX),
+            height: min(max(offset.height, -maximumY), maximumY)
+        )
     }
 
     private var streamQualityText: String {

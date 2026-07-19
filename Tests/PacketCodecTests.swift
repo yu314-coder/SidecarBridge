@@ -26,6 +26,47 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(try PacketCodec.decode(PacketCodec.encode(.video(frame))), .video(frame))
     }
 
+    func testFileTransferPacketRoundTrip() throws {
+        let transfer = FileTransferPacket(
+            kind: .chunk,
+            transferID: UUID(),
+            name: "notes.txt",
+            totalSize: 4,
+            offset: 0,
+            payload: Data([1, 2, 3, 4]),
+            message: nil
+        )
+        XCTAssertEqual(try PacketCodec.decode(PacketCodec.encode(.file(transfer))), .file(transfer))
+    }
+
+    @MainActor
+    func testChunkedFileTransferRoundTrip() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/TestTransfers/\(UUID().uuidString)", isDirectory: true)
+        let senderDirectory = root.appendingPathComponent("sender", isDirectory: true)
+        let receiverDirectory = root.appendingPathComponent("receiver", isDirectory: true)
+        try FileManager.default.createDirectory(at: senderDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let original = Data((0..<(FileTransferEngine.chunkSize * 2 + 17)).map { UInt8($0 % 251) })
+        let source = senderDirectory.appendingPathComponent("sample.bin")
+        try original.write(to: source)
+
+        let sender = FileTransferEngine { senderDirectory }
+        let receiver = FileTransferEngine { receiverDirectory }
+        sender.sendPacket = { receiver.handle($0) }
+        receiver.sendPacket = { sender.handle($0) }
+
+        var receivedURL: URL?
+        receiver.onReceived = { receivedURL = $0 }
+        sender.sendFile(at: source)
+
+        let destination = try XCTUnwrap(receivedURL)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+        XCTAssertFalse(sender.isBusy)
+        XCTAssertFalse(receiver.isBusy)
+    }
+
     func testEmptyPacketRejected() {
         XCTAssertThrowsError(try PacketCodec.decode(Data()))
     }

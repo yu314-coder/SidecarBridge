@@ -3,28 +3,58 @@ import UIKit
 
 struct RemoteInputSurface: UIViewRepresentable {
     let contentAspectRatio: CGFloat
+    let zoomScale: CGFloat
+    let zoomOffset: CGSize
     let onInput: (RemoteInputEvent) -> Void
+    let onZoom: (CGFloat, CGPoint) -> Void
+    let onViewportPan: (CGSize) -> Void
 
     func makeUIView(context: Context) -> InputView {
-        InputView(contentAspectRatio: contentAspectRatio, onInput: onInput)
+        InputView(
+            contentAspectRatio: contentAspectRatio,
+            zoomScale: zoomScale,
+            zoomOffset: zoomOffset,
+            onInput: onInput,
+            onZoom: onZoom,
+            onViewportPan: onViewportPan
+        )
     }
 
     func updateUIView(_ uiView: InputView, context: Context) {
         uiView.contentAspectRatio = contentAspectRatio
+        uiView.zoomScale = zoomScale
+        uiView.zoomOffset = zoomOffset
         uiView.onInput = onInput
+        uiView.onZoom = onZoom
+        uiView.onViewportPan = onViewportPan
     }
 }
 
 final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     var onInput: (RemoteInputEvent) -> Void
+    var onZoom: (CGFloat, CGPoint) -> Void
+    var onViewportPan: (CGSize) -> Void
     var contentAspectRatio: CGFloat
+    var zoomScale: CGFloat
+    var zoomOffset: CGSize
     var hasText: Bool { true }
     private var lastPointerTime: TimeInterval = 0
     private var isPrimaryDragging = false
 
-    init(contentAspectRatio: CGFloat, onInput: @escaping (RemoteInputEvent) -> Void) {
+    init(
+        contentAspectRatio: CGFloat,
+        zoomScale: CGFloat,
+        zoomOffset: CGSize,
+        onInput: @escaping (RemoteInputEvent) -> Void,
+        onZoom: @escaping (CGFloat, CGPoint) -> Void,
+        onViewportPan: @escaping (CGSize) -> Void
+    ) {
         self.contentAspectRatio = contentAspectRatio
+        self.zoomScale = zoomScale
+        self.zoomOffset = zoomOffset
         self.onInput = onInput
+        self.onZoom = onZoom
+        self.onViewportPan = onViewportPan
         super.init(frame: .zero)
         backgroundColor = .clear
         isMultipleTouchEnabled = true
@@ -146,6 +176,11 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         scroll.delegate = self
         addGestureRecognizer(scroll)
 
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        pinch.cancelsTouchesInView = false
+        pinch.delegate = self
+        addGestureRecognizer(pinch)
+
         let touchScroll = UIPanGestureRecognizer(target: self, action: #selector(handleScroll(_:)))
         touchScroll.minimumNumberOfTouches = 2
         touchScroll.maximumNumberOfTouches = 2
@@ -153,6 +188,14 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         touchScroll.cancelsTouchesInView = false
         touchScroll.delegate = self
         addGestureRecognizer(touchScroll)
+
+        let viewportPan = UIPanGestureRecognizer(target: self, action: #selector(handleViewportPan(_:)))
+        viewportPan.minimumNumberOfTouches = 3
+        viewportPan.maximumNumberOfTouches = 3
+        viewportPan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        viewportPan.cancelsTouchesInView = false
+        viewportPan.delegate = self
+        addGestureRecognizer(viewportPan)
 
         let touchDrag = UIPanGestureRecognizer(target: self, action: #selector(handlePrimaryDrag(_:)))
         touchDrag.minimumNumberOfTouches = 1
@@ -231,15 +274,44 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         onInput(.scroll(x: delta.x, y: delta.y))
     }
 
+    @objc private func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+        guard recognizer.state == .began || recognizer.state == .changed else { return }
+        let factor = recognizer.scale
+        recognizer.scale = 1
+        guard factor.isFinite, factor > 0 else { return }
+        let point = recognizer.location(in: self)
+        onZoom(factor, CGPoint(
+            x: point.x / max(bounds.width, 1),
+            y: point.y / max(bounds.height, 1)
+        ))
+    }
+
+    @objc private func handleViewportPan(_ recognizer: UIPanGestureRecognizer) {
+        guard recognizer.state == .began || recognizer.state == .changed else { return }
+        let delta = recognizer.translation(in: self)
+        recognizer.setTranslation(.zero, in: self)
+        guard delta != .zero else { return }
+        onViewportPan(CGSize(width: delta.x, height: delta.y))
+    }
+
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        gestureRecognizer is UIPanGestureRecognizer || otherGestureRecognizer is UIPanGestureRecognizer
+        if gestureRecognizer is UIPinchGestureRecognizer || otherGestureRecognizer is UIPinchGestureRecognizer {
+            return false
+        }
+        return gestureRecognizer is UIPanGestureRecognizer || otherGestureRecognizer is UIPanGestureRecognizer
     }
 
     private func normalizedPoint(_ point: CGPoint) -> CGPoint? {
         guard bounds.width > 0, bounds.height > 0, contentAspectRatio > 0 else { return nil }
+        let scale = max(zoomScale, 1)
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let point = CGPoint(
+            x: center.x + (point.x - center.x - zoomOffset.width) / scale,
+            y: center.y + (point.y - center.y - zoomOffset.height) / scale
+        )
         let viewAspect = bounds.width / bounds.height
         let contentRect: CGRect
         if viewAspect > contentAspectRatio {

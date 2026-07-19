@@ -8,6 +8,7 @@ final class PadLANService {
     var onFrame: ((Data) -> Void)?
     var onVideoFrame: ((VideoFrame) -> Void)?
     var onCommand: ((ControlMessage) -> Void)?
+    var onFilePacket: ((FileTransferPacket) -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
 
@@ -77,6 +78,11 @@ final class PadLANService {
     func sendInput(_ input: RemoteInputEvent) {
         guard let message = ControlMessage.input(input),
               let data = try? PacketCodec.encode(.control(message)) else { return }
+        sendPacket(data)
+    }
+
+    func sendFilePacket(_ transfer: FileTransferPacket) {
+        guard let data = try? PacketCodec.encode(.file(transfer)) else { return }
         sendPacket(data)
     }
 
@@ -247,6 +253,8 @@ final class PadLANService {
             DispatchQueue.main.async { self.onFrame?(frame) }
         case .video(let frame):
             DispatchQueue.main.async { self.onVideoFrame?(frame) }
+        case .file(let transfer):
+            DispatchQueue.main.async { self.onFilePacket?(transfer) }
         }
     }
 

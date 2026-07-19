@@ -15,6 +15,7 @@
 		34BD90A03AAF1334454D9850 /* PadContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B074CA5AC5C67EC30F9A42EA /* PadContentView.swift */; };
 		35BF87461BAD13C706604E5A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 722C341A866CEB112E6AE410 /* Assets.xcassets */; };
 		3B3347A2045CD1A250163F3B /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C128FA50735B8EF865A75273 /* BridgeProtocol.swift */; };
+		4145B17A8C27484CAE6FA820 /* FileTransferEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */; };
 		4179193B540F02A36A7DF0DF /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
 		44778D308D034459FF6C8C19 /* PadLANService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D9BF92830E37416BC52E328 /* PadLANService.swift */; };
 		4682C7105E7B6FAA8AA0113E /* PadConnectionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5E700FBB5674124211D2524 /* PadConnectionModel.swift */; };
@@ -38,7 +39,9 @@
 		B83F67487E628FE3195562CA /* MacLANService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74E92BAEB461529898894895 /* MacLANService.swift */; };
 		BB94E33810371F48190B51FF /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */; };
 		BBA7648FF13001D11AAE23D6 /* CableDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FD847309C3C8668764BE555 /* CableDetector.swift */; };
+		C5741A0FA3C65F02D5D6BB85 /* FileTransferEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */; };
 		CBA6AC2A4CAF9A726B4852BD /* ScreenCaptureKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C215B5E7806DF0EE7746B9C6 /* ScreenCaptureKit.framework */; };
+		D28AEA0D9B85D39401C867CB /* FileTransferEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */; };
 		D2ABD59672AAD0121B799154 /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
 		DBFF6D618AFB812BC3F5EDC0 /* RemoteInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD3847ACDC7DFFDCCBAC490 /* RemoteInputController.swift */; };
 		DDD681F579FE17C68A57FF20 /* RemoteInputSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */; };
@@ -72,6 +75,7 @@
 		9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MultipeerConnectivity.framework; path = System/Library/Frameworks/MultipeerConnectivity.framework; sourceTree = SDKROOT; };
 		93CB5164889E245469D18E50 /* SidecarBridgeMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SidecarBridgeMac.entitlements; sourceTree = "<group>"; };
 		A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacConnectionModel.swift; sourceTree = "<group>"; };
+		A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferEngine.swift; sourceTree = "<group>"; };
 		ADB37E6EB752E6F75FD00F27 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenStreamer.swift; sourceTree = "<group>"; };
 		B074CA5AC5C67EC30F9A42EA /* PadContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadContentView.swift; sourceTree = "<group>"; };
@@ -146,6 +150,7 @@
 			isa = PBXGroup;
 			children = (
 				C128FA50735B8EF865A75273 /* BridgeProtocol.swift */,
+				A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */,
 				CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */,
 			);
 			path = Shared;
@@ -332,6 +337,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A461F9BE2A202A46BD1AB1E1 /* BridgeProtocol.swift in Sources */,
+				C5741A0FA3C65F02D5D6BB85 /* FileTransferEngine.swift in Sources */,
 				D2ABD59672AAD0121B799154 /* LANProtocol.swift in Sources */,
 				0A6EC89FFFAC699185EA8EB6 /* PacketCodecTests.swift in Sources */,
 			);
@@ -343,6 +349,7 @@
 			files = (
 				3B3347A2045CD1A250163F3B /* BridgeProtocol.swift in Sources */,
 				BBA7648FF13001D11AAE23D6 /* CableDetector.swift in Sources */,
+				4145B17A8C27484CAE6FA820 /* FileTransferEngine.swift in Sources */,
 				8BF65511D829825BA5768DE3 /* H264Encoder.swift in Sources */,
 				28409B33478CD0C30D1765CC /* LANProtocol.swift in Sources */,
 				6611C2566550F8C25E509AC5 /* MacConnectionModel.swift in Sources */,
@@ -361,6 +368,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4C8E982163B11BFE3240B06C /* BridgeProtocol.swift in Sources */,
+				D28AEA0D9B85D39401C867CB /* FileTransferEngine.swift in Sources */,
 				4179193B540F02A36A7DF0DF /* LANProtocol.swift in Sources */,
 				4682C7105E7B6FAA8AA0113E /* PadConnectionModel.swift in Sources */,
 				34BD90A03AAF1334454D9850 /* PadContentView.swift in Sources */,

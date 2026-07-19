@@ -25,6 +25,7 @@ struct MacContentView: View {
                     header
                     statusCard
                     modeCards
+                    fileTransferCard
                     permissionCard
                     startupCard
                     footer
@@ -194,6 +195,48 @@ struct MacContentView: View {
                 }
             }
         }
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+    }
+
+    private var fileTransferCard: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "arrow.left.arrow.right.square.fill")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(.cyan)
+                .frame(width: 52, height: 52)
+                .background(.cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Encrypted file transfer").font(.headline)
+                if let transfer = model.fileTransferSnapshot {
+                    Text("\(transfer.message): \(transfer.fileName)")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                    ProgressView(value: transfer.progress).tint(.cyan)
+                } else if let error = model.fileTransferError {
+                    Text(error).font(.caption).foregroundStyle(.orange)
+                } else {
+                    Text("Send to iPad, or receive into Downloads/SidecarBridge Transfers.")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+            }
+
+            Spacer(minLength: 12)
+            if model.lastReceivedFile != nil {
+                Button("Show Received") { model.revealLastReceivedFile() }
+            }
+            Button {
+                model.chooseFileToSend()
+            } label: {
+                Label("Send File", systemImage: "paperplane.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.cyan)
+            .disabled(!model.hasPadPeer || model.isFileTransferring)
+        }
+        .padding(17)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
     }

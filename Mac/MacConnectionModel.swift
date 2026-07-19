@@ -19,6 +19,9 @@ final class MacConnectionModel: ObservableObject {
     @Published var localNetworkAccess: LocalNetworkAccessState = .checking
     @Published var connectionTransport = "Direct P2P preferred"
     @Published var p2pState: MacP2PState = .starting
+    @Published var fileTransferSnapshot: FileTransferSnapshot?
+    @Published var lastReceivedFile: URL?
+    @Published var fileTransferError: String?
 
     var localNetworkPermissionNeeded: Bool { localNetworkAccess.needsPermission }
 
@@ -26,6 +29,12 @@ final class MacConnectionModel: ObservableObject {
     private let peers = MacPeerService()
     private let streamer = ScreenStreamer()
     private let remoteInput = RemoteInputController()
+    private lazy var fileTransfer = FileTransferEngine {
+        guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return downloads.appendingPathComponent("SidecarBridge Transfers", isDirectory: true)
+    }
     private var started = false
     private var isStartingFallback = false
     private var attemptID = UUID()
@@ -75,6 +84,7 @@ final class MacConnectionModel: ObservableObject {
                     self.detail = peerOrError
                 }
                 self.connectionTransport = "Searching direct P2P"
+                self.fileTransfer.cancelAll(reason: "Connection ended.")
                 self.remoteInput.releaseButtons()
                 self.stopFallback()
             } else {
@@ -82,11 +92,47 @@ final class MacConnectionModel: ObservableObject {
                 self.status = "Waiting for iPad"
                 self.detail = "Open SidecarBridge on the iPad."
                 self.remoteInput.releaseButtons()
+                self.fileTransfer.cancelAll(reason: "Connection ended.")
                 self.stopFallback()
             }
         }
         peers.onCommand = { [weak self] command in self?.handle(command) }
+        peers.onFilePacket = { [weak self] transfer in self?.fileTransfer.handle(transfer) }
         streamer.onFrame = { [weak peers] frame in peers?.sendVideoFrame(frame) }
+        configureFileTransfer()
+    }
+
+    var isFileTransferring: Bool { fileTransfer.isBusy }
+
+    func chooseFileToSend() {
+        guard hasPadPeer else {
+            fileTransferError = "Connect the iPad before sending a file."
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Send a File to iPad"
+        panel.prompt = "Send"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        fileTransferError = nil
+        fileTransfer.sendFile(at: url)
+    }
+
+    func revealLastReceivedFile() {
+        guard let lastReceivedFile else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([lastReceivedFile])
+    }
+
+    private func configureFileTransfer() {
+        fileTransfer.sendPacket = { [weak self] packet in self?.peers.sendFilePacket(packet) }
+        fileTransfer.onSnapshot = { [weak self] snapshot in self?.fileTransferSnapshot = snapshot }
+        fileTransfer.onReceived = { [weak self] url in
+            self?.lastReceivedFile = url
+            self?.fileTransferError = nil
+        }
+        fileTransfer.onError = { [weak self] message in self?.fileTransferError = message }
     }
 
     func start() {
