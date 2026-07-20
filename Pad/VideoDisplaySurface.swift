@@ -6,7 +6,8 @@ import UIKit
 
 @MainActor
 final class VideoDisplayController: NSObject {
-    var onPictureInPictureStateChanged: ((Bool, Bool) -> Void)?
+    var onPictureInPictureStateChanged: ((Bool, Bool, Bool) -> Void)?
+    var onPictureInPictureError: ((String) -> Void)?
 
     private weak var view: VideoDisplayView?
     private weak var pictureInPictureDisplayLayer: AVSampleBufferDisplayLayer?
@@ -15,9 +16,15 @@ final class VideoDisplayController: NSObject {
     private var needsKeyFrame = true
     private var pictureInPictureController: AVPictureInPictureController?
     private var pictureInPicturePossibleObservation: NSKeyValueObservation?
+    private var automaticBackgroundStartEnabled = true
+    private var isStartingPictureInPicture = false
 
     var isPictureInPictureActive: Bool {
         pictureInPictureController?.isPictureInPictureActive == true
+    }
+
+    var isPictureInPicturePossible: Bool {
+        pictureInPictureController?.isPictureInPicturePossible == true
     }
 
     func attach(_ view: VideoDisplayView) {
@@ -57,27 +64,50 @@ final class VideoDisplayController: NSObject {
         view?.flush()
     }
 
-    func togglePictureInPicture() {
-        guard let pictureInPictureController else { return }
-        if pictureInPictureController.isPictureInPictureActive {
-            pictureInPictureController.stopPictureInPicture()
-            return
+    @discardableResult
+    func startPictureInPicture() -> Bool {
+        guard let pictureInPictureController else {
+            onPictureInPictureError?("Picture in Picture is not available on this iPad.")
+            return false
         }
+        if pictureInPictureController.isPictureInPictureActive { return true }
+        if isStartingPictureInPicture { return true }
         guard pictureInPictureController.isPictureInPicturePossible else {
             publishPictureInPictureState()
+            onPictureInPictureError?("Picture in Picture is not ready yet. Wait for the live video, then try again.")
+            return false
+        }
+        do {
+            try activateBackgroundAudioSession()
+            pictureInPictureController.invalidatePlaybackState()
+            isStartingPictureInPicture = true
+            pictureInPictureController.startPictureInPicture()
+            return true
+        } catch {
+            onPictureInPictureError?("Could not prepare background playback: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func togglePictureInPicture() {
+        guard let pictureInPictureController else {
+            onPictureInPictureError?("Picture in Picture is not available on this iPad.")
             return
         }
-        try? AVAudioSession.sharedInstance().setCategory(
-            .playback,
-            mode: .moviePlayback,
-            options: [.mixWithOthers]
-        )
-        try? AVAudioSession.sharedInstance().setActive(true)
-        pictureInPictureController.startPictureInPicture()
+        if pictureInPictureController.isPictureInPictureActive {
+            pictureInPictureController.stopPictureInPicture()
+        } else {
+            startPictureInPicture()
+        }
     }
 
     func stopPictureInPicture() {
         pictureInPictureController?.stopPictureInPicture()
+    }
+
+    func setAutomaticBackgroundStart(_ enabled: Bool) {
+        automaticBackgroundStartEnabled = enabled
+        pictureInPictureController?.canStartPictureInPictureAutomaticallyFromInline = enabled
     }
 
     private func configurePictureInPicture(for displayLayer: AVSampleBufferDisplayLayer) {
@@ -86,19 +116,21 @@ final class VideoDisplayController: NSObject {
             return
         }
         guard AVPictureInPictureController.isPictureInPictureSupported() else {
-            onPictureInPictureStateChanged?(false, false)
+            onPictureInPictureStateChanged?(false, false, false)
             return
         }
 
         pictureInPicturePossibleObservation = nil
         pictureInPictureController?.stopPictureInPicture()
+        isStartingPictureInPicture = false
         let contentSource = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: displayLayer,
             playbackDelegate: self
         )
         let controller = AVPictureInPictureController(contentSource: contentSource)
         controller.delegate = self
-        controller.canStartPictureInPictureAutomaticallyFromInline = false
+        controller.requiresLinearPlayback = true
+        controller.canStartPictureInPictureAutomaticallyFromInline = automaticBackgroundStartEnabled
         pictureInPictureDisplayLayer = displayLayer
         pictureInPictureController = controller
         pictureInPicturePossibleObservation = controller.observe(
@@ -114,8 +146,15 @@ final class VideoDisplayController: NSObject {
     private func publishPictureInPictureState() {
         onPictureInPictureStateChanged?(
             pictureInPictureController?.isPictureInPicturePossible == true,
-            pictureInPictureController?.isPictureInPictureActive == true
+            pictureInPictureController?.isPictureInPictureActive == true,
+            pictureInPictureController?.isPictureInPictureSuspended == true
         )
+    }
+
+    private func activateBackgroundAudioSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
+        try session.setActive(true)
     }
 
     private func makeFormatDescription(parameterSets: [Data]) -> CMVideoFormatDescription? {
@@ -256,7 +295,7 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureSampleBuffer
     func pictureInPictureControllerShouldProhibitBackgroundAudioPlayback(
         _ pictureInPictureController: AVPictureInPictureController
     ) -> Bool {
-        true
+        false
     }
 }
 
@@ -264,18 +303,27 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
     func pictureInPictureControllerWillStartPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        do {
+            try activateBackgroundAudioSession()
+        } catch {
+            publishPictureInPictureState()
+            onPictureInPictureError?("Background audio session failed: \(error.localizedDescription)")
+            return
+        }
         publishPictureInPictureState()
     }
 
     func pictureInPictureControllerDidStartPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        isStartingPictureInPicture = false
         publishPictureInPictureState()
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        isStartingPictureInPicture = false
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         publishPictureInPictureState()
     }
@@ -284,8 +332,10 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
         _ pictureInPictureController: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
+        isStartingPictureInPicture = false
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         publishPictureInPictureState()
+        onPictureInPictureError?("Picture in Picture failed: \(error.localizedDescription)")
     }
 
     func pictureInPictureController(

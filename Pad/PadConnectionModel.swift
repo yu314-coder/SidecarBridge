@@ -29,6 +29,17 @@ final class PadConnectionModel: ObservableObject {
     @Published var streamFPS = 0
     @Published var isPictureInPicturePossible = false
     @Published var isPictureInPictureActive = false
+    @Published var isPictureInPictureSuspended = false
+    @Published var keepRunningInBackground: Bool = {
+        let defaults = UserDefaults.standard
+        let key = "keepRunningInBackground"
+        guard defaults.object(forKey: key) != nil else {
+            defaults.set(true, forKey: key)
+            return true
+        }
+        return defaults.bool(forKey: key)
+    }()
+    @Published var backgroundViewerDetail = "Automatic background viewer is ready."
     @Published private(set) var discoveryElapsedSeconds = 0
     @Published private(set) var discoveryAttempt = 1
     @Published private(set) var lastDiscoveryIssue: String?
@@ -50,6 +61,8 @@ final class PadConnectionModel: ObservableObject {
     }
     private var started = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var backgroundRequested = false
+    private var backgroundActivationTask: Task<Void, Never>?
     private var inputSequence: UInt64 = 0
     private var inputSentAt: [UInt64: TimeInterval] = [:]
     private var clickFeedbackTask: Task<Void, Never>?
@@ -68,10 +81,29 @@ final class PadConnectionModel: ObservableObject {
     }
 
     init() {
-        videoDisplay.onPictureInPictureStateChanged = { [weak self] possible, active in
-            self?.isPictureInPicturePossible = possible
-            self?.isPictureInPictureActive = active
+        videoDisplay.onPictureInPictureStateChanged = { [weak self] possible, active, suspended in
+            guard let self else { return }
+            self.isPictureInPicturePossible = possible
+            self.isPictureInPictureActive = active
+            self.isPictureInPictureSuspended = suspended
+            if active {
+                self.backgroundViewerDetail = "Active — the stream can continue behind other apps."
+                self.endBackgroundTask()
+            } else if suspended {
+                self.backgroundViewerDetail = "Picture in Picture is temporarily suspended by iPadOS."
+            } else if possible {
+                self.backgroundViewerDetail = self.keepRunningInBackground
+                    ? "Ready — switching apps starts Picture in Picture automatically."
+                    : "Ready for manual Picture in Picture."
+            }
+            if possible, self.backgroundRequested, !active {
+                _ = self.videoDisplay.startPictureInPicture()
+            }
         }
+        videoDisplay.onPictureInPictureError = { [weak self] message in
+            self?.backgroundViewerDetail = message
+        }
+        videoDisplay.setAutomaticBackgroundStart(keepRunningInBackground)
 
         peers.onLocalNetworkStateChanged = { [weak self] state in
             guard let self else { return }
@@ -198,14 +230,28 @@ final class PadConnectionModel: ObservableObject {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            backgroundRequested = false
+            backgroundActivationTask?.cancel()
+            backgroundActivationTask = nil
+            if isPictureInPictureActive { videoDisplay.stopPictureInPicture() }
             endBackgroundTask()
             if started && !isConnected { retry() }
         case .background:
+            guard isStreaming, keepRunningInBackground else { return }
+            backgroundRequested = true
             if !isPictureInPictureActive {
                 beginBackgroundGracePeriod()
+                backgroundViewerDetail = "Starting background viewer…"
+                _ = videoDisplay.startPictureInPicture()
+                verifyBackgroundActivation()
+            } else {
+                endBackgroundTask()
             }
         case .inactive:
-            break
+            guard isStreaming, keepRunningInBackground else { return }
+            backgroundRequested = true
+            beginBackgroundGracePeriod()
+            backgroundViewerDetail = "Preparing Picture in Picture…"
         @unknown default:
             break
         }
@@ -245,6 +291,8 @@ final class PadConnectionModel: ObservableObject {
         peers.send(ControlMessage(.stopFallback))
         frame = nil
         videoDisplay.stopPictureInPicture()
+        backgroundRequested = false
+        backgroundActivationTask?.cancel()
         videoDisplay.flush()
         isStreaming = false
         remotePointer = nil
@@ -257,7 +305,23 @@ final class PadConnectionModel: ObservableObject {
 
     func togglePictureInPicture() {
         guard isStreaming else { return }
+        backgroundRequested = !isPictureInPictureActive
         videoDisplay.togglePictureInPicture()
+    }
+
+    func setKeepRunningInBackground(_ enabled: Bool) {
+        keepRunningInBackground = enabled
+        UserDefaults.standard.set(enabled, forKey: "keepRunningInBackground")
+        videoDisplay.setAutomaticBackgroundStart(enabled)
+        if enabled {
+            backgroundViewerDetail = isPictureInPicturePossible
+                ? "Ready — switching apps starts Picture in Picture automatically."
+                : "Waiting for the live video before background viewing is available."
+        } else {
+            backgroundRequested = false
+            backgroundViewerDetail = "Automatic background viewing is off."
+            if isPictureInPictureActive { videoDisplay.stopPictureInPicture() }
+        }
     }
 
     func sendInput(_ input: RemoteInputEvent) {
@@ -384,6 +448,19 @@ final class PadConnectionModel: ObservableObject {
         guard backgroundTask == .invalid else { return }
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SidecarBridge connection") { [weak self] in
             Task { @MainActor in self?.endBackgroundTask() }
+        }
+    }
+
+    private func verifyBackgroundActivation() {
+        backgroundActivationTask?.cancel()
+        backgroundActivationTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self, self.backgroundRequested else { return }
+            if !self.isPictureInPictureActive {
+                self.backgroundViewerDetail = self.isPictureInPicturePossible
+                    ? "Background viewer did not start. Return to SidecarBridge and tap Start PiP once."
+                    : "Picture in Picture is unavailable; iPadOS will suspend the stream after its short grace period."
+            }
         }
     }
 

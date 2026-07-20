@@ -282,10 +282,11 @@ On macOS, closing the main window does not terminate SidecarBridge. It remains a
 
 On iPadOS:
 
-- the app takes a short system background-task grace period;
-- Picture in Picture can keep the display experience active when supported;
+- automatic Picture in Picture is enabled by default for the live viewer and starts when the user switches apps;
+- the app activates its playback audio session, invalidates PiP playback state, and reports ready, starting, active, suspended, and failed states in the control drawer;
+- a short system background task protects the connection while PiP is starting;
 - discovery restarts when the app becomes active;
-- a normal iPad app cannot run an unlimited custom screen stream while fully backgrounded.
+- if PiP is unavailable, disabled, or dismissed, iPadOS can suspend the ordinary app after the grace period.
 
 ## 10. Project layout
 

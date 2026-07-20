@@ -616,24 +616,47 @@ struct PadContentView: View {
                         .disabled(model.isFileTransferring)
                     }
 
-                    Button {
-                        model.togglePictureInPicture()
-                    } label: {
-                        Label(
-                            model.isPictureInPictureActive ? "Stop Picture in Picture" : "Keep Running in Background",
-                            systemImage: model.isPictureInPictureActive ? "pip.exit" : "pip.enter"
-                        )
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(model.isPictureInPictureActive ? .orange : .cyan)
-                    .disabled(!model.isPictureInPicturePossible && !model.isPictureInPictureActive)
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack {
+                            Label("Background viewer", systemImage: "pip")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(model.isPictureInPictureActive ? "ACTIVE" : model.keepRunningInBackground ? "AUTO" : "OFF")
+                                .font(.caption2.bold())
+                                .foregroundStyle(model.isPictureInPictureActive ? .green : .cyan)
+                        }
 
-                    Text(model.isPictureInPictureActive
-                         ? "Background viewer is active. Pointer control resumes when you return."
-                         : "Tap before switching apps to keep the live Mac screen connected.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        Toggle(
+                            isOn: Binding(
+                                get: { model.keepRunningInBackground },
+                                set: model.setKeepRunningInBackground
+                            )
+                        ) {
+                            Text("Start PiP when switching apps")
+                        }
+
+                        Button {
+                            model.togglePictureInPicture()
+                        } label: {
+                            Label(
+                                model.isPictureInPictureActive ? "Stop Picture in Picture" : "Start PiP Now",
+                                systemImage: model.isPictureInPictureActive ? "pip.exit" : "pip.enter"
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(model.isPictureInPictureActive ? .orange : .cyan)
+                        .disabled(!model.isPictureInPicturePossible && !model.isPictureInPictureActive)
+
+                        Text(model.backgroundViewerDetail)
+                            .font(.caption2)
+                            .foregroundStyle(
+                                model.isPictureInPictureActive || model.isPictureInPicturePossible
+                                    ? Color.secondary
+                                    : Color.orange
+                            )
+                    }
 
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Trackpad clicks", systemImage: "cursorarrow.click")

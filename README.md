@@ -54,7 +54,7 @@ The code automatically falls back instead of trying to bypass iPadOS security:
 
 The fallback is a hardware-encoded H.264 HiDPI stream sized from the iPad's native display width (clamped to 1440–2880 pixels, up to 30 fps) with optional remote keyboard, trackpad, touch, and Apple Pencil input. JPEG packets remain supported for compatibility. It mirrors the main display rather than creating a true extra macOS display. Native Sidecar remains the preferred path for a true virtual Retina display, native Apple Pencil behavior, audio, and extended-desktop support.
 
-Closing the Mac window leaves SidecarBridge available as a background app so an iPad can reconnect. On iPadOS, the app uses the system's short background-task grace period and reconnects automatically when brought to the foreground; iPadOS does not permit an ordinary screen-viewer app to stream indefinitely while fully backgrounded.
+Closing the Mac window leaves SidecarBridge available as a background app so an iPad can reconnect. On iPadOS, **Start PiP when switching apps** is enabled by default: when a live stream is the user's primary focus, switching apps starts the system Picture in Picture viewer and keeps the approved media session active. If PiP is unavailable, disabled, or closed, SidecarBridge only has iPadOS's short background-task grace period and then reconnects when brought to the foreground.
 
 ### Magic Keyboard and trackpad
 
