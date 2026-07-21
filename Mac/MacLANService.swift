@@ -46,6 +46,15 @@ final class MacLANService {
         }
     }
 
+    func forceDisconnect(reason: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            print("[SidecarBridge/LAN] Dropping stale iPad connection: \(reason)")
+            self.connection?.cancel()
+            self.clearConnection(notify: true, error: reason)
+        }
+    }
+
     func send(_ message: ControlMessage) {
         guard let data = try? PacketCodec.encode(.control(message)) else { return }
         sendPacket(data, isFrame: false)

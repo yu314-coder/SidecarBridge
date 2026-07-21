@@ -8,6 +8,14 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(try PacketCodec.decode(data), .control(input))
     }
 
+    func testHeartbeatRoundTrip() throws {
+        let heartbeat = ControlMessage(.status, detail: "heartbeat-ping:test-token")
+        XCTAssertEqual(
+            try PacketCodec.decode(PacketCodec.encode(.control(heartbeat))),
+            .control(heartbeat)
+        )
+    }
+
     func testJPEGFrameRoundTrip() throws {
         let input = Data([0xFF, 0xD8, 0xFF, 0xD9])
         let data = try PacketCodec.encode(.jpeg(input))

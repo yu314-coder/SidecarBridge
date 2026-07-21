@@ -18,6 +18,8 @@ final class MacConnectionModel: ObservableObject {
     @Published var screenRecordingAuthorized = false
     @Published var localNetworkAccess: LocalNetworkAccessState = .checking
     @Published var connectionTransport = "Direct P2P preferred"
+    @Published var connectionHealthDetail = "Waiting for encrypted link"
+    @Published var connectionLatencyMS: Int?
     @Published var p2pState: MacP2PState = .starting
     @Published var fileTransferSnapshot: FileTransferSnapshot?
     @Published var lastReceivedFile: URL?
@@ -60,6 +62,11 @@ final class MacConnectionModel: ObservableObject {
             self?.p2pState = state
         }
 
+        peers.onConnectionHealthChanged = { [weak self] detail, latency in
+            self?.connectionHealthDetail = detail
+            self?.connectionLatencyMS = latency
+        }
+
         peers.onConnectionChanged = { [weak self] connected, peerOrError in
             guard let self else { return }
             self.hasPadPeer = connected
@@ -75,6 +82,8 @@ final class MacConnectionModel: ObservableObject {
                 self.pairedPeer = UserDefaults.standard.string(forKey: "pairedPeerName")
                 self.sendRemoteInputPermissionStatus()
             } else if let peerOrError {
+                self.connectionHealthDetail = "Recovering connection"
+                self.connectionLatencyMS = nil
                 if peerOrError.localizedCaseInsensitiveContains("NoAuth") {
                     self.localNetworkAccess = .denied
                     self.status = "Allow Local Network access"
@@ -88,6 +97,8 @@ final class MacConnectionModel: ObservableObject {
                 self.remoteInput.releaseButtons()
                 self.stopFallback()
             } else {
+                self.connectionHealthDetail = "Waiting for encrypted link"
+                self.connectionLatencyMS = nil
                 self.connectionTransport = "Searching direct P2P"
                 self.status = "Waiting for iPad"
                 self.detail = "Open SidecarBridge on the iPad."
@@ -460,10 +471,15 @@ final class MacConnectionModel: ObservableObject {
         case .stopFallback:
             stopFallback()
         case .status:
-            if let detail = command.detail,
-               detail.hasPrefix("video-ack:"),
-               let sequence = UInt64(detail.dropFirst("video-ack:".count)) {
-                peers.acknowledgeVideo(sequence: sequence)
+            if let detail = command.detail {
+                if detail.hasPrefix("video-ack:"),
+                   let sequence = UInt64(detail.dropFirst("video-ack:".count)) {
+                    peers.acknowledgeVideo(sequence: sequence)
+                } else if detail == "viewer-background" {
+                    streamer.setViewerBackgrounded(true)
+                } else if detail == "viewer-foreground" {
+                    streamer.setViewerBackgrounded(false)
+                }
             }
         case .input:
             guard let event = command.remoteInputEvent else { return }

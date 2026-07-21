@@ -103,6 +103,7 @@ The iPad starts `PadLANService`, which:
 - cycles through discovered endpoints;
 - times out stale connection attempts after seven seconds;
 - rebuilds an empty Bonjour browser after a stable 30-second discovery window;
+- tries the last successful private Mac IPv4 address before a full subnet scan;
 - probes only port `45454` across the iPad's private local `/24` when Bonjour is ready but empty;
 - reconnects automatically after a connection ends.
 
@@ -122,6 +123,8 @@ If direct LAN has not connected, the Mac and iPad start Multipeer Connectivity a
 - a real failure, interface transition, foreground return, or explicit retry rebuilds discovery.
 
 Earlier builds periodically restarted healthy advertisement and browsing objects. That created repeated service gaps and could make devices on the same Wi-Fi miss each other indefinitely. Healthy discovery now remains stable; only a confirmed failure or lifecycle event triggers recovery.
+
+Both transports exchange an encrypted ping/pong every four seconds. The apps expose the measured round-trip time, consider a link stale after 12 seconds without peer traffic, and rebuild only the failed direct or nearby path. The iPad also sends an immediate validation ping after foregrounding so a socket retained across suspension cannot remain falsely marked connected.
 
 ### 4.3 System Sidecar
 
@@ -188,6 +191,7 @@ Encryption protects packet confidentiality and integrity. Pairing approval preve
 - width clamped to a practical 1440–2880-pixel range;
 - up to 30 frames per second;
 - transport-specific bitrate and frame pacing;
+- automatic 15 fps pacing while the iPad viewer is in background PiP, restored on foreground return;
 - periodic keyframes for recovery.
 
 ### 6.3 Flow control
@@ -285,7 +289,9 @@ On iPadOS:
 - automatic Picture in Picture is enabled by default for the live viewer and starts when the user switches apps;
 - the app activates its playback audio session, invalidates PiP playback state, and reports ready, starting, active, suspended, and failed states in the control drawer;
 - a short system background task protects the connection while PiP is starting;
-- discovery restarts when the app becomes active;
+- a three-second PiP start watchdog clears a stuck start, and the model retries up to three times;
+- the encrypted connection is validated when the app becomes active, with discovery rebuilt only if the route is stale;
+- the Mac lowers capture pacing to 15 fps during PiP and restores the transport's foreground rate on return;
 - if PiP is unavailable, disabled, or dismissed, iPadOS can suspend the ordinary app after the grace period.
 
 ## 10. Project layout
@@ -455,20 +461,23 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 
 ## 14. Tests
 
-`PacketCodecTests` currently covers 12 cases:
+`PacketCodecTests` currently covers 15 cases:
 
 1. control-message round trip;
-2. empty packet rejection;
+2. heartbeat-message round trip;
 3. H.264 frame round trip;
 4. JPEG frame round trip;
-5. multiple LAN frames in one read;
-6. partial LAN frame handling;
-7. complete frame plus incomplete-tail preservation;
-8. LAN key agreement and encryption;
-9. non-optimistic local-network permission states;
-10. remote drag round trip;
-11. general remote input round trip;
-12. left-click, double-click, and right-click protocol round trips.
+5. file-packet round trip;
+6. multi-chunk file-transfer round trip;
+7. empty packet rejection;
+8. multiple LAN frames in one read;
+9. partial LAN frame handling;
+10. complete frame plus incomplete-tail preservation;
+11. LAN key agreement and encryption;
+12. non-optimistic local-network permission states;
+13. remote drag round trip;
+14. general remote input round trip;
+15. left-click, double-click, and right-click protocol round trips.
 
 Run them with all output on `/Volumes/D`:
 

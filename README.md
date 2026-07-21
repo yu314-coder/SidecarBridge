@@ -12,7 +12,7 @@ When either app starts, it uses this order:
 4. Never launch native Sidecar automatically. The separate system Sidecar session starts only after the user explicitly clicks **Open System Sidecar**.
 5. Keep a button to open Apple's Displays settings when manual intervention is needed.
 
-The in-app stream first uses Network.framework Bonjour discovery across the local network and Apple peer-to-peer link technologies. Each direct session performs ephemeral Curve25519 key agreement and encrypts screen/input packets with ChaChaPoly. Multipeer Connectivity remains available as a delayed fallback. It is intentionally local/nearby only; this project does not publish the Mac screen to the public Internet.
+The in-app stream first uses Network.framework Bonjour discovery across the local network and Apple peer-to-peer link technologies. Each direct session performs ephemeral Curve25519 key agreement and encrypts screen/input packets with ChaChaPoly. Multipeer Connectivity remains available as a delayed fallback. Encrypted heartbeats verify the active route every four seconds, show measured round-trip latency in both apps, and rebuild stale sessions automatically. It is intentionally local/nearby only; this project does not publish the Mac screen to the public Internet.
 
 ## Build and install
 
@@ -49,12 +49,12 @@ The code automatically falls back instead of trying to bypass iPadOS security:
 - `SidecarConnector` uses the private native connection path.
 - `CableDetector` checks the USB registry and prefers wired transport.
 - `ScreenStreamer` uses Apple's public ScreenCaptureKit API.
-- `MacLANService` and `PadLANService` use Bonjour plus Network.framework so the paired apps can connect on the same Wi-Fi even if Apple's Sidecar device list is empty. If a router filters Bonjour multicast, the iPad automatically performs a bounded private-`/24` probe for SidecarBridge's fixed encrypted port `45454`.
+- `MacLANService` and `PadLANService` use Bonjour plus Network.framework so the paired apps can connect on the same Wi-Fi even if Apple's Sidecar device list is empty. If a router filters Bonjour multicast, the iPad first retries the last successful private Mac address and then performs a bounded private-`/24` probe for SidecarBridge's fixed encrypted port `45454`.
 - The two apps use an encrypted Multipeer Connectivity session and remember the approved iPad name for automatic reconnection.
 
 The fallback is a hardware-encoded H.264 HiDPI stream sized from the iPad's native display width (clamped to 1440–2880 pixels, up to 30 fps) with optional remote keyboard, trackpad, touch, and Apple Pencil input. JPEG packets remain supported for compatibility. It mirrors the main display rather than creating a true extra macOS display. Native Sidecar remains the preferred path for a true virtual Retina display, native Apple Pencil behavior, audio, and extended-desktop support.
 
-Closing the Mac window leaves SidecarBridge available as a background app so an iPad can reconnect. On iPadOS, **Start PiP when switching apps** is enabled by default: when a live stream is the user's primary focus, switching apps starts the system Picture in Picture viewer and keeps the approved media session active. If PiP is unavailable, disabled, or closed, SidecarBridge only has iPadOS's short background-task grace period and then reconnects when brought to the foreground.
+Closing the Mac window leaves SidecarBridge available as a background app so an iPad can reconnect. On iPadOS, **Start PiP when switching apps** is enabled by default: when a live stream is the user's primary focus, switching apps starts the system Picture in Picture viewer and keeps the approved media session active. A PiP watchdog clears stuck starts and retries them, while the Mac lowers the background stream to 15 fps to reduce congestion and restores normal quality in the foreground. On return, the iPad verifies the encrypted session and rebuilds discovery if it was suspended. If PiP is unavailable, disabled, or closed, SidecarBridge only has iPadOS's short background-task grace period; no ordinary iPad app can run indefinitely outside an Apple-approved background mode.
 
 ### Magic Keyboard and trackpad
 

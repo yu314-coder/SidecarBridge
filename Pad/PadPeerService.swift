@@ -9,6 +9,7 @@ final class PadPeerService: NSObject {
     var onFilePacket: ((FileTransferPacket) -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
+    var onConnectionHealthChanged: ((String, Int?) -> Void)?
 
     private let peerID = MCPeerID(displayName: UIDevice.current.name)
     private lazy var session = MCSession(
@@ -27,14 +28,28 @@ final class PadPeerService: NSObject {
     private var browserRunning = false
     private var fallbackWorkItem: DispatchWorkItem?
     private var mcConnectionWatchdog: DispatchWorkItem?
+    private var heartbeatTimer: DispatchSourceTimer?
+    private var heartbeatSentAt: [String: TimeInterval] = [:]
+    private var lastPeerActivity = ProcessInfo.processInfo.systemUptime
+    private var validationWorkItem: DispatchWorkItem?
+    private var peerSupportsHeartbeat = false
 
     override init() {
         super.init()
         session.delegate = self
-        lan.onFrame = { [weak self] frame in self?.onFrame?(frame) }
-        lan.onVideoFrame = { [weak self] frame in self?.onVideoFrame?(frame) }
-        lan.onCommand = { [weak self] command in self?.onCommand?(command) }
-        lan.onFilePacket = { [weak self] transfer in self?.onFilePacket?(transfer) }
+        lan.onFrame = { [weak self] frame in
+            self?.notePeerActivity()
+            self?.onFrame?(frame)
+        }
+        lan.onVideoFrame = { [weak self] frame in
+            self?.notePeerActivity()
+            self?.onVideoFrame?(frame)
+        }
+        lan.onCommand = { [weak self] command in self?.route(command) }
+        lan.onFilePacket = { [weak self] transfer in
+            self?.notePeerActivity()
+            self?.onFilePacket?(transfer)
+        }
         lan.onLocalNetworkStateChanged = { [weak self] state in
             self?.onLocalNetworkStateChanged?(state)
         }
@@ -50,6 +65,7 @@ final class PadPeerService: NSObject {
                 self.scheduleMultipeerFallback()
             }
             self.reportConnection(error: connected ? nil : value)
+            self.updateHeartbeatState()
         }
     }
 
@@ -67,6 +83,31 @@ final class PadPeerService: NSObject {
         invitedPeers.removeAll()
         lan.restart()
         scheduleMultipeerFallback()
+    }
+
+    func resumeAfterBackground() {
+        guard lanConnected || mcConnected else {
+            onConnectionHealthChanged?("Recovering discovery", nil)
+            restart()
+            return
+        }
+        onConnectionHealthChanged?("Verifying after background", nil)
+        let token = sendHeartbeatPing()
+        let sentAt = heartbeatSentAt[token] ?? ProcessInfo.processInfo.systemUptime
+        validationWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.heartbeatSentAt[token] != nil else { return }
+            self.heartbeatSentAt.removeValue(forKey: token)
+            if self.peerSupportsHeartbeat, self.lastPeerActivity <= sentAt {
+                self.recoverStaleConnection(reason: "No encrypted traffic after returning from background.")
+            } else if !self.peerSupportsHeartbeat {
+                self.onConnectionHealthChanged?("Connected — update Mac app for health checks", nil)
+            } else {
+                self.onConnectionHealthChanged?("Encrypted link healthy", nil)
+            }
+        }
+        validationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: workItem)
     }
 
     func send(_ message: ControlMessage) {
@@ -105,6 +146,98 @@ final class PadPeerService: NSObject {
             onConnectionChanged?(true, mcPeerName)
         } else {
             onConnectionChanged?(false, error)
+        }
+    }
+
+    private func route(_ command: ControlMessage) {
+        notePeerActivity()
+        guard command.kind == .status,
+              let detail = command.detail,
+              detail.hasPrefix("heartbeat-") else {
+            onCommand?(command)
+            return
+        }
+        if detail.hasPrefix("heartbeat-ping:") {
+            peerSupportsHeartbeat = true
+            let token = String(detail.dropFirst("heartbeat-ping:".count))
+            send(ControlMessage(.status, detail: "heartbeat-pong:\(token)"))
+        } else if detail.hasPrefix("heartbeat-pong:") {
+            let token = String(detail.dropFirst("heartbeat-pong:".count))
+            guard let sentAt = heartbeatSentAt.removeValue(forKey: token) else { return }
+            peerSupportsHeartbeat = true
+            validationWorkItem?.cancel()
+            validationWorkItem = nil
+            let latency = max(0, Int((ProcessInfo.processInfo.systemUptime - sentAt) * 1_000))
+            onConnectionHealthChanged?("Encrypted link healthy", latency)
+        }
+    }
+
+    private func updateHeartbeatState() {
+        if lanConnected || mcConnected {
+            startHeartbeat()
+        } else {
+            stopHeartbeat()
+        }
+    }
+
+    private func startHeartbeat() {
+        guard heartbeatTimer == nil else { return }
+        lastPeerActivity = ProcessInfo.processInfo.systemUptime
+        peerSupportsHeartbeat = false
+        onConnectionHealthChanged?("Verifying encrypted link", nil)
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: 4, leeway: .milliseconds(300))
+        timer.setEventHandler { [weak self] in self?.heartbeatTick() }
+        heartbeatTimer = timer
+        timer.resume()
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
+        validationWorkItem?.cancel()
+        validationWorkItem = nil
+        heartbeatSentAt.removeAll(keepingCapacity: true)
+        peerSupportsHeartbeat = false
+    }
+
+    private func heartbeatTick() {
+        guard lanConnected || mcConnected else {
+            stopHeartbeat()
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        if peerSupportsHeartbeat, now - lastPeerActivity > 12 {
+            recoverStaleConnection(reason: "Encrypted link stopped responding.")
+            return
+        }
+        _ = sendHeartbeatPing()
+        heartbeatSentAt = heartbeatSentAt.filter { now - $0.value < 16 }
+    }
+
+    @discardableResult
+    private func sendHeartbeatPing() -> String {
+        let token = UUID().uuidString
+        heartbeatSentAt[token] = ProcessInfo.processInfo.systemUptime
+        send(ControlMessage(.status, detail: "heartbeat-ping:\(token)"))
+        return token
+    }
+
+    private func notePeerActivity() {
+        lastPeerActivity = ProcessInfo.processInfo.systemUptime
+    }
+
+    private func recoverStaleConnection(reason: String) {
+        onConnectionHealthChanged?("Recovering stale connection", nil)
+        stopHeartbeat()
+        if lanConnected {
+            lan.forceReconnect(reason: reason)
+        } else {
+            session.disconnect()
+            mcConnected = false
+            mcPeerName = nil
+            restartMultipeerBrowserAfterDisconnect()
+            reportConnection(error: reason)
         }
     }
 
@@ -224,6 +357,7 @@ extension PadPeerService: MCSessionDelegate {
                 self.restartMultipeerBrowserAfterDisconnect()
             }
             self.reportConnection()
+            self.updateHeartbeatState()
         }
     }
 
@@ -231,13 +365,22 @@ extension PadPeerService: MCSessionDelegate {
         guard let packet = try? PacketCodec.decode(data) else { return }
         switch packet {
         case .control(let command):
-            DispatchQueue.main.async { self.onCommand?(command) }
+            DispatchQueue.main.async { self.route(command) }
         case .jpeg(let frame):
-            DispatchQueue.main.async { self.onFrame?(frame) }
+            DispatchQueue.main.async {
+                self.notePeerActivity()
+                self.onFrame?(frame)
+            }
         case .video(let frame):
-            DispatchQueue.main.async { self.onVideoFrame?(frame) }
+            DispatchQueue.main.async {
+                self.notePeerActivity()
+                self.onVideoFrame?(frame)
+            }
         case .file(let transfer):
-            DispatchQueue.main.async { self.onFilePacket?(transfer) }
+            DispatchQueue.main.async {
+                self.notePeerActivity()
+                self.onFilePacket?(transfer)
+            }
         }
     }
 

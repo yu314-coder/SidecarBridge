@@ -322,6 +322,14 @@ struct PadContentView: View {
             state: model.isConnected ? "ACTIVE" : "PRIORITY",
             tint: model.isConnected ? .green : .cyan
         )
+
+        PadPermissionTile(
+            icon: "waveform.path.ecg",
+            title: "Connection health",
+            detail: model.connectionHealthDetail,
+            state: model.connectionLatencyMS.map { "\($0) MS" } ?? (model.isConnected ? "VERIFYING" : "WAITING"),
+            tint: model.connectionLatencyMS == nil ? .cyan : .green
+        )
     }
 
     @ViewBuilder
@@ -530,6 +538,11 @@ struct PadContentView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if let latency = model.connectionLatencyMS {
+                Label("\(latency) ms", systemImage: "waveform.path.ecg")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.green)
+            }
             Label(inputStatusText, systemImage: inputStatusIcon)
                 .font(.caption2.bold())
                 .tracking(0.7)

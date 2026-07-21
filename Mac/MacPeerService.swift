@@ -23,6 +23,7 @@ final class MacPeerService: NSObject {
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
     var onP2PStateChanged: ((MacP2PState) -> Void)?
+    var onConnectionHealthChanged: ((String, Int?) -> Void)?
 
     private let peerID = MCPeerID(displayName: Host.current().localizedName ?? "Mac")
     private lazy var session = MCSession(
@@ -44,12 +45,19 @@ final class MacPeerService: NSObject {
     private var mcVideoInFlight: UInt64?
     private var pendingMCVideo: [PendingMCVideo] = []
     private var mcWaitingForKeyFrame = false
+    private var heartbeatTimer: DispatchSourceTimer?
+    private var heartbeatSentAt: [String: TimeInterval] = [:]
+    private var lastPeerActivity = ProcessInfo.processInfo.systemUptime
+    private var peerSupportsHeartbeat = false
 
     override init() {
         super.init()
         session.delegate = self
-        lan.onCommand = { [weak self] command in self?.onCommand?(command) }
-        lan.onFilePacket = { [weak self] transfer in self?.onFilePacket?(transfer) }
+        lan.onCommand = { [weak self] command in self?.route(command) }
+        lan.onFilePacket = { [weak self] transfer in
+            self?.notePeerActivity()
+            self?.onFilePacket?(transfer)
+        }
         lan.onLocalNetworkStateChanged = { [weak self] state in
             self?.onLocalNetworkStateChanged?(state)
         }
@@ -66,6 +74,7 @@ final class MacPeerService: NSObject {
                 self.scheduleMultipeerFallback()
             }
             self.reportConnection(error: connected ? nil : value)
+            self.updateHeartbeatState()
         }
     }
 
@@ -81,6 +90,7 @@ final class MacPeerService: NSObject {
         fallbackWorkItem?.cancel()
         fallbackWorkItem = nil
         stopMultipeerFallback()
+        stopHeartbeat()
         lan.stop()
     }
 
@@ -204,6 +214,90 @@ final class MacPeerService: NSObject {
             onConnectionChanged?(true, mcPeerName)
         } else {
             onConnectionChanged?(false, error)
+        }
+    }
+
+    private func route(_ command: ControlMessage) {
+        notePeerActivity()
+        guard command.kind == .status,
+              let detail = command.detail,
+              detail.hasPrefix("heartbeat-") else {
+            onCommand?(command)
+            return
+        }
+        if detail.hasPrefix("heartbeat-ping:") {
+            peerSupportsHeartbeat = true
+            let token = String(detail.dropFirst("heartbeat-ping:".count))
+            send(ControlMessage(.status, detail: "heartbeat-pong:\(token)"))
+        } else if detail.hasPrefix("heartbeat-pong:") {
+            let token = String(detail.dropFirst("heartbeat-pong:".count))
+            guard let sentAt = heartbeatSentAt.removeValue(forKey: token) else { return }
+            peerSupportsHeartbeat = true
+            let latency = max(0, Int((ProcessInfo.processInfo.systemUptime - sentAt) * 1_000))
+            onConnectionHealthChanged?("Encrypted link healthy", latency)
+        }
+    }
+
+    private func updateHeartbeatState() {
+        if lanConnected || mcConnected {
+            startHeartbeat()
+        } else {
+            stopHeartbeat()
+        }
+    }
+
+    private func startHeartbeat() {
+        guard heartbeatTimer == nil else { return }
+        lastPeerActivity = ProcessInfo.processInfo.systemUptime
+        peerSupportsHeartbeat = false
+        onConnectionHealthChanged?("Verifying encrypted link", nil)
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: 4, leeway: .milliseconds(300))
+        timer.setEventHandler { [weak self] in self?.heartbeatTick() }
+        heartbeatTimer = timer
+        timer.resume()
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
+        heartbeatSentAt.removeAll(keepingCapacity: true)
+        peerSupportsHeartbeat = false
+    }
+
+    private func heartbeatTick() {
+        guard lanConnected || mcConnected else {
+            stopHeartbeat()
+            return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        if peerSupportsHeartbeat, now - lastPeerActivity > 12 {
+            recoverStaleConnection(reason: "Encrypted link stopped responding.")
+            return
+        }
+        let token = UUID().uuidString
+        heartbeatSentAt[token] = now
+        send(ControlMessage(.status, detail: "heartbeat-ping:\(token)"))
+        heartbeatSentAt = heartbeatSentAt.filter { now - $0.value < 16 }
+    }
+
+    private func notePeerActivity() {
+        lastPeerActivity = ProcessInfo.processInfo.systemUptime
+    }
+
+    private func recoverStaleConnection(reason: String) {
+        onConnectionHealthChanged?("Recovering stale connection", nil)
+        onP2PStateChanged?(.recovering(reason))
+        stopHeartbeat()
+        if lanConnected {
+            lan.forceDisconnect(reason: reason)
+        } else {
+            session.disconnect()
+            mcConnected = false
+            mcPeerName = nil
+            resetMCVideoQueue()
+            restartMultipeerAdvertisingAfterDisconnect()
+            reportConnection(error: reason)
         }
     }
 
@@ -345,6 +439,7 @@ extension MacPeerService: MCSessionDelegate {
             }
             self.reportConnection()
             if state != .connected { self.resetMCVideoQueue() }
+            self.updateHeartbeatState()
         }
     }
 
@@ -352,9 +447,12 @@ extension MacPeerService: MCSessionDelegate {
         guard let packet = try? PacketCodec.decode(data) else { return }
         switch packet {
         case .control(let command):
-            DispatchQueue.main.async { self.onCommand?(command) }
+            DispatchQueue.main.async { self.route(command) }
         case .file(let transfer):
-            DispatchQueue.main.async { self.onFilePacket?(transfer) }
+            DispatchQueue.main.async {
+                self.notePeerActivity()
+                self.onFilePacket?(transfer)
+            }
         case .jpeg, .video:
             break
         }

@@ -19,6 +19,8 @@ final class PadConnectionModel: ObservableObject {
     }()
     @Published var localNetworkAccess: LocalNetworkAccessState = .checking
     @Published var connectionTransport = "Direct P2P preferred"
+    @Published var connectionHealthDetail = "Waiting for encrypted link"
+    @Published var connectionLatencyMS: Int?
     @Published var streamAspectRatio: CGFloat = 16.0 / 9.0
     @Published var remoteInputAuthorized = false
     @Published var controlLatencyMS: Int?
@@ -88,6 +90,7 @@ final class PadConnectionModel: ObservableObject {
             self.isPictureInPictureSuspended = suspended
             if active {
                 self.backgroundViewerDetail = "Active — the stream can continue behind other apps."
+                self.peers.send(ControlMessage(.status, detail: "viewer-background"))
                 self.endBackgroundTask()
             } else if suspended {
                 self.backgroundViewerDetail = "Picture in Picture is temporarily suspended by iPadOS."
@@ -95,6 +98,11 @@ final class PadConnectionModel: ObservableObject {
                 self.backgroundViewerDetail = self.keepRunningInBackground
                     ? "Ready — switching apps starts Picture in Picture automatically."
                     : "Ready for manual Picture in Picture."
+            }
+            if !active,
+               self.isConnected,
+               UIApplication.shared.applicationState == .active {
+                self.peers.send(ControlMessage(.status, detail: "viewer-foreground"))
             }
             if possible, self.backgroundRequested, !active {
                 _ = self.videoDisplay.startPictureInPicture()
@@ -112,6 +120,11 @@ final class PadConnectionModel: ObservableObject {
                 self.status = "Allow Local Network access"
                 self.detail = "iPadOS blocked direct discovery. Enable Local Network for SidecarBridge in Settings."
             }
+        }
+
+        peers.onConnectionHealthChanged = { [weak self] detail, latency in
+            self?.connectionHealthDetail = detail
+            self?.connectionLatencyMS = latency
         }
 
         peers.onConnectionChanged = { [weak self] connected, peerOrError in
@@ -136,6 +149,8 @@ final class PadConnectionModel: ObservableObject {
                         : "Mac found. Tap Open System Sidecar only if you want to leave this app."
                 }
             } else {
+                self.connectionHealthDetail = "Recovering connection"
+                self.connectionLatencyMS = nil
                 self.connectedUsingDirectLAN = false
                 self.startDiscoveryClockIfNeeded()
                 self.isStreaming = false
@@ -234,8 +249,11 @@ final class PadConnectionModel: ObservableObject {
             backgroundActivationTask?.cancel()
             backgroundActivationTask = nil
             if isPictureInPictureActive { videoDisplay.stopPictureInPicture() }
+            if isConnected {
+                peers.send(ControlMessage(.status, detail: "viewer-foreground"))
+            }
             endBackgroundTask()
-            if started && !isConnected { retry() }
+            if started { peers.resumeAfterBackground() }
         case .background:
             guard isStreaming, keepRunningInBackground else { return }
             backgroundRequested = true
@@ -454,13 +472,19 @@ final class PadConnectionModel: ObservableObject {
     private func verifyBackgroundActivation() {
         backgroundActivationTask?.cancel()
         backgroundActivationTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled, let self, self.backgroundRequested else { return }
-            if !self.isPictureInPictureActive {
-                self.backgroundViewerDetail = self.isPictureInPicturePossible
-                    ? "Background viewer did not start. Return to SidecarBridge and tap Start PiP once."
-                    : "Picture in Picture is unavailable; iPadOS will suspend the stream after its short grace period."
+            for attempt in 1...3 {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, let self, self.backgroundRequested else { return }
+                if self.isPictureInPictureActive { return }
+                if self.isPictureInPicturePossible {
+                    self.backgroundViewerDetail = "Background viewer retry \(attempt) of 3…"
+                    _ = self.videoDisplay.startPictureInPicture()
+                }
             }
+            guard !Task.isCancelled, let self, self.backgroundRequested, !self.isPictureInPictureActive else { return }
+            self.backgroundViewerDetail = self.isPictureInPicturePossible
+                ? "iPadOS did not start Picture in Picture. Return here and tap Start PiP Now."
+                : "Picture in Picture is unavailable; iPadOS will suspend the stream after its short grace period."
         }
     }
 

@@ -23,6 +23,7 @@ final class PadLANService {
     private var subnetProbeBatchWorkItems: [DispatchWorkItem] = []
     private var subnetProbeConnections: [String: NWConnection] = [:]
     private var subnetProbeGeneration = 0
+    private var triedCachedHostForBrowser = false
     private var nextEndpointIndex = 0
     private let idleDiscoveryRefreshInterval: TimeInterval = 30
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
@@ -70,6 +71,18 @@ final class PadLANService {
         }
     }
 
+    func forceReconnect(reason: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            print("[SidecarBridge/LAN] Forcing reconnect: \(reason)")
+            self.connection?.cancel()
+            self.clearConnection(notify: true, error: reason)
+            self.endpoints.removeAll()
+            self.nextEndpointIndex = 0
+            self.scheduleBrowserRestart(after: 0.15)
+        }
+    }
+
     func send(_ message: ControlMessage) {
         guard let data = try? PacketCodec.encode(.control(message)) else { return }
         sendPacket(data)
@@ -88,6 +101,7 @@ final class PadLANService {
 
     private func startBrowser() {
         guard browser == nil else { return }
+        triedCachedHostForBrowser = false
         let parameters = lowLatencyParameters()
         parameters.includePeerToPeer = true
         let browser = NWBrowser(
@@ -119,6 +133,7 @@ final class PadLANService {
                 self.browserRestartWorkItem = nil
                 self.notifyLocalNetwork(.granted)
                 if self.endpoints.isEmpty {
+                    self.tryCachedDirectHost()
                     self.scheduleIdleDiscoveryRefresh()
                     self.scheduleSubnetProbe(after: 1.5)
                 }
@@ -349,6 +364,22 @@ final class PadLANService {
         )
     }
 
+    private func tryCachedDirectHost() {
+        guard !triedCachedHostForBrowser,
+              !isConnected,
+              connection == nil,
+              endpoints.isEmpty,
+              subnetProbeConnections.isEmpty,
+              let host = UserDefaults.standard.string(forKey: "lastDirectMacHost"),
+              Self.isPrivateIPv4Address(host),
+              let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort) else { return }
+        triedCachedHostForBrowser = true
+        subnetProbeGeneration &+= 1
+        let generation = subnetProbeGeneration
+        print("[SidecarBridge/LAN] Trying last successful Mac address \(host)")
+        probe(host: host, port: port, generation: generation)
+    }
+
     private func probe(host: String, port: NWEndpoint.Port, generation: Int) {
         guard subnetProbeConnections[host] == nil else { return }
         let probe = NWConnection(host: NWEndpoint.Host(host), port: port, using: lowLatencyParameters())
@@ -387,6 +418,7 @@ final class PadLANService {
 
         cancelSubnetProbes(except: directConnection)
         print("[SidecarBridge/LAN] Fixed-port fallback found \(host):\(BridgeConstants.directPort)")
+        UserDefaults.standard.set(host, forKey: "lastDirectMacHost")
         connection = directConnection
         privateKey = Curve25519.KeyAgreement.PrivateKey()
         directConnection.stateUpdateHandler = { [weak self, weak directConnection] state in
@@ -474,6 +506,13 @@ final class PadLANService {
         parts[0] == 10 ||
             (parts[0] == 172 && (16...31).contains(parts[1])) ||
             (parts[0] == 192 && parts[1] == 168)
+    }
+
+    private static func isPrivateIPv4Address(_ address: String) -> Bool {
+        let parts = address.split(separator: ".").compactMap { Int($0) }
+        return parts.count == 4 &&
+            parts.allSatisfy { (0...255).contains($0) } &&
+            isPrivateIPv4(parts)
     }
 
     /// Bonjour can remain in `.ready` with an empty, stale result set after a

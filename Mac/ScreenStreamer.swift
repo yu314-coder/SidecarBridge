@@ -30,6 +30,8 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
     private var preferredWidth = 2360
     private var transportProfile: TransportProfile = .direct
     private var activeFrameRate = 30
+    private var foregroundFrameRate = 30
+    private var viewerIsBackgrounded = false
 
     func setPreferredWidth(_ width: Int) {
         preferredWidth = min(max(width, 1440), 2880)
@@ -37,6 +39,14 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
 
     func setTransportProfile(_ profile: TransportProfile) {
         transportProfile = profile
+    }
+
+    func setViewerBackgrounded(_ backgrounded: Bool) {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            self.viewerIsBackgrounded = backgrounded
+            self.activeFrameRate = backgrounded ? min(self.foregroundFrameRate, 15) : self.foregroundFrameRate
+        }
     }
 
     func start() async throws {
@@ -55,7 +65,8 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
         let targetWidth = transportProfile == .nearbyP2P
             ? min(preferredWidth, 1728)
             : preferredWidth
-        activeFrameRate = transportProfile == .nearbyP2P ? 24 : 30
+        foregroundFrameRate = transportProfile == .nearbyP2P ? 24 : 30
+        activeFrameRate = viewerIsBackgrounded ? min(foregroundFrameRate, 15) : foregroundFrameRate
         let targetBitrate = transportProfile == .nearbyP2P ? 5_000_000 : nil
         let scale = min(1.0, Double(targetWidth) / Double(display.width))
         configuration.width = max(960, Int(Double(display.width) * scale)) & ~1

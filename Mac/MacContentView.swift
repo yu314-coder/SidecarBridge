@@ -162,6 +162,17 @@ struct MacContentView: View {
             Divider().overlay(.white.opacity(0.08))
 
             PermissionRow(
+                icon: "waveform.path.ecg",
+                title: "Connection health",
+                detail: connectionHealthText,
+                isReady: model.hasPadPeer && model.connectionHealthDetail == "Encrypted link healthy",
+                isChecking: model.hasPadPeer && model.connectionHealthDetail != "Encrypted link healthy",
+                stateLabel: model.connectionLatencyMS.map { "\($0) MS" } ?? (model.hasPadPeer ? "VERIFYING" : "WAITING")
+            ) { EmptyView() }
+
+            Divider().overlay(.white.opacity(0.08))
+
+            PermissionRow(
                 icon: "rectangle.inset.filled.and.person.filled",
                 title: "Screen Recording",
                 detail: model.screenRecordingAuthorized ? "Screen capture permission passed" : "Required to send the Mac display",
@@ -239,6 +250,11 @@ struct MacContentView: View {
         .padding(17)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+    }
+
+    private var connectionHealthText: String {
+        guard let latency = model.connectionLatencyMS else { return model.connectionHealthDetail }
+        return "\(model.connectionHealthDetail) • round trip \(latency) ms"
     }
 
     private var localNetworkDetail: String {

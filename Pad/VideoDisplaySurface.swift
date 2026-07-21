@@ -18,6 +18,7 @@ final class VideoDisplayController: NSObject {
     private var pictureInPicturePossibleObservation: NSKeyValueObservation?
     private var automaticBackgroundStartEnabled = true
     private var isStartingPictureInPicture = false
+    private var pictureInPictureStartWatchdog: Task<Void, Never>?
 
     var isPictureInPictureActive: Bool {
         pictureInPictureController?.isPictureInPictureActive == true
@@ -82,6 +83,7 @@ final class VideoDisplayController: NSObject {
             pictureInPictureController.invalidatePlaybackState()
             isStartingPictureInPicture = true
             pictureInPictureController.startPictureInPicture()
+            armPictureInPictureStartWatchdog(for: pictureInPictureController)
             return true
         } catch {
             onPictureInPictureError?("Could not prepare background playback: \(error.localizedDescription)")
@@ -102,6 +104,9 @@ final class VideoDisplayController: NSObject {
     }
 
     func stopPictureInPicture() {
+        pictureInPictureStartWatchdog?.cancel()
+        pictureInPictureStartWatchdog = nil
+        isStartingPictureInPicture = false
         pictureInPictureController?.stopPictureInPicture()
     }
 
@@ -122,6 +127,8 @@ final class VideoDisplayController: NSObject {
 
         pictureInPicturePossibleObservation = nil
         pictureInPictureController?.stopPictureInPicture()
+        pictureInPictureStartWatchdog?.cancel()
+        pictureInPictureStartWatchdog = nil
         isStartingPictureInPicture = false
         let contentSource = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: displayLayer,
@@ -155,6 +162,22 @@ final class VideoDisplayController: NSObject {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
         try session.setActive(true)
+    }
+
+    private func armPictureInPictureStartWatchdog(for controller: AVPictureInPictureController) {
+        pictureInPictureStartWatchdog?.cancel()
+        pictureInPictureStartWatchdog = Task { [weak self, weak controller] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled,
+                  let self,
+                  let controller,
+                  self.isStartingPictureInPicture,
+                  !controller.isPictureInPictureActive else { return }
+            self.isStartingPictureInPicture = false
+            controller.stopPictureInPicture()
+            self.publishPictureInPictureState()
+            self.onPictureInPictureError?("Picture in Picture start timed out; SidecarBridge will retry automatically.")
+        }
     }
 
     private func makeFormatDescription(parameterSets: [Data]) -> CMVideoFormatDescription? {
@@ -316,6 +339,8 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
     func pictureInPictureControllerDidStartPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        pictureInPictureStartWatchdog?.cancel()
+        pictureInPictureStartWatchdog = nil
         isStartingPictureInPicture = false
         publishPictureInPictureState()
     }
@@ -323,6 +348,8 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
     func pictureInPictureControllerDidStopPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        pictureInPictureStartWatchdog?.cancel()
+        pictureInPictureStartWatchdog = nil
         isStartingPictureInPicture = false
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         publishPictureInPictureState()
@@ -332,6 +359,8 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
         _ pictureInPictureController: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
+        pictureInPictureStartWatchdog?.cancel()
+        pictureInPictureStartWatchdog = nil
         isStartingPictureInPicture = false
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         publishPictureInPictureState()
