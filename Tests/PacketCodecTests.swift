@@ -86,6 +86,41 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(message.remoteInputEvent, input)
     }
 
+    func testRemoteKeyboardModifiersAreCanonicalAndDoNotLeakUnknownFlags() {
+        let input = RemoteInputEvent.key(
+            "c",
+            modifiers: ["SHIFT", "command", "control", "command", "caps-lock", "tab"]
+        )
+
+        XCTAssertEqual(input.modifiers, ["command", "control", "shift"])
+    }
+
+    func testRemoteKeyboardTextNeverCarriesShortcutModifiers() throws {
+        let input = try XCTUnwrap(RemoteKeyboardInput.event(
+            text: "A",
+            modifiers: ["command", "shift"]
+        ))
+
+        XCTAssertEqual(input.kind, .text)
+        XCTAssertEqual(input.text, "A")
+        XCTAssertNil(input.modifiers)
+    }
+
+    func testRemoteKeyboardSpecialKeyPreservesOnlyCurrentModifiers() throws {
+        let input = try XCTUnwrap(RemoteKeyboardInput.event(
+            key: "TAB",
+            modifiers: ["shift", "unknown", "control"]
+        ))
+
+        XCTAssertEqual(input.kind, .key)
+        XCTAssertEqual(input.key, "tab")
+        XCTAssertEqual(input.modifiers, ["control", "shift"])
+    }
+
+    func testRemoteKeyboardKeyFactoryNormalizesCase() {
+        XCTAssertEqual(RemoteInputEvent.key("PageUp").key, "pageup")
+    }
+
     func testRemoteDragRoundTrip() throws {
         let inputs = [
             RemoteInputEvent.primaryDown(x: 0.2, y: 0.3),

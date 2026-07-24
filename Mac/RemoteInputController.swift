@@ -5,6 +5,7 @@ import Foundation
 
 final class RemoteInputController {
     var isAuthorized: Bool { AXIsProcessTrusted() }
+    private let eventSource = CGEventSource(stateID: .privateState)
     private var isPrimaryButtonDown = false
     private var scrollRemainderX = 0.0
     private var scrollRemainderY = 0.0
@@ -73,7 +74,7 @@ final class RemoteInputController {
             x: bounds.minX + min(max(x, 0), 1) * bounds.width,
             y: bounds.minY + min(max(y, 0), 1) * bounds.height
         )
-        let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
+        let event = CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
         event?.post(tap: .cghidEventTap)
     }
 
@@ -83,7 +84,7 @@ final class RemoteInputController {
         let up: CGEventType = button == .right ? .rightMouseUp : .leftMouseUp
         for clickState in 1...max(count, 1) {
             let downEvent = CGEvent(
-                mouseEventSource: nil,
+                mouseEventSource: eventSource,
                 mouseType: down,
                 mouseCursorPosition: location,
                 mouseButton: button
@@ -92,7 +93,7 @@ final class RemoteInputController {
             downEvent?.post(tap: .cghidEventTap)
 
             let upEvent = CGEvent(
-                mouseEventSource: nil,
+                mouseEventSource: eventSource,
                 mouseType: up,
                 mouseCursorPosition: location,
                 mouseButton: button
@@ -105,16 +106,16 @@ final class RemoteInputController {
     private func primaryButtonDown(x: Double, y: Double) {
         let point = displayPoint(x: x, y: y)
         if isPrimaryButtonDown {
-            CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+            CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
         }
-        CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
         isPrimaryButtonDown = true
     }
 
     private func primaryButtonDrag(x: Double, y: Double) {
         let point = displayPoint(x: x, y: y)
         let eventType: CGEventType = isPrimaryButtonDown ? .leftMouseDragged : .mouseMoved
-        CGEvent(mouseEventSource: nil, mouseType: eventType, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        CGEvent(mouseEventSource: eventSource, mouseType: eventType, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
     }
 
     private func primaryButtonUp(x: Double?, y: Double?) {
@@ -125,7 +126,7 @@ final class RemoteInputController {
         } else {
             point = CGEvent(source: nil)?.location ?? .zero
         }
-        CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
         isPrimaryButtonDown = false
     }
 
@@ -147,7 +148,7 @@ final class RemoteInputController {
         guard wholeX != 0 || wholeY != 0 else { return }
 
         let event = CGEvent(
-            scrollWheelEvent2Source: nil,
+            scrollWheelEvent2Source: eventSource,
             units: .pixel,
             wheelCount: 2,
             wheel1: Int32(clamping: Int(wholeY)),
@@ -160,20 +161,22 @@ final class RemoteInputController {
     private func type(_ text: String) {
         let characters = Array(text.utf16)
         guard !characters.isEmpty else { return }
-        let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)
+        let down = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: true)
+        down?.flags = []
         down?.keyboardSetUnicodeString(stringLength: characters.count, unicodeString: characters)
         down?.post(tap: .cghidEventTap)
-        let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
+        let up = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: false)
+        up?.flags = []
         up?.keyboardSetUnicodeString(stringLength: characters.count, unicodeString: characters)
         up?.post(tap: .cghidEventTap)
     }
 
     private func press(code: CGKeyCode, modifiers: CGEventFlags) {
-        let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)
+        let down = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: true)
         down?.flags = modifiers
         down?.post(tap: .cghidEventTap)
-        let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)
-        up?.flags = modifiers
+        let up = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: false)
+        up?.flags = []
         up?.post(tap: .cghidEventTap)
     }
 
@@ -195,9 +198,9 @@ final class RemoteInputController {
             "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "return": 36,
             "l": 37, "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43,
             "/": 44, "n": 45, "m": 46, ".": 47, "tab": 48, "space": 49,
-            "`": 50, "delete": 51, "escape": 53, "home": 115, "pageUp": 116,
-            "end": 119, "pageDown": 121, "left": 123, "right": 124, "down": 125, "up": 126
+            "`": 50, "delete": 51, "escape": 53, "home": 115, "pageup": 116,
+            "end": 119, "pagedown": 121, "left": 123, "right": 124, "down": 125, "up": 126
         ]
-        return map[key]
+        return map[key.lowercased()]
     }
 }

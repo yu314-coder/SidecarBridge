@@ -92,7 +92,34 @@ struct RemoteInputEvent: Codable, Equatable {
     }
 
     static func key(_ key: String, modifiers: [String] = []) -> Self {
-        Self(kind: .key, sequence: nil, key: key, modifiers: modifiers)
+        Self(
+            kind: .key,
+            sequence: nil,
+            key: key.lowercased(),
+            modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers)
+        )
+    }
+}
+
+enum RemoteKeyboardInput {
+    private static let modifierOrder = ["command", "option", "control", "shift"]
+
+    static func normalizedModifiers(_ modifiers: [String]) -> [String] {
+        let requested = Set(modifiers.map { $0.lowercased() })
+        return modifierOrder.filter(requested.contains)
+    }
+
+    static func event(
+        text: String? = nil,
+        key: String? = nil,
+        modifiers: [String] = []
+    ) -> RemoteInputEvent? {
+        let normalized = normalizedModifiers(modifiers)
+        if let key, !key.isEmpty {
+            return .key(key.lowercased(), modifiers: normalized)
+        }
+        guard let text, !text.isEmpty else { return nil }
+        return .text(text)
     }
 }
 

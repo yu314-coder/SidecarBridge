@@ -28,6 +28,7 @@ struct RemoteInputSurface: UIViewRepresentable {
         uiView.onZoom = onZoom
         uiView.onViewportPan = onViewportPan
         uiView.accessibilityValue = "Zoom \(Int((zoomScale * 100).rounded())) percent"
+        uiView.reclaimKeyboardFocus()
     }
 }
 
@@ -41,6 +42,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     var hasText: Bool { true }
     private var lastPointerTime: TimeInterval = 0
     private var isPrimaryDragging = false
+    private weak var pointerDragRecognizer: UIPanGestureRecognizer?
 
     init(
         contentAspectRatio: CGFloat,
@@ -70,9 +72,25 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             UIAccessibilityCustomAction(name: "Right click", target: self, selector: #selector(accessibilityRightClick))
         ]
         configureGestures()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(inputContextDidBecomeActive(_:)),
+            name: UIWindow.didBecomeKeyNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(inputContextDidBecomeActive(_:)),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) { nil }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
 
     override var canBecomeFirstResponder: Bool { true }
 
@@ -102,62 +120,88 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window != nil {
-            becomeFirstResponder()
+            reclaimKeyboardFocus()
         } else {
             finishPrimaryDrag(at: nil)
         }
     }
 
+    func reclaimKeyboardFocus() {
+        guard window != nil, !isFirstResponder else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.window?.isKeyWindow == true,
+                  UIApplication.shared.applicationState == .active,
+                  !self.isFirstResponder else { return }
+            self.becomeFirstResponder()
+        }
+    }
+
+    @objc private func inputContextDidBecomeActive(_ notification: Notification) {
+        reclaimKeyboardFocus()
+    }
+
     func insertText(_ text: String) {
-        onInput(.text(text))
+        guard let event = RemoteKeyboardInput.event(text: text) else { return }
+        onInput(event)
     }
 
     func deleteBackward() {
         onInput(.key("delete"))
     }
 
-    override var keyCommands: [UIKeyCommand]? {
-        var commands = [
-            command(UIKeyCommand.inputUpArrow),
-            command(UIKeyCommand.inputDownArrow),
-            command(UIKeyCommand.inputLeftArrow),
-            command(UIKeyCommand.inputRightArrow),
-            command(UIKeyCommand.inputEscape),
-            command("\r"),
-            command("\t")
-        ]
-        for key in ["a", "c", "v", "x", "z"] {
-            commands.append(command(key, modifiers: .command))
-            commands.append(command(key, modifiers: [.command, .shift]))
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var unhandled = Set<UIPress>()
+        for press in presses {
+            guard let hardwareKey = press.key,
+                  let remoteEvent = remoteEvent(for: hardwareKey) else {
+                unhandled.insert(press)
+                continue
+            }
+            onInput(remoteEvent)
         }
-        return commands
+        if !unhandled.isEmpty {
+            super.pressesBegan(unhandled, with: event)
+        }
     }
 
-    private func command(_ input: String, modifiers: UIKeyModifierFlags = []) -> UIKeyCommand {
-        let command = UIKeyCommand(input: input, modifierFlags: modifiers, action: #selector(handleKeyCommand(_:)))
-        command.wantsPriorityOverSystemBehavior = true
-        return command
-    }
-
-    @objc private func handleKeyCommand(_ sender: UIKeyCommand) {
-        guard let input = sender.input else { return }
-        let key: String
+    private func remoteEvent(for hardwareKey: UIKey) -> RemoteInputEvent? {
+        let input = hardwareKey.charactersIgnoringModifiers
+        let specialKey: String?
         switch input {
-        case UIKeyCommand.inputUpArrow: key = "up"
-        case UIKeyCommand.inputDownArrow: key = "down"
-        case UIKeyCommand.inputLeftArrow: key = "left"
-        case UIKeyCommand.inputRightArrow: key = "right"
-        case UIKeyCommand.inputEscape: key = "escape"
-        case "\r": key = "return"
-        case "\t": key = "tab"
-        default: key = input.lowercased()
+        case UIKeyCommand.inputUpArrow: specialKey = "up"
+        case UIKeyCommand.inputDownArrow: specialKey = "down"
+        case UIKeyCommand.inputLeftArrow: specialKey = "left"
+        case UIKeyCommand.inputRightArrow: specialKey = "right"
+        case UIKeyCommand.inputEscape: specialKey = "escape"
+        case "\r", "\n": specialKey = "return"
+        case "\t": specialKey = "tab"
+        case "\u{8}", "\u{7f}": specialKey = "delete"
+        default: specialKey = nil
         }
+
         var modifiers: [String] = []
-        if sender.modifierFlags.contains(.command) { modifiers.append("command") }
-        if sender.modifierFlags.contains(.alternate) { modifiers.append("option") }
-        if sender.modifierFlags.contains(.control) { modifiers.append("control") }
-        if sender.modifierFlags.contains(.shift) { modifiers.append("shift") }
-        onInput(.key(key, modifiers: modifiers))
+        if hardwareKey.modifierFlags.contains(.command) { modifiers.append("command") }
+        if hardwareKey.modifierFlags.contains(.alternate) { modifiers.append("option") }
+        if hardwareKey.modifierFlags.contains(.control) { modifiers.append("control") }
+        if hardwareKey.modifierFlags.contains(.shift) { modifiers.append("shift") }
+
+        if let specialKey {
+            return RemoteKeyboardInput.event(key: specialKey, modifiers: modifiers)
+        }
+
+        let hasShortcutModifier = hardwareKey.modifierFlags.intersection([.command, .alternate, .control]).isEmpty == false
+        if hasShortcutModifier {
+            return RemoteKeyboardInput.event(
+                key: input == " " ? "space" : input,
+                modifiers: modifiers
+            )
+        }
+
+        // `characters` already contains Shift/Caps Lock and the active keyboard
+        // layout. Sending it as text avoids accidentally carrying a modifier
+        // into the following keystroke.
+        return RemoteKeyboardInput.event(text: hardwareKey.characters)
     }
 
     private func configureGestures() {
@@ -201,6 +245,8 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         pointerDrag.minimumNumberOfTouches = 1
         pointerDrag.maximumNumberOfTouches = 1
         pointerDrag.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        pointerDrag.delegate = self
+        pointerDragRecognizer = pointerDrag
         addGestureRecognizer(pointerDrag)
 
         let scroll = UIPanGestureRecognizer(target: self, action: #selector(handleScroll(_:)))
@@ -336,6 +382,11 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             return false
         }
         return gestureRecognizer is UIPanGestureRecognizer || otherGestureRecognizer is UIPanGestureRecognizer
+    }
+
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === pointerDragRecognizer else { return true }
+        return gestureRecognizer.buttonMask == .primary
     }
 
     private func normalizedPoint(_ point: CGPoint) -> CGPoint? {
