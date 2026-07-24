@@ -30,6 +30,6 @@
 		<string>_sb-direct._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>SidecarBridge finds your iPad and sends the Mac screen when native Sidecar is unavailable.</string>
+	<string>SidecarBridge finds your iPhone or iPad and sends the Mac screen when a local display connection is requested.</string>
 </dict>
 </plist>

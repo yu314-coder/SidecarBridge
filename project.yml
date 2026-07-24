@@ -8,7 +8,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "2"
+    CURRENT_PROJECT_VERSION: "3"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -28,7 +28,7 @@ targets:
         NSBonjourServices:
           - _sb-screen._tcp
           - _sb-direct._tcp
-        NSLocalNetworkUsageDescription: SidecarBridge finds your iPad and sends the Mac screen when native Sidecar is unavailable.
+        NSLocalNetworkUsageDescription: SidecarBridge finds your iPhone or iPad and sends the Mac screen when a local display connection is requested.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
@@ -64,7 +64,7 @@ targets:
         NSBonjourServices:
           - _sb-screen._tcp
           - _sb-direct._tcp
-        NSLocalNetworkUsageDescription: SidecarBridge finds your Mac and receives its screen when native Sidecar is unavailable.
+        NSLocalNetworkUsageDescription: SidecarBridge finds your Mac and receives its screen over your local network.
         UIBackgroundModes:
           - audio
         UILaunchScreen: {}
@@ -84,7 +84,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
         PRODUCT_NAME: SidecarBridge
         CODE_SIGN_STYLE: Automatic
-        TARGETED_DEVICE_FAMILY: "2"
+        TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:

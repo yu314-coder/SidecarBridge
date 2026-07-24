@@ -4,6 +4,9 @@ import UniformTypeIdentifiers
 
 struct PadContentView: View {
     @ObservedObject var model: PadConnectionModel
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var controlDrawerOpen = false
     @State private var showingFileImporter = false
     @State private var viewerScale: CGFloat = 1
@@ -37,6 +40,7 @@ struct PadContentView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .tint(.cyan)
         .onChange(of: showVirtualCursor) { _, value in
             UserDefaults.standard.set(value, forKey: "showVirtualCursor")
         }
@@ -84,7 +88,7 @@ struct PadContentView: View {
                 }
                 .frame(maxWidth: 920)
                 .frame(minHeight: geometry.size.height - 48)
-                .padding(.horizontal, 36)
+                .padding(.horizontal, horizontalSizeClass == .compact ? 16 : 36)
                 .padding(.vertical, 24)
                 .frame(maxWidth: .infinity)
             }
@@ -92,100 +96,128 @@ struct PadContentView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 18) {
-            Image("BrandMark")
-                .resizable()
-                .scaledToFill()
-                .frame(width: 82, height: 82)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .shadow(color: .blue.opacity(0.35), radius: 18, y: 8)
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text("SidecarBridge")
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
-                Text("A trackpad-capable window into your Mac")
-                    .font(.headline)
-                    .foregroundStyle(.white.opacity(0.58))
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 18) {
+                headerIdentity
+                Spacer()
+                securityBadge
             }
-            Spacer()
-            Label("LOCAL + ENCRYPTED", systemImage: "lock.fill")
-                .font(.caption2.bold())
-                .tracking(1)
-                .foregroundStyle(.cyan)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.cyan.opacity(0.1), in: Capsule())
+            VStack(alignment: .leading, spacing: 14) {
+                headerIdentity
+                securityBadge
+            }
         }
     }
 
-    private var connectionCard: some View {
-        HStack(spacing: 18) {
-            ZStack {
-                Circle().fill(statusColor.opacity(0.14))
-                Image(systemName: statusIcon)
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundStyle(statusColor)
-            }
-            .frame(width: 64, height: 64)
+    private var headerIdentity: some View {
+        HStack(spacing: horizontalSizeClass == .compact ? 12 : 18) {
+            Image("BrandMark")
+                .resizable()
+                .scaledToFill()
+                .frame(
+                    width: horizontalSizeClass == .compact ? 58 : 82,
+                    height: horizontalSizeClass == .compact ? 58 : 82
+                )
+                .clipShape(RoundedRectangle(cornerRadius: horizontalSizeClass == .compact ? 15 : 20, style: .continuous))
+                .shadow(color: .blue.opacity(0.35), radius: 18, y: 8)
+                .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text(model.status)
-                    .font(.title2.bold())
-                Text(model.detail)
-                    .font(.body)
-                    .foregroundStyle(.white.opacity(0.56))
-                    .multilineTextAlignment(.leading)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("SidecarBridge")
+                    .font(.largeTitle.bold())
+                    .fontDesign(.rounded)
+                    .minimumScaleFactor(0.8)
+                Text("A secure remote window into your Mac")
+                    .font(.headline)
+                    .foregroundStyle(.white.opacity(0.78))
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 12)
-            VStack(alignment: .trailing, spacing: 7) {
-                HStack(spacing: 7) {
-                    Circle().fill(statusColor).frame(width: 9, height: 9)
-                    Text(model.isConnected ? "MAC CONNECTED" : "SEARCHING")
-                        .font(.caption2.bold())
-                        .tracking(0.9)
+        }
+    }
+
+    private var securityBadge: some View {
+        Label("LOCAL + ENCRYPTED", systemImage: "lock.fill")
+            .font(.caption.bold())
+            .foregroundStyle(.cyan)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.cyan.opacity(0.14), in: Capsule())
+            .accessibilityLabel("Local encrypted connection")
+    }
+
+    private var connectionCard: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 18) {
+                connectionStatusIcon
+                connectionStatusText
+                Spacer(minLength: 12)
+                connectionModeSummary
+            }
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 14) {
+                    connectionStatusIcon
+                    connectionStatusText
                 }
-                .foregroundStyle(statusColor)
-                Text(model.preferTrackpadControl ? "In-App Display mode" : "System Sidecar mode")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.42))
+                connectionModeSummary
             }
         }
         .padding(20)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 22).stroke(.white.opacity(0.08)))
+        .accessibilityElement(children: .combine)
+    }
+
+    private var connectionStatusIcon: some View {
+        ZStack {
+            Circle().fill(statusColor.opacity(0.16))
+            Image(systemName: statusIcon)
+                .font(.title2.bold())
+                .foregroundStyle(statusColor)
+        }
+        .frame(width: 58, height: 58)
+        .accessibilityHidden(true)
+    }
+
+    private var connectionStatusText: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(model.status)
+                .font(.title2.bold())
+            Text(model.detail)
+                .font(.body)
+                .foregroundStyle(.white.opacity(0.78))
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var connectionModeSummary: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(
+                model.isConnected ? "MAC CONNECTED" : "SEARCHING",
+                systemImage: model.isConnected ? "checkmark.circle.fill" : "magnifyingglass"
+            )
+            .font(.caption.bold())
+            .foregroundStyle(statusColor)
+            Text(model.preferTrackpadControl ? "In-App Display mode" : "System Sidecar mode")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.74))
+        }
     }
 
     private var discoveryCard: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 18) {
-                MacDiscoveryPulse(tint: model.localNetworkPermissionNeeded ? .orange : .cyan)
-                    .frame(width: 72, height: 72)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(model.localNetworkPermissionNeeded ? "Discovery needs permission" : "Looking for your Mac")
-                        .font(.title2.bold())
-                    Text(discoveryDetail)
-                        .font(.callout)
-                        .foregroundStyle(.white.opacity(0.58))
-                        .fixedSize(horizontal: false, vertical: true)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 18) {
+                    discoveryIdentity
+                    Spacer(minLength: 12)
+                    discoveryAttemptControls
                 }
-
-                Spacer(minLength: 12)
-
-                VStack(alignment: .trailing, spacing: 7) {
-                    Text("ATTEMPT \(model.discoveryAttempt)")
-                        .font(.caption2.bold())
-                        .tracking(0.9)
-                        .foregroundStyle(model.localNetworkPermissionNeeded ? .orange : .cyan)
-                    Text(searchElapsedText)
-                        .font(.system(.body, design: .monospaced).bold())
-                    Button {
-                        model.retry()
-                    } label: {
-                        Label("Restart", systemImage: "arrow.clockwise")
+                VStack(alignment: .leading, spacing: 14) {
+                    discoveryIdentity
+                    HStack {
+                        discoveryAttemptControls
+                        Spacer()
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
             }
 
@@ -207,7 +239,45 @@ struct PadContentView: View {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .stroke((model.localNetworkPermissionNeeded ? Color.orange : Color.cyan).opacity(0.22))
         )
-        .animation(.easeInOut(duration: 0.25), value: model.isDiscoveryTakingLonger)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: model.isDiscoveryTakingLonger)
+    }
+
+    private var discoveryIdentity: some View {
+        HStack(alignment: .center, spacing: 16) {
+            MacDiscoveryPulse(
+                tint: model.localNetworkPermissionNeeded ? .orange : .cyan,
+                reduceMotion: reduceMotion
+            )
+            .frame(width: 64, height: 64)
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(model.localNetworkPermissionNeeded ? "Discovery needs permission" : "Looking for your Mac")
+                    .font(.title2.bold())
+                Text(discoveryDetail)
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.78))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var discoveryAttemptControls: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("ATTEMPT \(model.discoveryAttempt)")
+                .font(.caption.bold())
+                .foregroundStyle(model.localNetworkPermissionNeeded ? .orange : .cyan)
+            Text(searchElapsedText)
+                .font(.system(.body, design: .monospaced).bold())
+                .accessibilityLabel("Search time \(model.discoveryElapsedSeconds) seconds")
+            Button {
+                model.retry()
+            } label: {
+                Label("Restart", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
     }
 
     @ViewBuilder
@@ -253,13 +323,13 @@ struct PadContentView: View {
                     .font(.callout.bold())
                 Text(discoveryRecoveryText)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(.white.opacity(0.78))
                     .fixedSize(horizontal: false, vertical: true)
                 if let issue = model.lastDiscoveryIssue, !model.localNetworkPermissionNeeded {
                     Text(issue)
                         .font(.caption2.monospaced())
                         .foregroundStyle(.orange)
-                        .lineLimit(2)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                 }
             }
 
@@ -281,14 +351,22 @@ struct PadContentView: View {
 
     private var modeChooser: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Choose how to use your iPad")
-                    .font(.headline)
-                Spacer()
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Text("Choose how to use this device")
+                        .font(.headline)
+                    Spacer()
+                    Text("IN-APP DISPLAY RECOMMENDED")
+                        .font(.caption.bold())
+                        .foregroundStyle(.cyan)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Choose how to use this device")
+                        .font(.headline)
                     Text("IN-APP DISPLAY RECOMMENDED")
                     .font(.caption2.bold())
-                    .tracking(0.8)
                     .foregroundStyle(.cyan)
+                }
             }
 
             ViewThatFits(in: .horizontal) {
@@ -345,114 +423,166 @@ struct PadContentView: View {
             model.setPreferTrackpadControl(true)
         }
 
-        PadModeCard(
-            icon: "rectangle.connected.to.line.below",
-            title: "System Sidecar",
-            description: "Apple's native display session opens its separate Sidecar app and suspends this app.",
-            badge: "LEAVES APP",
-            tint: .purple,
-            isSelected: !model.preferTrackpadControl
-        ) {
-            model.setPreferTrackpadControl(false)
+        if supportsSystemSidecar {
+            PadModeCard(
+                icon: "rectangle.connected.to.line.below",
+                title: "System Sidecar",
+                description: "Apple's native display session opens its separate Sidecar app and suspends this app.",
+                badge: "LEAVES APP",
+                tint: .purple,
+                isSelected: !model.preferTrackpadControl
+            ) {
+                model.setPreferTrackpadControl(false)
+            }
         }
     }
 
     private var actionBar: some View {
-        HStack(spacing: 12) {
-            Button {
-                model.retry()
-            } label: {
-                Label("Search Again", systemImage: "arrow.clockwise")
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                actionButtons
+                Spacer()
             }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
+            VStack(alignment: .leading, spacing: 12) {
+                actionButtons
+            }
+        }
+    }
 
+    @ViewBuilder
+    private var actionButtons: some View {
+        Button {
+            model.retry()
+        } label: {
+            Label("Search Again", systemImage: "arrow.clockwise")
+                .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+
+        Button {
+            if model.preferTrackpadControl || !supportsSystemSidecar {
+                model.requestFallback()
+            } else {
+                model.requestSystemSidecar()
+            }
+        } label: {
+            Label(
+                model.preferTrackpadControl || !supportsSystemSidecar ? "Start In-App Display" : "Open System Sidecar",
+                systemImage: model.preferTrackpadControl || !supportsSystemSidecar ? "play.fill" : "rectangle.connected.to.line.below"
+            )
+            .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.cyan)
+        .controlSize(.large)
+        .disabled(!model.isConnected)
+
+        if model.localNetworkPermissionNeeded {
             Button {
-                if model.preferTrackpadControl {
-                    model.requestFallback()
-                } else {
-                    model.requestSystemSidecar()
-                }
+                model.openAppSettings()
             } label: {
-                Label(
-                    model.preferTrackpadControl ? "Start In-App Display" : "Open System Sidecar",
-                    systemImage: model.preferTrackpadControl ? "play.fill" : "rectangle.connected.to.line.below"
-                )
+                Label("Allow Local Network", systemImage: "exclamationmark.shield")
+                    .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.cyan)
+            .tint(.orange)
             .controlSize(.large)
-            .disabled(!model.isConnected)
-
-            if model.localNetworkPermissionNeeded {
-                Button {
-                    model.openAppSettings()
-                } label: {
-                    Label("Allow Local Network", systemImage: "exclamationmark.shield")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
-                .controlSize(.large)
-            }
-
-            Spacer()
         }
     }
 
     private var requirementStrip: some View {
-        HStack(spacing: 10) {
-            RequirementPill(icon: "wifi", text: "Local link + AWDL")
-            RequirementPill(icon: "lock.fill", text: "Encrypted link")
-            RequirementPill(icon: "keyboard", text: "Magic Keyboard")
-            RequirementPill(icon: "rectangle.and.hand.point.up.left", text: "Trackpad + touch")
-            Spacer()
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                requirementPills
+                Spacer()
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                requirementPills
+            }
         }
         .padding(.top, 2)
     }
 
+    @ViewBuilder
+    private var requirementPills: some View {
+        RequirementPill(icon: "wifi", text: "Local link + AWDL")
+        RequirementPill(icon: "lock.fill", text: "Encrypted link")
+        if supportsSystemSidecar {
+            RequirementPill(icon: "keyboard", text: "Magic Keyboard")
+            RequirementPill(icon: "rectangle.and.hand.point.up.left", text: "Trackpad + touch")
+        } else {
+            RequirementPill(icon: "hand.tap", text: "Touch controls")
+        }
+    }
+
     private var fileTransferCard: some View {
-        HStack(spacing: 16) {
-            Image(systemName: "arrow.left.arrow.right.square.fill")
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(.cyan)
-                .frame(width: 52, height: 52)
-                .background(.cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "arrow.left.arrow.right.square.fill")
+                    .font(.title2.bold())
+                    .foregroundStyle(.cyan)
+                    .frame(width: 48, height: 48)
+                    .background(.cyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
+                    .accessibilityHidden(true)
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Encrypted file transfer").font(.headline)
-                if let transfer = model.fileTransferSnapshot {
-                    Text("\(transfer.message): \(transfer.fileName)")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.62))
-                    ProgressView(value: transfer.progress).tint(.cyan)
-                } else if let error = model.fileTransferError {
-                    Text(error).font(.caption).foregroundStyle(.orange)
-                } else {
-                    Text("Transfer through the same encrypted local connection used by the display.")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.55))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Encrypted file transfer").font(.headline)
+                    if let transfer = model.fileTransferSnapshot {
+                        Text("\(transfer.message): \(transfer.fileName)")
+                            .font(.callout)
+                            .foregroundStyle(.white.opacity(0.78))
+                            .fixedSize(horizontal: false, vertical: true)
+                        ProgressView(value: transfer.progress)
+                            .tint(.cyan)
+                            .accessibilityValue("\(Int(transfer.progress * 100)) percent")
+                    } else if let error = model.fileTransferError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("Transfer through the same encrypted local connection used by the display.")
+                            .font(.callout)
+                            .foregroundStyle(.white.opacity(0.78))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
-            Spacer(minLength: 10)
-            if let received = model.lastReceivedFile {
-                ShareLink(item: received) {
-                    Label("Share Received", systemImage: "square.and.arrow.up")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    fileTransferButtons
+                    Spacer()
                 }
-                .buttonStyle(.bordered)
+                VStack(alignment: .leading, spacing: 10) {
+                    fileTransferButtons
+                }
             }
-            Button {
-                showingFileImporter = true
-            } label: {
-                Label("Send File", systemImage: "paperplane.fill")
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.cyan)
-            .disabled(!model.isConnected || model.isFileTransferring)
         }
         .padding(17)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.08)))
+    }
+
+    @ViewBuilder
+    private var fileTransferButtons: some View {
+        if let received = model.lastReceivedFile {
+            ShareLink(item: received) {
+                Label("Share Received", systemImage: "square.and.arrow.up")
+                    .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
+            }
+            .buttonStyle(.bordered)
+        }
+        Button {
+            showingFileImporter = true
+        } label: {
+            Label("Send File", systemImage: "paperplane.fill")
+                .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.cyan)
+        .disabled(!model.isConnected || model.isFileTransferring)
     }
 
     private var streamingView: some View {
@@ -467,9 +597,11 @@ struct PadContentView: View {
                             .interpolation(.high)
                             .scaledToFit()
                             .ignoresSafeArea()
+                            .accessibilityHidden(true)
                     } else {
                         VideoDisplaySurface(controller: model.videoDisplay)
                             .ignoresSafeArea()
+                            .accessibilityHidden(true)
                     }
 
                     if showVirtualCursor {
@@ -481,6 +613,7 @@ struct PadContentView: View {
                         )
                         .ignoresSafeArea()
                         .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                     }
                 }
                 .scaleEffect(viewerScale)
@@ -516,49 +649,84 @@ struct PadContentView: View {
                         .background(.ultraThinMaterial, in: Capsule())
                         .padding(.bottom, 14)
                         .allowsHitTesting(false)
+                        .accessibilityLabel(model.remoteInputAuthorized
+                            ? "Remote input help: two-finger scroll, pinch zoom, three-finger pan, and left or right click."
+                            : "Remote input requires Accessibility permission on the Mac.")
                 }
             }
 
-                streamingControlDrawer
+                streamingControlDrawer(availableSize: geometry.size)
             }
         }
     }
 
     private var streamTopStatusBar: some View {
-        HStack(spacing: 10) {
-            Image("BrandMark")
-                .resizable()
-                .scaledToFill()
-                .frame(width: 34, height: 34)
-                .clipShape(RoundedRectangle(cornerRadius: 9))
-            VStack(alignment: .leading, spacing: 1) {
-                Text("SidecarBridge").font(.caption.bold())
-                Label(streamQualityText, systemImage: "lock.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                streamIdentity
+                Spacer()
+                streamStatusActions
             }
-            Spacer()
-            if let latency = model.connectionLatencyMS {
-                Label("\(latency) ms", systemImage: "waveform.path.ecg")
-                    .font(.caption2.bold())
-                    .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 10) {
+                streamIdentity
+                streamStatusActions
             }
-            Label(inputStatusText, systemImage: inputStatusIcon)
-                .font(.caption2.bold())
-                .tracking(0.7)
-                .foregroundStyle(model.remoteInputAuthorized && model.lastInputAccepted ? .cyan : .orange)
-            Button("Stop") { model.stopStreaming() }
-                .buttonStyle(.bordered)
         }
         .padding(10)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .padding()
     }
 
-    private var streamingControlDrawer: some View {
-        HStack(spacing: 0) {
+    private var streamIdentity: some View {
+        HStack(spacing: 9) {
+            Image("BrandMark")
+                .resizable()
+                .scaledToFill()
+                .frame(width: 34, height: 34)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("SidecarBridge").font(.caption.bold())
+                Label(streamQualityText, systemImage: "lock.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.76))
+            }
+        }
+    }
+
+    private var streamStatusActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                streamStatusItems
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                streamStatusItems
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var streamStatusItems: some View {
+        if let latency = model.connectionLatencyMS {
+            Label("\(latency) ms", systemImage: "waveform.path.ecg")
+                .font(.caption.bold())
+                .foregroundStyle(.green)
+                .accessibilityLabel("Connection latency \(latency) milliseconds")
+        }
+        Label(inputStatusText, systemImage: inputStatusIcon)
+            .font(.caption.bold())
+            .foregroundStyle(model.remoteInputAuthorized && model.lastInputAccepted ? .cyan : .orange)
+        Button("Stop") { model.stopStreaming() }
+            .buttonStyle(.bordered)
+    }
+
+    private func streamingControlDrawer(availableSize: CGSize) -> some View {
+        let drawerWidth = min(310, max(250, availableSize.width - 44))
+        let drawerHeight = min(760, max(260, availableSize.height - 16))
+
+        return HStack(spacing: 0) {
             Button {
-                withAnimation(.snappy(duration: 0.22)) { controlDrawerOpen.toggle() }
+                setControlDrawer(open: !controlDrawerOpen)
             } label: {
                 Image(systemName: controlDrawerOpen ? "chevron.right" : "chevron.left")
                     .font(.headline.bold())
@@ -570,9 +738,12 @@ struct PadContentView: View {
                     ))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(controlDrawerOpen ? "Close viewer controls" : "Open viewer controls")
+            .accessibilityHint("Shows zoom, file transfer, background viewing, click, and display options.")
 
             if controlDrawerOpen {
-                VStack(alignment: .leading, spacing: 16) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
                     HStack {
                         Label("Viewer controls", systemImage: "slider.horizontal.3")
                             .font(.headline)
@@ -588,7 +759,7 @@ struct PadContentView: View {
                         HStack {
                             Label("Display zoom", systemImage: "magnifyingglass")
                                 .font(.caption.bold())
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.white.opacity(0.78))
                             Spacer()
                             Text("\(Int((viewerScale * 100).rounded()))%")
                                 .font(.caption.monospacedDigit().bold())
@@ -596,14 +767,16 @@ struct PadContentView: View {
                         }
                         HStack(spacing: 8) {
                             Button { zoomViewer(by: 0.8) } label: { Image(systemName: "minus.magnifyingglass") }
+                                .accessibilityLabel("Zoom out")
                             Button("Reset") { resetViewerZoom() }
                                 .frame(maxWidth: .infinity)
                             Button { zoomViewer(by: 1.25) } label: { Image(systemName: "plus.magnifyingglass") }
+                                .accessibilityLabel("Zoom in")
                         }
                         .buttonStyle(.bordered)
                         Text("Pinch with two fingers to zoom. Drag with three fingers to pan; two-finger swipes still scroll the Mac.")
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white.opacity(0.78))
                     }
 
                     Divider()
@@ -611,12 +784,14 @@ struct PadContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("File transfer", systemImage: "arrow.left.arrow.right.square")
                             .font(.caption.bold())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white.opacity(0.78))
                         if let transfer = model.fileTransferSnapshot {
                             Text("\(transfer.message): \(transfer.fileName)")
                                 .font(.caption2)
-                                .lineLimit(1)
-                            ProgressView(value: transfer.progress).tint(.cyan)
+                                .fixedSize(horizontal: false, vertical: true)
+                            ProgressView(value: transfer.progress)
+                                .tint(.cyan)
+                                .accessibilityValue("\(Int(transfer.progress * 100)) percent")
                         }
                         Button {
                             showingFileImporter = true
@@ -633,7 +808,7 @@ struct PadContentView: View {
                         HStack {
                             Label("Background viewer", systemImage: "pip")
                                 .font(.caption.bold())
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.white.opacity(0.78))
                             Spacer()
                             Text(model.isPictureInPictureActive ? "ACTIVE" : model.keepRunningInBackground ? "AUTO" : "OFF")
                                 .font(.caption2.bold())
@@ -666,7 +841,7 @@ struct PadContentView: View {
                             .font(.caption2)
                             .foregroundStyle(
                                 model.isPictureInPictureActive || model.isPictureInPicturePossible
-                                    ? Color.secondary
+                                    ? Color.white.opacity(0.78)
                                     : Color.orange
                             )
                     }
@@ -674,27 +849,15 @@ struct PadContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("Trackpad clicks", systemImage: "cursorarrow.click")
                             .font(.caption.bold())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white.opacity(0.78))
 
-                        HStack(spacing: 8) {
-                            TrackpadClickButton(
-                                title: "Left",
-                                systemImage: "cursorarrow.click",
-                                tint: .cyan,
-                                action: model.sendLeftClick
-                            )
-                            TrackpadClickButton(
-                                title: "Double",
-                                systemImage: "square.on.square",
-                                tint: .indigo,
-                                action: model.sendDoubleClick
-                            )
-                            TrackpadClickButton(
-                                title: "Right",
-                                systemImage: "contextualmenu.and.cursorarrow",
-                                tint: .orange,
-                                action: model.sendRightClick
-                            )
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 8) {
+                                trackpadClickButtons
+                            }
+                            VStack(spacing: 8) {
+                                trackpadClickButtons
+                            }
                         }
                     }
 
@@ -727,12 +890,13 @@ struct PadContentView: View {
                     .buttonStyle(.borderedProminent)
                 }
                 .padding(20)
-                .frame(width: 310)
+                .frame(width: drawerWidth)
                 .background(.ultraThinMaterial)
                 .overlay(alignment: .leading) { Divider() }
             }
         }
-        .frame(height: 760)
+        }
+        .frame(height: drawerHeight)
         .clipShape(UnevenRoundedRectangle(
             topLeadingRadius: 18,
             bottomLeadingRadius: 18
@@ -742,13 +906,35 @@ struct PadContentView: View {
             DragGesture(minimumDistance: 12)
                 .onEnded { value in
                     if value.translation.width < -35 {
-                        withAnimation(.snappy(duration: 0.22)) { controlDrawerOpen = true }
+                        setControlDrawer(open: true)
                     } else if value.translation.width > 35 {
-                        withAnimation(.snappy(duration: 0.22)) { controlDrawerOpen = false }
+                        setControlDrawer(open: false)
                     }
                 }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+    }
+
+    @ViewBuilder
+    private var trackpadClickButtons: some View {
+        TrackpadClickButton(
+            title: "Left",
+            systemImage: "cursorarrow.click",
+            tint: .cyan,
+            action: model.sendLeftClick
+        )
+        TrackpadClickButton(
+            title: "Double",
+            systemImage: "square.on.square",
+            tint: .indigo,
+            action: model.sendDoubleClick
+        )
+        TrackpadClickButton(
+            title: "Right",
+            systemImage: "contextualmenu.and.cursorarrow",
+            tint: .orange,
+            action: model.sendRightClick
+        )
     }
 
     private struct TrackpadClickButton: View {
@@ -770,6 +956,20 @@ struct PadContentView: View {
             .buttonStyle(.borderedProminent)
             .tint(tint)
             .accessibilityLabel("\(title) click")
+        }
+    }
+
+    private var supportsSystemSidecar: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    private func setControlDrawer(open: Bool) {
+        if reduceMotion {
+            controlDrawerOpen = open
+        } else {
+            withAnimation(.snappy(duration: 0.22)) {
+                controlDrawerOpen = open
+            }
         }
     }
 
@@ -910,21 +1110,31 @@ struct PadContentView: View {
 
 private struct MacDiscoveryPulse: View {
     let tint: Color
+    let reduceMotion: Bool
 
+    @ViewBuilder
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-            let phase = timeline.date.timeIntervalSinceReferenceDate
-                .truncatingRemainder(dividingBy: 1.8) / 1.8
-            ZStack {
-                Circle()
-                    .stroke(tint.opacity(0.45 * (1 - phase)), lineWidth: 2)
-                    .scaleEffect(0.72 + phase * 0.42)
-                Circle()
-                    .fill(tint.opacity(0.12))
-                Image(systemName: "desktopcomputer.and.macbook")
-                    .font(.system(size: 27, weight: .semibold))
-                    .foregroundStyle(tint)
+        if reduceMotion {
+            pulse(phase: 0.35)
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                let phase = timeline.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: 1.8) / 1.8
+                pulse(phase: phase)
             }
+        }
+    }
+
+    private func pulse(phase: Double) -> some View {
+        ZStack {
+            Circle()
+                .stroke(tint.opacity(0.45 * (1 - phase)), lineWidth: 2)
+                .scaleEffect(0.72 + phase * 0.42)
+            Circle()
+                .fill(tint.opacity(0.12))
+            Image(systemName: "desktopcomputer.and.macbook")
+                .font(.title2.bold())
+                .foregroundStyle(tint)
         }
     }
 }
@@ -938,41 +1148,65 @@ private struct DiscoveryPathTile: View {
     let isActive: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 11)
-                    .fill(tint.opacity(0.12))
-                if isActive {
-                    ProgressView().tint(tint)
-                } else {
-                    Image(systemName: icon)
-                        .font(.headline)
-                        .foregroundStyle(tint)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                pathIcon
+                pathDescription
+                Spacer(minLength: 5)
+                pathState
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 12) {
+                    pathIcon
+                    pathDescription
                 }
+                pathState
             }
-            .frame(width: 40, height: 40)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.caption.bold())
-                Text(detail)
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.46))
-                    .lineLimit(2)
-            }
-            Spacer(minLength: 5)
-            Text(state)
-                .font(.system(size: 9, weight: .bold))
-                .tracking(0.6)
-                .foregroundStyle(tint)
         }
         .padding(12)
         .frame(maxWidth: .infinity, minHeight: 70)
         .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 15).stroke(tint.opacity(isActive ? 0.28 : 0.1)))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title), \(state)")
+        .accessibilityValue(detail)
+    }
+
+    private var pathIcon: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 11)
+                .fill(tint.opacity(0.14))
+            if isActive {
+                ProgressView().tint(tint)
+            } else {
+                Image(systemName: icon)
+                    .font(.headline)
+                    .foregroundStyle(tint)
+            }
+        }
+        .frame(width: 40, height: 40)
+        .accessibilityHidden(true)
+    }
+
+    private var pathDescription: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption.bold())
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.76))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var pathState: some View {
+        Text(state)
+            .font(.caption2.bold())
+            .foregroundStyle(tint)
     }
 }
 
 private struct RemoteCursorOverlay: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let normalizedPosition: CGPoint?
     let contentAspectRatio: CGFloat
     let isPressed: Bool
@@ -1009,8 +1243,8 @@ private struct RemoteCursorOverlay: View {
                         }
                         .position(x: point.x + 10, y: point.y + 13)
                 }
-                .animation(.easeOut(duration: 0.14), value: showClickIndicator)
-                .animation(.easeOut(duration: 0.1), value: isPressed)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: showClickIndicator)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: isPressed)
             }
         }
     }
@@ -1037,36 +1271,61 @@ private struct PadPermissionTile: View {
     let tint: Color
 
     var body: some View {
-        HStack(spacing: 13) {
-            Image(systemName: icon)
-                .font(.title3.bold())
-                .foregroundStyle(tint)
-                .frame(width: 42, height: 42)
-                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.callout.bold())
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.5))
-                    .lineLimit(2)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 13) {
+                permissionIcon
+                permissionDescription
+                Spacer(minLength: 8)
+                permissionState
             }
-            Spacer(minLength: 8)
-            Text(state)
-                .font(.caption2.bold())
-                .tracking(0.7)
-                .foregroundStyle(tint)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(tint.opacity(0.11), in: Capsule())
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 13) {
+                    permissionIcon
+                    permissionDescription
+                }
+                permissionState
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 76)
         .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.07)))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title), \(state)")
+        .accessibilityValue(detail)
+    }
+
+    private var permissionIcon: some View {
+        Image(systemName: icon)
+            .font(.title3.bold())
+            .foregroundStyle(tint)
+            .frame(width: 42, height: 42)
+            .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
+            .accessibilityHidden(true)
+    }
+
+    private var permissionDescription: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.callout.bold())
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.76))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var permissionState: some View {
+        Text(state)
+            .font(.caption2.bold())
+            .foregroundStyle(tint)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(tint.opacity(0.14), in: Capsule())
     }
 }
 
 private struct PadModeCard: View {
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     let icon: String
     let title: String
     let description: String
@@ -1084,23 +1343,26 @@ private struct PadModeCard: View {
                     .frame(width: 50, height: 50)
                     .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 14))
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(title).font(.title3.bold())
-                        Text(badge)
-                            .font(.caption2.bold())
-                            .tracking(0.7)
-                            .foregroundStyle(tint)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(tint.opacity(0.11), in: Capsule())
+                    ViewThatFits(in: .horizontal) {
+                        HStack {
+                            Text(title).font(.title3.bold())
+                            modeBadge
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(title).font(.title3.bold())
+                            modeBadge
+                        }
                     }
                     Text(description)
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.54))
+                        .foregroundStyle(.white.opacity(0.76))
                         .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 6)
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                Image(systemName: isSelected
+                    ? (differentiateWithoutColor ? "checkmark.square.fill" : "checkmark.circle.fill")
+                    : (differentiateWithoutColor ? "square" : "circle"))
                     .font(.title3)
                     .foregroundStyle(isSelected ? tint : .white.opacity(0.22))
             }
@@ -1117,6 +1379,19 @@ private struct PadModeCard: View {
             .overlay(RoundedRectangle(cornerRadius: 19).stroke(isSelected ? tint.opacity(0.55) : .white.opacity(0.07), lineWidth: isSelected ? 1.5 : 1))
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+        .accessibilityHint(description)
+    }
+
+    private var modeBadge: some View {
+        Text(badge)
+            .font(.caption.bold())
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(tint.opacity(0.14), in: Capsule())
     }
 }
 
@@ -1127,9 +1402,10 @@ private struct RequirementPill: View {
     var body: some View {
         Label(text, systemImage: icon)
             .font(.caption)
-            .foregroundStyle(.white.opacity(0.52))
+            .foregroundStyle(.white.opacity(0.76))
             .padding(.horizontal, 11)
             .padding(.vertical, 7)
             .background(.white.opacity(0.045), in: Capsule())
+            .accessibilityElement(children: .combine)
     }
 }

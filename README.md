@@ -1,22 +1,22 @@
 # SidecarBridge
 
-For the full architecture, protocol, permission, distribution, testing, and troubleshooting reference, see [SIDECARBRIDGE_TECHNICAL_GUIDE.md](SIDECARBRIDGE_TECHNICAL_GUIDE.md).
+For the full architecture, protocol, permission, distribution, testing, and troubleshooting reference, see [SIDECARBRIDGE_TECHNICAL_GUIDE.md](SIDECARBRIDGE_TECHNICAL_GUIDE.md). The current accessibility support matrix is in [ACCESSIBILITY.md](ACCESSIBILITY.md).
 
-SidecarBridge is a paired macOS + iPadOS app that removes most of the friction from using an iPad as a Mac display.
+SidecarBridge is a paired macOS + iOS/iPadOS app that turns an iPhone or iPad into an encrypted local Mac display and input surface.
 
 When either app starts, it uses this order:
 
-1. Wait for SidecarBridge on iPad to report its selected display mode.
-2. By default, discover the Mac directly with Bonjour and stream over an encrypted local-network or AWDL connection with Magic Keyboard and trackpad input. This stays inside SidecarBridge on iPad and does not open Apple's Continuity/Sidecar screen.
+1. Wait for SidecarBridge on iPhone or iPad to report its selected display mode.
+2. By default, discover the Mac directly with Bonjour and stream over an encrypted local-network or AWDL connection. This stays inside SidecarBridge and does not open Apple's Continuity/Sidecar screen.
 3. If direct LAN is unavailable, retain Multipeer Connectivity as the nearby/peer-to-peer fallback.
-4. Never launch native Sidecar automatically. The separate system Sidecar session starts only after the user explicitly clicks **Open System Sidecar**.
+4. On iPad only, never launch native Sidecar automatically. The separate system Sidecar session starts only after the user explicitly clicks **Open System Sidecar**.
 5. Keep a button to open Apple's Displays settings when manual intervention is needed.
 
 The in-app stream first uses Network.framework Bonjour discovery across the local network and Apple peer-to-peer link technologies. Each direct session performs ephemeral Curve25519 key agreement and encrypts screen/input packets with ChaChaPoly. Multipeer Connectivity remains available as a delayed fallback. Encrypted heartbeats verify the active route every four seconds, show measured round-trip latency in both apps, and rebuild stale sessions automatically. It is intentionally local/nearby only; this project does not publish the Mac screen to the public Internet.
 
 ## Build and install
 
-Requirements: Xcode 16 or newer, XcodeGen, macOS 14+, and iPadOS 17+.
+Requirements: Xcode 16 or newer, XcodeGen, macOS 14+, and iOS/iPadOS 17+.
 
 ```sh
 ./scripts/build.sh
@@ -27,16 +27,20 @@ Requirements: Xcode 16 or newer, XcodeGen, macOS 14+, and iPadOS 17+.
 In Xcode:
 
 1. Select the `SidecarBridgeMac` target, choose your Apple development team, then run it on **My Mac**.
-2. Select `SidecarBridgePad`, choose the same or another valid development team, connect the iPad, and run it on the iPad.
+2. Select `SidecarBridgePad`, choose the same or another valid development team, then run it on an iPhone or iPad.
 3. Accept **Local Network** on both devices.
-4. The first time the iPad finds the Mac, approve the one-time pairing alert on the Mac.
+4. The first time the mobile device finds the Mac, approve the one-time pairing alert on the Mac.
 5. If the fallback is needed, grant **Screen Recording** to SidecarBridge on the Mac, quit it, and reopen it.
 
 For automatic startup, use the **Automatic startup** card in the Mac app. It distinguishes enabled, disabled, and macOS-approval-required states. If the app was moved or rebuilt after startup was enabled, click **Repair** once so the Login Item points to `/Volumes/D/Applications/SidecarBridge.app` instead of an old Xcode build.
 
 For reliable native Sidecar, both devices should use the same Apple Account with two-factor authentication. Wireless Sidecar also needs Wi-Fi, Bluetooth, and Handoff; USB Sidecar needs the iPad to trust the Mac.
 
-If the app reports `NoAuth`, macOS or iPadOS has denied Local Network access. Use the app's **Allow Local Network** button and enable SidecarBridge in the system privacy page. Bonjour discovery cannot operate until this Apple-controlled permission is granted.
+If the app reports `NoAuth`, macOS or iOS/iPadOS has denied Local Network access. Use the app's **Allow Local Network** button and enable SidecarBridge in the system privacy page. Bonjour discovery cannot operate until this Apple-controlled permission is granted.
+
+### iPhone support
+
+Build 3 is universal (`TARGETED_DEVICE_FAMILY = 1,2`). iPhone provides the encrypted in-app display, touch input, discovery, settings, file transfer, zoom, and background Picture in Picture controls. Apple System Sidecar is an iPad-only feature, so SidecarBridge hides that mode on iPhone instead of presenting a control that cannot work.
 
 ## What is and is not possible
 

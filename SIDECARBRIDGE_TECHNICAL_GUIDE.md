@@ -1,15 +1,15 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and iPadOS application as of **Build 1** on 2026-07-19.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 3** on 2026-07-24.
 
 ## 1. Purpose
 
-SidecarBridge makes an iPad usable as a low-latency Mac screen and input surface when Apple's normal Sidecar discovery is unreliable.
+SidecarBridge makes an iPhone or iPad usable as a low-latency Mac screen and input surface when a local display is needed or Apple's normal Sidecar discovery is unreliable.
 
 It provides two deliberately separate experiences:
 
-1. **In-App Display** mirrors the Mac's main display inside SidecarBridge on iPad. It uses public screen-capture, video, local-network, and input APIs. This mode supports the iPad Magic Keyboard, trackpad, touch, and Apple Pencil as remote input.
-2. **System Sidecar** asks macOS to open Apple's native Sidecar session. It provides a true virtual Retina display, but Apple presents it in the separate system Continuity experience rather than inside the iPad app.
+1. **In-App Display** mirrors the Mac's main display inside SidecarBridge on iPhone or iPad. It uses public screen-capture, video, local-network, and input APIs. This mode supports touch on both devices plus iPad keyboard, trackpad, and Apple Pencil input.
+2. **System Sidecar** is shown only on iPad and asks macOS to open Apple's native Sidecar session. It provides a true virtual Retina display, but Apple presents it in the separate system Continuity experience rather than inside the app.
 
 SidecarBridge never pretends that native Sidecar can be embedded in a third-party app. It keeps the public in-app transport and private native Sidecar launcher visibly separate.
 
@@ -21,18 +21,19 @@ The current project has the following identity:
 | --- | --- |
 | App name | `SidecarBridge` |
 | macOS target | `SidecarBridgeMac` |
-| iPadOS target | `SidecarBridgePad` |
+| Universal iOS/iPadOS target | `SidecarBridgePad` |
 | Shared bundle ID | `io.sidecarbridge.mac` |
-| Marketing version | `0.1.0` |
-| Build number | `1` |
+| Marketing version | `1.0` |
+| Build number | `3` |
 | macOS minimum | macOS 14 |
-| iPadOS minimum | iPadOS 17 |
+| iOS/iPadOS minimum | iOS/iPadOS 17 |
 
-The macOS and iPadOS targets intentionally use the same app name and bundle ID so App Store Connect can represent them as one multi-platform app record. Their target names differ only inside Xcode.
+The macOS and universal iOS/iPadOS targets intentionally use the same app name and bundle ID so App Store Connect can represent them as one multi-platform app record. Their target names differ only inside Xcode.
 
 The latest live verification confirmed:
 
-- both targets compile;
+- the universal mobile target compiles for the iPhone simulator SDK and as a signed connected-iPhone build;
+- the mobile target declares both device families (`1,2`) and produces iPhone and iPad icon variants;
 - the Mac app is signed and runs from `/Volumes/D/Applications/SidecarBridge.app`;
 - direct Bonjour service publication is visible on active interfaces;
 - the nearby advertisement remains continuously active instead of being cycled on an idle timer;
@@ -330,7 +331,7 @@ Requirements:
 - Xcode 16 or newer;
 - XcodeGen;
 - an Apple development team for device signing;
-- a trusted iPad with Developer Mode enabled for direct development installation.
+- a trusted iPhone or iPad with Developer Mode enabled for direct development installation.
 
 Generate and test:
 

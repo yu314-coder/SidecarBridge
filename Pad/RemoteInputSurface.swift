@@ -27,6 +27,7 @@ struct RemoteInputSurface: UIViewRepresentable {
         uiView.onInput = onInput
         uiView.onZoom = onZoom
         uiView.onViewportPan = onViewportPan
+        uiView.accessibilityValue = "Zoom \(Int((zoomScale * 100).rounded())) percent"
     }
 }
 
@@ -58,12 +59,45 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         super.init(frame: .zero)
         backgroundColor = .clear
         isMultipleTouchEnabled = true
+        isAccessibilityElement = true
+        accessibilityLabel = "Remote Mac screen"
+        accessibilityValue = "Zoom \(Int((zoomScale * 100).rounded())) percent"
+        accessibilityHint = "Direct touch controls the Mac. Use the viewer controls for named click, zoom, file transfer, and stream actions."
+        accessibilityTraits = [.allowsDirectInteraction, .adjustable]
+        accessibilityCustomActions = [
+            UIAccessibilityCustomAction(name: "Left click", target: self, selector: #selector(accessibilityLeftClick)),
+            UIAccessibilityCustomAction(name: "Double-click", target: self, selector: #selector(accessibilityDoubleClick)),
+            UIAccessibilityCustomAction(name: "Right click", target: self, selector: #selector(accessibilityRightClick))
+        ]
         configureGestures()
     }
 
     required init?(coder: NSCoder) { nil }
 
     override var canBecomeFirstResponder: Bool { true }
+
+    override func accessibilityIncrement() {
+        onZoom(1.25, CGPoint(x: 0.5, y: 0.5))
+    }
+
+    override func accessibilityDecrement() {
+        onZoom(0.8, CGPoint(x: 0.5, y: 0.5))
+    }
+
+    @objc private func accessibilityLeftClick() -> Bool {
+        onInput(.click())
+        return true
+    }
+
+    @objc private func accessibilityDoubleClick() -> Bool {
+        onInput(.doubleClick())
+        return true
+    }
+
+    @objc private func accessibilityRightClick() -> Bool {
+        onInput(.click(secondary: true))
+        return true
+    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
