@@ -246,6 +246,7 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func stopFallback() {
+        remoteInput.releaseButtons()
         streamer.stop()
         isStartingFallback = false
         isStreaming = false

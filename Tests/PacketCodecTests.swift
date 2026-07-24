@@ -138,13 +138,39 @@ final class PacketCodecTests: XCTestCase {
         let inputs = [
             RemoteInputEvent.click(x: 0.2, y: 0.3),
             RemoteInputEvent.doubleClick(x: 0.4, y: 0.5),
-            RemoteInputEvent.click(secondary: true, x: 0.6, y: 0.7)
+            RemoteInputEvent.click(secondary: true, x: 0.6, y: 0.7),
+            RemoteInputEvent.doubleClick(secondary: true, x: 0.8, y: 0.9)
         ]
 
         for input in inputs {
             let message = try XCTUnwrap(ControlMessage.input(input))
             XCTAssertEqual(message.remoteInputEvent, input)
         }
+    }
+
+    func testRemotePointerButtonCalibrationAndSwap() {
+        XCTAssertEqual(
+            RemotePointerButtonMapping.calibrated(reportedLeftButton: .primary),
+            .system
+        )
+        XCTAssertEqual(
+            RemotePointerButtonMapping.calibrated(reportedLeftButton: .secondary),
+            .swapped
+        )
+        XCTAssertEqual(
+            RemotePointerButtonMapping.swapped.resolvedButton(for: .primary),
+            .secondary
+        )
+        XCTAssertEqual(
+            RemotePointerButtonMapping.swapped.resolvedButton(for: .secondary),
+            .primary
+        )
+    }
+
+    func testRemoteReleaseButtonsRoundTrip() throws {
+        let input = RemoteInputEvent.releaseButtons()
+        let message = try XCTUnwrap(ControlMessage.input(input))
+        XCTAssertEqual(message.remoteInputEvent, input)
     }
 
     func testLocalNetworkPermissionStatesAreNotOptimistic() {

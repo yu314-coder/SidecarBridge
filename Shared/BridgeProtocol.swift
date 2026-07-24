@@ -43,9 +43,30 @@ enum RemoteInputKind: String, Codable, Equatable {
     case primaryClick
     case primaryDoubleClick
     case secondaryClick
+    case secondaryDoubleClick
+    case releaseButtons
     case scroll
     case text
     case key
+}
+
+enum RemotePointerButton: String, Codable, Equatable, Hashable {
+    case primary
+    case secondary
+}
+
+enum RemotePointerButtonMapping: String, Codable, Equatable, Hashable {
+    case system
+    case swapped
+
+    func resolvedButton(for reportedButton: RemotePointerButton) -> RemotePointerButton {
+        guard self == .swapped else { return reportedButton }
+        return reportedButton == .primary ? .secondary : .primary
+    }
+
+    static func calibrated(reportedLeftButton: RemotePointerButton) -> Self {
+        reportedLeftButton == .primary ? .system : .swapped
+    }
 }
 
 struct RemoteInputEvent: Codable, Equatable {
@@ -67,8 +88,13 @@ struct RemoteInputEvent: Codable, Equatable {
         Self(kind: secondary ? .secondaryClick : .primaryClick, sequence: nil, x: x, y: y)
     }
 
-    static func doubleClick(x: Double? = nil, y: Double? = nil) -> Self {
-        Self(kind: .primaryDoubleClick, sequence: nil, x: x, y: y)
+    static func doubleClick(secondary: Bool = false, x: Double? = nil, y: Double? = nil) -> Self {
+        Self(
+            kind: secondary ? .secondaryDoubleClick : .primaryDoubleClick,
+            sequence: nil,
+            x: x,
+            y: y
+        )
     }
 
     static func primaryDown(x: Double, y: Double) -> Self {
@@ -81,6 +107,10 @@ struct RemoteInputEvent: Codable, Equatable {
 
     static func primaryUp(x: Double? = nil, y: Double? = nil) -> Self {
         Self(kind: .primaryUp, sequence: nil, x: x, y: y)
+    }
+
+    static func releaseButtons() -> Self {
+        Self(kind: .releaseButtons, sequence: nil)
     }
 
     static func scroll(x: Double, y: Double) -> Self {

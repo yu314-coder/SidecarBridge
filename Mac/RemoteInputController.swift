@@ -53,6 +53,11 @@ final class RemoteInputController {
         case .secondaryClick:
             if let x = input.x, let y = input.y { movePointer(x: x, y: y) }
             click(button: .right)
+        case .secondaryDoubleClick:
+            if let x = input.x, let y = input.y { movePointer(x: x, y: y) }
+            click(button: .right, count: 2)
+        case .releaseButtons:
+            releaseButtons()
         case .scroll:
             scroll(x: input.deltaX ?? 0, y: input.deltaY ?? 0)
         case .text:
@@ -65,7 +70,22 @@ final class RemoteInputController {
     }
 
     func releaseButtons() {
-        primaryButtonUp(x: nil, y: nil)
+        let point = CGEvent(source: nil)?.location ?? .zero
+        if isPrimaryButtonDown {
+            CGEvent(
+                mouseEventSource: eventSource,
+                mouseType: .leftMouseUp,
+                mouseCursorPosition: point,
+                mouseButton: .left
+            )?.post(tap: .cghidEventTap)
+        }
+        CGEvent(
+            mouseEventSource: eventSource,
+            mouseType: .rightMouseUp,
+            mouseCursorPosition: point,
+            mouseButton: .right
+        )?.post(tap: .cghidEventTap)
+        isPrimaryButtonDown = false
     }
 
     private func movePointer(x: Double, y: Double) {
@@ -80,6 +100,9 @@ final class RemoteInputController {
 
     private func click(button: CGMouseButton, count: Int = 1) {
         guard let location = CGEvent(source: nil)?.location else { return }
+        if button == .right, isPrimaryButtonDown {
+            primaryButtonUp(x: nil, y: nil)
+        }
         let down: CGEventType = button == .right ? .rightMouseDown : .leftMouseDown
         let up: CGEventType = button == .right ? .rightMouseUp : .leftMouseUp
         for clickState in 1...max(count, 1) {

@@ -23,6 +23,12 @@ struct PadContentView: View {
     @State private var showBottomHint: Bool = {
         UserDefaults.standard.object(forKey: "showBottomHint") as? Bool ?? true
     }()
+    @State private var pointerButtonMapping: RemotePointerButtonMapping = {
+        guard let rawValue = UserDefaults.standard.string(forKey: "pointerButtonMapping"),
+              let mapping = RemotePointerButtonMapping(rawValue: rawValue) else { return .system }
+        return mapping
+    }()
+    @State private var isCalibratingPointerButtons = false
 
     var body: some View {
         ZStack {
@@ -624,7 +630,12 @@ struct PadContentView: View {
                     contentAspectRatio: model.streamAspectRatio,
                     zoomScale: viewerScale,
                     zoomOffset: viewerOffset,
+                    pointerButtonMapping: pointerButtonMapping,
+                    calibrateNextPointerClick: isCalibratingPointerButtons,
                     onInput: model.sendInput,
+                    onPointerCalibration: { mapping in
+                        setPointerButtonMapping(mapping)
+                    },
                     onZoom: { factor, anchor in
                         adjustViewerZoom(factor: factor, anchor: anchor, size: geometry.size)
                     },
@@ -636,6 +647,18 @@ struct PadContentView: View {
 
             VStack {
                 if showTopStatusBar { streamTopStatusBar }
+
+                if isCalibratingPointerButtons {
+                    Label("Click the physical LEFT mouse or trackpad button once", systemImage: "cursorarrow.click")
+                        .font(.headline)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.orange.opacity(0.9), in: Capsule())
+                        .foregroundStyle(.black)
+                        .padding(.top, 10)
+                        .allowsHitTesting(false)
+                        .accessibilityLabel("Pointer calibration. Click the physical left button once.")
+                }
 
                 Spacer()
 
@@ -847,6 +870,46 @@ struct PadContentView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
+                        Label("External pointer mapping", systemImage: "computermouse")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.78))
+
+                        Picker("External pointer mapping", selection: Binding(
+                            get: { pointerButtonMapping },
+                            set: setPointerButtonMapping
+                        )) {
+                            Text("System").tag(RemotePointerButtonMapping.system)
+                            Text("Swapped").tag(RemotePointerButtonMapping.swapped)
+                        }
+                        .pickerStyle(.segmented)
+
+                        Button {
+                            if isCalibratingPointerButtons {
+                                isCalibratingPointerButtons = false
+                            } else {
+                                isCalibratingPointerButtons = true
+                                setControlDrawer(open: false)
+                            }
+                        } label: {
+                            Label(
+                                isCalibratingPointerButtons ? "Cancel Left-Click Calibration" : "Calibrate Physical Left Click",
+                                systemImage: isCalibratingPointerButtons ? "xmark.circle" : "scope"
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+
+                        Text(pointerMappingDetail)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.78))
+
+                        Text("If other apps are also reversed: iPad Settings → General → Trackpad & Mouse → Secondary Click → Right.")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
                         Label("Trackpad clicks", systemImage: "cursorarrow.click")
                             .font(.caption.bold())
                             .foregroundStyle(.white.opacity(0.78))
@@ -977,6 +1040,21 @@ struct PadContentView: View {
         guard model.remoteInputAuthorized, model.lastInputAccepted else { return "MAC PERMISSION REQUIRED" }
         guard let latency = model.controlLatencyMS else { return "TRACKPAD READY" }
         return "INPUT \(latency) MS"
+    }
+
+    private var pointerMappingDetail: String {
+        switch pointerButtonMapping {
+        case .system:
+            return "System mapping: iPad primary is left; secondary is right."
+        case .swapped:
+            return "Swapped mapping: SidecarBridge converts iPad secondary into left click."
+        }
+    }
+
+    private func setPointerButtonMapping(_ mapping: RemotePointerButtonMapping) {
+        pointerButtonMapping = mapping
+        isCalibratingPointerButtons = false
+        UserDefaults.standard.set(mapping.rawValue, forKey: "pointerButtonMapping")
     }
 
     private func adjustViewerZoom(factor: CGFloat, anchor: CGPoint, size: CGSize) {

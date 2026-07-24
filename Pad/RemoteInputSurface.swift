@@ -5,7 +5,10 @@ struct RemoteInputSurface: UIViewRepresentable {
     let contentAspectRatio: CGFloat
     let zoomScale: CGFloat
     let zoomOffset: CGSize
+    let pointerButtonMapping: RemotePointerButtonMapping
+    let calibrateNextPointerClick: Bool
     let onInput: (RemoteInputEvent) -> Void
+    let onPointerCalibration: (RemotePointerButtonMapping) -> Void
     let onZoom: (CGFloat, CGPoint) -> Void
     let onViewportPan: (CGSize) -> Void
 
@@ -14,7 +17,10 @@ struct RemoteInputSurface: UIViewRepresentable {
             contentAspectRatio: contentAspectRatio,
             zoomScale: zoomScale,
             zoomOffset: zoomOffset,
+            pointerButtonMapping: pointerButtonMapping,
+            calibrateNextPointerClick: calibrateNextPointerClick,
             onInput: onInput,
+            onPointerCalibration: onPointerCalibration,
             onZoom: onZoom,
             onViewportPan: onViewportPan
         )
@@ -24,7 +30,10 @@ struct RemoteInputSurface: UIViewRepresentable {
         uiView.contentAspectRatio = contentAspectRatio
         uiView.zoomScale = zoomScale
         uiView.zoomOffset = zoomOffset
+        uiView.pointerButtonMapping = pointerButtonMapping
+        uiView.calibrateNextPointerClick = calibrateNextPointerClick
         uiView.onInput = onInput
+        uiView.onPointerCalibration = onPointerCalibration
         uiView.onZoom = onZoom
         uiView.onViewportPan = onViewportPan
         uiView.accessibilityValue = "Zoom \(Int((zoomScale * 100).rounded())) percent"
@@ -34,11 +43,14 @@ struct RemoteInputSurface: UIViewRepresentable {
 
 final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     var onInput: (RemoteInputEvent) -> Void
+    var onPointerCalibration: (RemotePointerButtonMapping) -> Void
     var onZoom: (CGFloat, CGPoint) -> Void
     var onViewportPan: (CGSize) -> Void
     var contentAspectRatio: CGFloat
     var zoomScale: CGFloat
     var zoomOffset: CGSize
+    var pointerButtonMapping: RemotePointerButtonMapping
+    var calibrateNextPointerClick: Bool
     var hasText: Bool { true }
     private var lastPointerTime: TimeInterval = 0
     private var isPrimaryDragging = false
@@ -48,14 +60,20 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         contentAspectRatio: CGFloat,
         zoomScale: CGFloat,
         zoomOffset: CGSize,
+        pointerButtonMapping: RemotePointerButtonMapping,
+        calibrateNextPointerClick: Bool,
         onInput: @escaping (RemoteInputEvent) -> Void,
+        onPointerCalibration: @escaping (RemotePointerButtonMapping) -> Void,
         onZoom: @escaping (CGFloat, CGPoint) -> Void,
         onViewportPan: @escaping (CGSize) -> Void
     ) {
         self.contentAspectRatio = contentAspectRatio
         self.zoomScale = zoomScale
         self.zoomOffset = zoomOffset
+        self.pointerButtonMapping = pointerButtonMapping
+        self.calibrateNextPointerClick = calibrateNextPointerClick
         self.onInput = onInput
+        self.onPointerCalibration = onPointerCalibration
         self.onZoom = onZoom
         self.onViewportPan = onViewportPan
         super.init(frame: .zero)
@@ -82,6 +100,12 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             self,
             selector: #selector(inputContextDidBecomeActive(_:)),
             name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(remoteInputWillResignActive(_:)),
+            name: UIApplication.willResignActiveNotification,
             object: nil
         )
     }
@@ -122,7 +146,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         if window != nil {
             reclaimKeyboardFocus()
         } else {
-            finishPrimaryDrag(at: nil)
+            releaseRemoteButtons()
         }
     }
 
@@ -139,6 +163,10 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     @objc private func inputContextDidBecomeActive(_ notification: Notification) {
         reclaimKeyboardFocus()
+    }
+
+    @objc private func remoteInputWillResignActive(_ notification: Notification) {
+        releaseRemoteButtons()
     }
 
     func insertText(_ text: String) {
@@ -208,13 +236,13 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
         addGestureRecognizer(hover)
 
-        let pointerDoubleClick = UITapGestureRecognizer(target: self, action: #selector(handlePrimaryDoubleClick(_:)))
+        let pointerDoubleClick = UITapGestureRecognizer(target: self, action: #selector(handleReportedPrimaryDoubleClick(_:)))
         pointerDoubleClick.numberOfTapsRequired = 2
         pointerDoubleClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         pointerDoubleClick.buttonMaskRequired = .primary
         addGestureRecognizer(pointerDoubleClick)
 
-        let pointerPrimaryClick = UITapGestureRecognizer(target: self, action: #selector(handlePrimaryClick(_:)))
+        let pointerPrimaryClick = UITapGestureRecognizer(target: self, action: #selector(handleReportedPrimaryClick(_:)))
         pointerPrimaryClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         pointerPrimaryClick.buttonMaskRequired = .primary
         pointerPrimaryClick.require(toFail: pointerDoubleClick)
@@ -236,9 +264,16 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         touchPrimaryClick.require(toFail: touchDoubleClick)
         addGestureRecognizer(touchPrimaryClick)
 
-        let secondary = UITapGestureRecognizer(target: self, action: #selector(handleSecondaryClick(_:)))
+        let secondaryDoubleClick = UITapGestureRecognizer(target: self, action: #selector(handleReportedSecondaryDoubleClick(_:)))
+        secondaryDoubleClick.numberOfTapsRequired = 2
+        secondaryDoubleClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        secondaryDoubleClick.buttonMaskRequired = .secondary
+        addGestureRecognizer(secondaryDoubleClick)
+
+        let secondary = UITapGestureRecognizer(target: self, action: #selector(handleReportedSecondaryClick(_:)))
         secondary.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         secondary.buttonMaskRequired = .secondary
+        secondary.require(toFail: secondaryDoubleClick)
         addGestureRecognizer(secondary)
 
         let pointerDrag = UIPanGestureRecognizer(target: self, action: #selector(handlePrimaryDrag(_:)))
@@ -321,6 +356,11 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         onInput(.primaryUp(x: point.map { Double($0.x) }, y: point.map { Double($0.y) }))
     }
 
+    private func releaseRemoteButtons() {
+        finishPrimaryDrag(at: nil)
+        onInput(.releaseButtons())
+    }
+
     private func sendPointer(at point: CGPoint) {
         guard let normalized = normalizedPoint(point) else { return }
         let now = ProcessInfo.processInfo.systemUptime
@@ -335,10 +375,39 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         onInput(.click(x: point.x, y: point.y))
     }
 
-    @objc private func handleSecondaryClick(_ recognizer: UITapGestureRecognizer) {
+    @objc private func handleReportedPrimaryClick(_ recognizer: UITapGestureRecognizer) {
+        handlePointerClick(recognizer, reportedButton: .primary, clickCount: 1)
+    }
+
+    @objc private func handleReportedPrimaryDoubleClick(_ recognizer: UITapGestureRecognizer) {
+        handlePointerClick(recognizer, reportedButton: .primary, clickCount: 2)
+    }
+
+    @objc private func handleReportedSecondaryClick(_ recognizer: UITapGestureRecognizer) {
+        handlePointerClick(recognizer, reportedButton: .secondary, clickCount: 1)
+    }
+
+    @objc private func handleReportedSecondaryDoubleClick(_ recognizer: UITapGestureRecognizer) {
+        handlePointerClick(recognizer, reportedButton: .secondary, clickCount: 2)
+    }
+
+    private func handlePointerClick(
+        _ recognizer: UITapGestureRecognizer,
+        reportedButton: RemotePointerButton,
+        clickCount: Int
+    ) {
         becomeFirstResponder()
+        if calibrateNextPointerClick {
+            onPointerCalibration(.calibrated(reportedLeftButton: reportedButton))
+            return
+        }
         guard let point = normalizedPoint(recognizer.location(in: self)) else { return }
-        onInput(.click(secondary: true, x: point.x, y: point.y))
+        let resolved = pointerButtonMapping.resolvedButton(for: reportedButton)
+        if clickCount == 2 {
+            onInput(.doubleClick(secondary: resolved == .secondary, x: point.x, y: point.y))
+        } else {
+            onInput(.click(secondary: resolved == .secondary, x: point.x, y: point.y))
+        }
     }
 
     @objc private func handlePrimaryDoubleClick(_ recognizer: UITapGestureRecognizer) {
@@ -386,7 +455,15 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gestureRecognizer === pointerDragRecognizer else { return true }
-        return gestureRecognizer.buttonMask == .primary
+        guard !calibrateNextPointerClick,
+              let reportedButton = reportedButton(for: gestureRecognizer.buttonMask) else { return false }
+        return pointerButtonMapping.resolvedButton(for: reportedButton) == .primary
+    }
+
+    private func reportedButton(for mask: UIEvent.ButtonMask) -> RemotePointerButton? {
+        if mask == .primary { return .primary }
+        if mask == .secondary { return .secondary }
+        return nil
     }
 
     private func normalizedPoint(_ point: CGPoint) -> CGPoint? {

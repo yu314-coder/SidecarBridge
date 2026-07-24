@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 4** on 2026-07-24.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 5** on 2026-07-24.
 
 ## 1. Purpose
 
@@ -229,9 +229,11 @@ The Mac converts the normalized coordinates to the captured display and posts CG
 
 A single primary tap is delayed until the double-tap recognizer fails, so a double-click cannot also produce an accidental single click. macOS receives a dedicated double-click event and emits two left-button down/up pairs with click-state values 1 and 2. The viewer drawer provides separate **Left**, **Double**, and **Right** controls at the current pointer position for users who prefer explicit buttons.
 
-Indirect-pointer dragging starts only while UIKit reports the primary button mask. A secondary click therefore cannot enter or leave the primary drag state. Hardware keyboard presses are read from `UIKey` events rather than system-routed shortcut commands: printable characters are sent as layout-correct text, while special keys and shortcuts carry only the modifier snapshot for that exact press. The input surface reclaims first-responder status when its window becomes active or key, so typing does not require an extra trackpad click after the user focuses a Mac field with a local mouse.
+SidecarBridge enables UIKit indirect-input events and keeps primary and secondary single-click and double-click recognizers separate. The viewer drawer offers **System** and **Swapped** mappings plus a one-click calibration flow: after the user chooses **Calibrate Physical Left Click**, the next reported pointer button is recorded as the intended left button. This compensates inside SidecarBridge when iPadOS or a mouse reports the physical left side as secondary. iPadOS's global mouse mapping remains under Settings → General → Trackpad & Mouse → Secondary Click.
 
-The Mac posts remote input through a private `CGEventSource` state table. Apple documents this source type for remote-control applications because its keyboard and mouse state is independent from physical input sources. Text events explicitly carry no modifier flags, and a shortcut key-up clears its flags, preventing Command, Control, Option, Shift, or Tab behavior from leaking into later text.
+Indirect-pointer dragging starts only when the calibrated mapping resolves UIKit's reported button to primary. A resolved secondary click therefore cannot enter or leave the primary drag state. Hardware keyboard presses are read from `UIKey` events rather than system-routed shortcut commands: printable characters are sent as layout-correct text, while special keys and shortcuts carry only the modifier snapshot for that exact press. The input surface reclaims first-responder status when its window becomes active or key, so typing does not require an extra trackpad click after the user focuses a Mac field with a local mouse.
+
+The Mac posts remote input through a private `CGEventSource` state table. Apple documents this source type for remote-control applications because its keyboard and mouse state is independent from physical input sources. Text events explicitly carry no modifier flags, and a shortcut key-up clears its flags, preventing Command, Control, Option, Shift, or Tab behavior from leaking into later text. When the viewer backgrounds, disconnects, or stops streaming, it sends a release-all-buttons event; the Mac additionally emits both left and right mouse-up events before ending the stream.
 
 The viewer also supports DeskIn-style navigation without changing remote input semantics:
 
@@ -466,7 +468,7 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 
 ## 14. Tests
 
-`PacketCodecTests` currently covers 19 cases:
+`PacketCodecTests` currently covers 21 cases:
 
 1. control-message round trip;
 2. heartbeat-message round trip;
@@ -486,7 +488,9 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 16. modifier allow-listing, de-duplication, and ordering;
 17. modifier-free typed-text events;
 18. exact modifiers for special keys;
-19. case normalization for remote key names.
+19. case normalization for remote key names;
+20. pointer-button calibration and swapped mapping;
+21. release-all-buttons protocol round trip.
 
 Run them with all output on `/Volumes/D`:
 
