@@ -21,7 +21,7 @@ Requirements: Xcode 16 or newer, XcodeGen, macOS 14+, and iPadOS 17+.
 ```sh
 ./scripts/build.sh
 /Volumes/D/Xcode.app/Contents/MacOS/Xcode \
-  /Volumes/D/github/sidecar/SidecarBridge.xcodeproj
+  /Volumes/D/github/sidecarbridge/SidecarBridge.xcodeproj
 ```
 
 In Xcode:

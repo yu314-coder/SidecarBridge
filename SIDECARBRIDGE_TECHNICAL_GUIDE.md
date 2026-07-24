@@ -335,7 +335,7 @@ Requirements:
 Generate and test:
 
 ```sh
-cd /Volumes/D/github/sidecar
+cd /Volumes/D/github/sidecarbridge
 ./scripts/build.sh
 ```
 
@@ -343,7 +343,7 @@ Open the project with the Xcode installation on `/Volumes/D`:
 
 ```sh
 /Volumes/D/Xcode.app/Contents/MacOS/Xcode \
-  /Volumes/D/github/sidecar/SidecarBridge.xcodeproj
+  /Volumes/D/github/sidecarbridge/SidecarBridge.xcodeproj
 ```
 
 Use explicit derived-data paths for additional builds:
@@ -351,7 +351,7 @@ Use explicit derived-data paths for additional builds:
 ```sh
 DEVELOPER_DIR=/Volumes/D/Xcode.app/Contents/Developer \
   /usr/bin/xcodebuild \
-  -project /Volumes/D/github/sidecar/SidecarBridge.xcodeproj \
+  -project /Volumes/D/github/sidecarbridge/SidecarBridge.xcodeproj \
   -scheme SidecarBridgeMac \
   -derivedDataPath /Volumes/D/xcode/SidecarBridgeMac-DerivedData \
   build
@@ -484,7 +484,7 @@ Run them with all output on `/Volumes/D`:
 ```sh
 DEVELOPER_DIR=/Volumes/D/Xcode.app/Contents/Developer \
   /usr/bin/xcodebuild \
-  -project /Volumes/D/github/sidecar/SidecarBridge.xcodeproj \
+  -project /Volumes/D/github/sidecarbridge/SidecarBridge.xcodeproj \
   -scheme SidecarBridgeMac \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath /Volumes/D/xcode/SidecarBridgeTests \
