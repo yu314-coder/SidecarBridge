@@ -7,6 +7,7 @@ struct RemoteInputSurface: UIViewRepresentable {
     let zoomOffset: CGSize
     let pointerButtonMapping: RemotePointerButtonMapping
     let calibrateNextPointerClick: Bool
+    let showsSoftwareKeyboard: Bool
     let onInput: (RemoteInputEvent) -> Void
     let onPointerCalibration: (RemotePointerButtonMapping) -> Void
     let onZoom: (CGFloat, CGPoint) -> Void
@@ -19,6 +20,7 @@ struct RemoteInputSurface: UIViewRepresentable {
             zoomOffset: zoomOffset,
             pointerButtonMapping: pointerButtonMapping,
             calibrateNextPointerClick: calibrateNextPointerClick,
+            showsSoftwareKeyboard: showsSoftwareKeyboard,
             onInput: onInput,
             onPointerCalibration: onPointerCalibration,
             onZoom: onZoom,
@@ -32,6 +34,7 @@ struct RemoteInputSurface: UIViewRepresentable {
         uiView.zoomOffset = zoomOffset
         uiView.pointerButtonMapping = pointerButtonMapping
         uiView.calibrateNextPointerClick = calibrateNextPointerClick
+        uiView.showsSoftwareKeyboard = showsSoftwareKeyboard
         uiView.onInput = onInput
         uiView.onPointerCalibration = onPointerCalibration
         uiView.onZoom = onZoom
@@ -51,10 +54,21 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     var zoomOffset: CGSize
     var pointerButtonMapping: RemotePointerButtonMapping
     var calibrateNextPointerClick: Bool
+    var showsSoftwareKeyboard: Bool {
+        didSet {
+            guard showsSoftwareKeyboard != oldValue else { return }
+            if isFirstResponder {
+                reloadInputViews()
+            } else {
+                reclaimKeyboardFocus()
+            }
+        }
+    }
     var hasText: Bool { true }
     private var lastPointerTime: TimeInterval = 0
     private var isPrimaryDragging = false
     private weak var pointerDragRecognizer: UIPanGestureRecognizer?
+    private let suppressedSoftwareKeyboardView = UIView(frame: .zero)
 
     init(
         contentAspectRatio: CGFloat,
@@ -62,6 +76,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         zoomOffset: CGSize,
         pointerButtonMapping: RemotePointerButtonMapping,
         calibrateNextPointerClick: Bool,
+        showsSoftwareKeyboard: Bool,
         onInput: @escaping (RemoteInputEvent) -> Void,
         onPointerCalibration: @escaping (RemotePointerButtonMapping) -> Void,
         onZoom: @escaping (CGFloat, CGPoint) -> Void,
@@ -72,6 +87,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         self.zoomOffset = zoomOffset
         self.pointerButtonMapping = pointerButtonMapping
         self.calibrateNextPointerClick = calibrateNextPointerClick
+        self.showsSoftwareKeyboard = showsSoftwareKeyboard
         self.onInput = onInput
         self.onPointerCalibration = onPointerCalibration
         self.onZoom = onZoom
@@ -117,6 +133,9 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     override var canBecomeFirstResponder: Bool { true }
+    override var inputView: UIView? {
+        showsSoftwareKeyboard ? nil : suppressedSoftwareKeyboardView
+    }
 
     override func accessibilityIncrement() {
         onZoom(1.25, CGPoint(x: 0.5, y: 0.5))

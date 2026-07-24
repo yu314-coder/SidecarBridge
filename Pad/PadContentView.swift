@@ -29,6 +29,7 @@ struct PadContentView: View {
         return mapping
     }()
     @State private var isCalibratingPointerButtons = false
+    @State private var showsSoftwareKeyboard = false
 
     var body: some View {
         ZStack {
@@ -632,6 +633,7 @@ struct PadContentView: View {
                     zoomOffset: viewerOffset,
                     pointerButtonMapping: pointerButtonMapping,
                     calibrateNextPointerClick: isCalibratingPointerButtons,
+                    showsSoftwareKeyboard: showsSoftwareKeyboard,
                     onInput: model.sendInput,
                     onPointerCalibration: { mapping in
                         setPointerButtonMapping(mapping)
@@ -867,6 +869,34 @@ struct PadContentView: View {
                                     ? Color.white.opacity(0.78)
                                     : Color.orange
                             )
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Keyboard", systemImage: "keyboard")
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.78))
+
+                        Button {
+                            showsSoftwareKeyboard.toggle()
+                            if showsSoftwareKeyboard {
+                                setControlDrawer(open: false)
+                            }
+                        } label: {
+                            Label(
+                                showsSoftwareKeyboard ? "Hide On-Screen Keyboard" : "Show On-Screen Keyboard",
+                                systemImage: showsSoftwareKeyboard
+                                    ? "keyboard.chevron.compact.down"
+                                    : "keyboard.chevron.compact.up"
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(showsSoftwareKeyboard ? .orange : .cyan)
+
+                        Text("The software keyboard stays hidden until you select it here. Magic Keyboard and other hardware keyboards keep working.")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.78))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     VStack(alignment: .leading, spacing: 8) {

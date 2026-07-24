@@ -1,6 +1,6 @@
 # SidecarBridge Accessibility
 
-This document records the accessibility implementation and the conservative App Store Connect declaration for SidecarBridge build 5.
+This document records the accessibility implementation and the conservative App Store Connect declaration for SidecarBridge build 6.
 
 ## Common tasks
 
