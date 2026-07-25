@@ -5,11 +5,15 @@ import Network
 
 final class MacLANService {
     var onCommand: ((ControlMessage) -> Void)?
+    var onInput: ((RemoteInputEvent) -> Void)?
     var onFilePacket: ((FileTransferPacket) -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
 
-    private let queue = DispatchQueue(label: "SidecarBridge.MacLAN")
+    private let queue = DispatchQueue(
+        label: "SidecarBridge.MacLAN",
+        qos: .userInteractive
+    )
     private var listener: NWListener?
     private var listenerRestartWorkItem: DispatchWorkItem?
     private var handshakeTimeoutWorkItem: DispatchWorkItem?
@@ -212,7 +216,11 @@ final class MacLANService {
         let packetData = try LANWire.decrypt(payload, key: sessionKey)
         switch try PacketCodec.decode(packetData) {
         case .control(let command):
-            DispatchQueue.main.async { self.onCommand?(command) }
+            if let input = command.remoteInputEvent {
+                onInput?(input)
+            } else {
+                DispatchQueue.main.async { self.onCommand?(command) }
+            }
         case .file(let transfer):
             DispatchQueue.main.async { self.onFilePacket?(transfer) }
         case .jpeg, .video:
@@ -409,11 +417,17 @@ final class MacLANService {
     private func lowLatencyParameters() -> NWParameters {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
+        tcp.disableAckStretching = true
         tcp.enableKeepalive = true
-        tcp.keepaliveIdle = 5
+        tcp.keepaliveIdle = 3
+        tcp.keepaliveInterval = 2
+        tcp.keepaliveCount = 3
+        tcp.connectionTimeout = 4
+        tcp.connectionDropTime = 8
         let parameters = NWParameters(tls: nil, tcp: tcp)
         parameters.allowLocalEndpointReuse = true
         parameters.includePeerToPeer = true
+        parameters.serviceClass = .interactiveVideo
         return parameters
     }
 }

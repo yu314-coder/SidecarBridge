@@ -19,6 +19,7 @@ final class MacPeerService: NSObject {
     }
 
     var onCommand: ((ControlMessage) -> Void)?
+    var onInput: ((RemoteInputEvent) -> Void)?
     var onFilePacket: ((FileTransferPacket) -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
@@ -54,6 +55,7 @@ final class MacPeerService: NSObject {
         super.init()
         session.delegate = self
         lan.onCommand = { [weak self] command in self?.route(command) }
+        lan.onInput = { [weak self] input in self?.dispatchInput(input) }
         lan.onFilePacket = { [weak self] transfer in
             self?.notePeerActivity()
             self?.onFilePacket?(transfer)
@@ -238,6 +240,13 @@ final class MacPeerService: NSObject {
         }
     }
 
+    private func dispatchInput(_ input: RemoteInputEvent) {
+        DispatchQueue.main.async { [weak self] in
+            self?.notePeerActivity()
+        }
+        onInput?(input)
+    }
+
     private func updateHeartbeatState() {
         if lanConnected || mcConnected {
             startHeartbeat()
@@ -252,7 +261,7 @@ final class MacPeerService: NSObject {
         peerSupportsHeartbeat = false
         onConnectionHealthChanged?("Verifying encrypted link", nil)
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: 4, leeway: .milliseconds(300))
+        timer.schedule(deadline: .now(), repeating: 3, leeway: .milliseconds(150))
         timer.setEventHandler { [weak self] in self?.heartbeatTick() }
         heartbeatTimer = timer
         timer.resume()
@@ -271,7 +280,7 @@ final class MacPeerService: NSObject {
             return
         }
         let now = ProcessInfo.processInfo.systemUptime
-        if peerSupportsHeartbeat, now - lastPeerActivity > 12 {
+        if peerSupportsHeartbeat, now - lastPeerActivity > 9 {
             recoverStaleConnection(reason: "Encrypted link stopped responding.")
             return
         }
@@ -319,7 +328,7 @@ final class MacPeerService: NSObject {
             self.onP2PStateChanged?(.advertising)
         }
         fallbackWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: workItem)
     }
 
     private func stopMultipeerFallback() {
@@ -356,7 +365,7 @@ final class MacPeerService: NSObject {
             self.scheduleMultipeerFallback()
         }
         mcConnectionWatchdog = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: workItem)
     }
 
     private func restartMultipeerAdvertisingAfterDisconnect() {
@@ -447,7 +456,11 @@ extension MacPeerService: MCSessionDelegate {
         guard let packet = try? PacketCodec.decode(data) else { return }
         switch packet {
         case .control(let command):
-            DispatchQueue.main.async { self.route(command) }
+            if let input = command.remoteInputEvent {
+                dispatchInput(input)
+            } else {
+                DispatchQueue.main.async { self.route(command) }
+            }
         case .file(let transfer):
             DispatchQueue.main.async {
                 self.notePeerActivity()

@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 6** on 2026-07-24.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 7** on 2026-07-25.
 
 ## 1. Purpose
 
@@ -125,7 +125,7 @@ If direct LAN has not connected, the Mac and iPad start Multipeer Connectivity a
 
 Earlier builds periodically restarted healthy advertisement and browsing objects. That created repeated service gaps and could make devices on the same Wi-Fi miss each other indefinitely. Healthy discovery now remains stable; only a confirmed failure or lifecycle event triggers recovery.
 
-Both transports exchange an encrypted ping/pong every four seconds. The apps expose the measured round-trip time, consider a link stale after 12 seconds without peer traffic, and rebuild only the failed direct or nearby path. The iPad also sends an immediate validation ping after foregrounding so a socket retained across suspension cannot remain falsely marked connected.
+Both transports exchange an encrypted ping/pong every three seconds. The apps expose the measured round-trip time, consider a link stale after nine seconds without peer traffic, and rebuild only the failed direct or nearby path. The iPad also sends an immediate validation ping after foregrounding so a socket retained across suspension cannot remain falsely marked connected.
 
 ### 4.3 System Sidecar
 
@@ -227,13 +227,13 @@ The iPad can forward:
 
 The Mac converts the normalized coordinates to the captured display and posts CGEvents. This requires explicit Accessibility permission in macOS System Settings.
 
-A single primary tap is delayed until the double-tap recognizer fails, so a double-click cannot also produce an accidental single click. macOS receives a dedicated double-click event and emits two left-button down/up pairs with click-state values 1 and 2. The viewer drawer provides separate **Left**, **Double**, and **Right** controls at the current pointer position for users who prefer explicit buttons.
+A mouse or trackpad primary press now uses a continuous indirect-pointer recognizer rather than waiting for competing single- and double-tap recognizers. Button-down is transmitted as soon as the physical press begins, stationary press-and-hold remains down, movement produces drag events at up to 120 Hz, and button-up is a reliable release barrier. Nearby consecutive presses carry click-state values 1 and 2 so macOS still receives a true double-click without delaying the first press. Direct touch and Apple Pencil also provide a 0.22-second hold gesture. The viewer drawer retains separate **Left**, **Double**, and **Right** controls for users who prefer explicit buttons.
 
-SidecarBridge enables UIKit indirect-input events and keeps primary and secondary single-click and double-click recognizers separate. The viewer drawer offers **System** and **Swapped** mappings plus a one-click calibration flow: after the user chooses **Calibrate Physical Left Click**, the next reported pointer button is recorded as the intended left button. This compensates inside SidecarBridge when iPadOS or a mouse reports the physical left side as secondary. iPadOS's global mouse mapping remains under Settings → General → Trackpad & Mouse → Secondary Click.
+SidecarBridge enables UIKit indirect-input events and reads the active physical button mask at press-begin. The viewer drawer offers **System** and **Swapped** mappings plus a one-click calibration flow: after the user chooses **Calibrate Physical Left Click**, the next reported pointer button is recorded as the intended left button. This compensates inside SidecarBridge when iPadOS or a mouse reports the physical left side as secondary. iPadOS's global mouse mapping remains under Settings → General → Trackpad & Mouse → Secondary Click.
 
 Indirect-pointer dragging starts only when the calibrated mapping resolves UIKit's reported button to primary. A resolved secondary click therefore cannot enter or leave the primary drag state. Hardware keyboard presses are read from `UIKey` events rather than system-routed shortcut commands: printable characters are sent as layout-correct text, while special keys and shortcuts carry only the modifier snapshot for that exact press. The input surface reclaims first-responder status when its window becomes active or key, so typing does not require an extra trackpad click after the user focuses a Mac field with a local mouse. While the right-drawer software-keyboard control is off, the responder uses an empty input view: external keyboards keep receiving key events without automatically opening the iPadOS on-screen keyboard.
 
-The Mac posts remote input through a private `CGEventSource` state table. Apple documents this source type for remote-control applications because its keyboard and mouse state is independent from physical input sources. Text events explicitly carry no modifier flags, and a shortcut key-up clears its flags, preventing Command, Control, Option, Shift, or Tab behavior from leaking into later text. When the viewer backgrounds, disconnects, or stops streaming, it sends a release-all-buttons event; the Mac additionally emits both left and right mouse-up events before ending the stream.
+The Mac posts remote input through a private `CGEventSource` state table. Apple documents this source type for remote-control applications because its keyboard and mouse state is independent from physical input sources. Input decoding and CGEvent posting run on a dedicated user-interactive serial pipeline instead of the SwiftUI main queue. Continuous pointer/drag/scroll acknowledgements are sampled while button-down, button-up, click, and keyboard barriers are always acknowledged, preventing diagnostic traffic from competing with control. Text events explicitly carry no modifier flags, and a shortcut key-up clears its flags, preventing Command, Control, Option, Shift, or Tab behavior from leaking into later text. When the viewer backgrounds, disconnects, or stops streaming, it sends a release-all-buttons event; the Mac additionally emits both left and right mouse-up events before ending the stream.
 
 The viewer also supports DeskIn-style navigation without changing remote input semantics:
 
@@ -469,7 +469,7 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 
 ## 14. Tests
 
-`PacketCodecTests` currently covers 21 cases:
+`PacketCodecTests` currently covers 23 cases:
 
 1. control-message round trip;
 2. heartbeat-message round trip;
@@ -491,7 +491,9 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 18. exact modifiers for special keys;
 19. case normalization for remote key names;
 20. pointer-button calibration and swapped mapping;
-21. release-all-buttons protocol round trip.
+21. release-all-buttons protocol round trip;
+22. press-and-hold click-count preservation;
+23. sampled acknowledgements for continuous input with reliable press barriers.
 
 Run them with all output on `/Volumes/D`:
 

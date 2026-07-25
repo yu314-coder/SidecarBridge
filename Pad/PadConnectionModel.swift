@@ -348,9 +348,11 @@ final class PadConnectionModel: ObservableObject {
         inputSequence &+= 1
         var sequenced = input
         sequenced.sequence = inputSequence
-        inputSentAt[inputSequence] = ProcessInfo.processInfo.systemUptime
-        if inputSentAt.count > 120 {
-            inputSentAt = inputSentAt.filter { inputSequence &- $0.key < 60 }
+        if sequenced.shouldAcknowledge {
+            inputSentAt[inputSequence] = ProcessInfo.processInfo.systemUptime
+        }
+        if inputSentAt.count > 40 {
+            inputSentAt = inputSentAt.filter { inputSequence &- $0.key < 36 }
         }
         peers.sendInput(sequenced)
     }
@@ -384,8 +386,10 @@ final class PadConnectionModel: ObservableObject {
         case .primaryUp:
             pointerIsPressed = false
             flashClickIndicator()
-        case .primaryClick, .primaryDoubleClick, .secondaryClick:
+        case .primaryClick, .primaryDoubleClick, .secondaryClick, .secondaryDoubleClick:
             flashClickIndicator()
+        case .releaseButtons:
+            pointerIsPressed = false
         default:
             break
         }

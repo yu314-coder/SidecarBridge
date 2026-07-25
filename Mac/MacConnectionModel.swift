@@ -30,7 +30,7 @@ final class MacConnectionModel: ObservableObject {
     private let sidecar = SidecarConnector()
     private let peers = MacPeerService()
     private let streamer = ScreenStreamer()
-    private let remoteInput = RemoteInputController()
+    private let remoteInput = RemoteInputPipeline()
     private lazy var fileTransfer = FileTransferEngine {
         guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
             throw CocoaError(.fileNoSuchFile)
@@ -105,6 +105,21 @@ final class MacConnectionModel: ObservableObject {
                 self.remoteInput.releaseButtons()
                 self.fileTransfer.cancelAll(reason: "Connection ended.")
                 self.stopFallback()
+            }
+        }
+        let inputPipeline = remoteInput
+        let peerService = peers
+        peers.onInput = { [weak self] event in
+            inputPipeline.submit(event) { accepted in
+                if event.shouldAcknowledge, let sequence = event.sequence {
+                    peerService.send(ControlMessage(
+                        .status,
+                        detail: "input-ack:\(sequence):\(accepted ? 1 : 0)"
+                    ))
+                }
+                DispatchQueue.main.async { [weak self] in
+                    self?.applyRemoteInputResult(accepted)
+                }
             }
         }
         peers.onCommand = { [weak self] command in self?.handle(command) }
@@ -484,20 +499,28 @@ final class MacConnectionModel: ObservableObject {
             }
         case .input:
             guard let event = command.remoteInputEvent else { return }
-            let accepted = remoteInput.handle(event)
-            if let sequence = event.sequence {
-                peers.send(ControlMessage(
-                    .status,
-                    detail: "input-ack:\(sequence):\(accepted ? 1 : 0)"
-                ))
+            let peerService = peers
+            remoteInput.submit(event) { [weak self] accepted in
+                if event.shouldAcknowledge, let sequence = event.sequence {
+                    peerService.send(ControlMessage(
+                        .status,
+                        detail: "input-ack:\(sequence):\(accepted ? 1 : 0)"
+                    ))
+                }
+                DispatchQueue.main.async { [weak self] in
+                    self?.applyRemoteInputResult(accepted)
+                }
             }
-            if !accepted {
-                remoteInputAuthorized = false
-                sendRemoteInputPermissionStatus()
-            } else if !remoteInputAuthorized {
-                remoteInputAuthorized = true
-                sendRemoteInputPermissionStatus()
-            }
+        }
+    }
+
+    private func applyRemoteInputResult(_ accepted: Bool) {
+        if !accepted {
+            remoteInputAuthorized = false
+            sendRemoteInputPermissionStatus()
+        } else if !remoteInputAuthorized {
+            remoteInputAuthorized = true
+            sendRemoteInputPermissionStatus()
         }
     }
 

@@ -173,6 +173,32 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(message.remoteInputEvent, input)
     }
 
+    func testPressAndHoldPreservesClickCount() throws {
+        let inputs = [
+            RemoteInputEvent.primaryDown(x: 0.2, y: 0.3, clickCount: 2),
+            RemoteInputEvent.primaryDrag(x: 0.4, y: 0.5, clickCount: 2),
+            RemoteInputEvent.primaryUp(x: 0.6, y: 0.7, clickCount: 2)
+        ]
+
+        for input in inputs {
+            let message = try XCTUnwrap(ControlMessage.input(input))
+            XCTAssertEqual(message.remoteInputEvent, input)
+            XCTAssertEqual(message.remoteInputEvent?.clickCount, 2)
+        }
+    }
+
+    func testContinuousInputAcknowledgementIsSampled() {
+        var pointer = RemoteInputEvent.pointer(x: 0.2, y: 0.3)
+        pointer.sequence = 11
+        XCTAssertFalse(pointer.shouldAcknowledge)
+        pointer.sequence = 12
+        XCTAssertTrue(pointer.shouldAcknowledge)
+
+        var down = RemoteInputEvent.primaryDown(x: 0.2, y: 0.3)
+        down.sequence = 13
+        XCTAssertTrue(down.shouldAcknowledge)
+    }
+
     func testLocalNetworkPermissionStatesAreNotOptimistic() {
         XCTAssertFalse(LocalNetworkAccessState.checking.isGranted)
         XCTAssertFalse(LocalNetworkAccessState.unavailable("Wi-Fi is off").isGranted)

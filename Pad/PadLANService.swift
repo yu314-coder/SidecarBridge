@@ -12,7 +12,10 @@ final class PadLANService {
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
 
-    private let queue = DispatchQueue(label: "SidecarBridge.PadLAN")
+    private let queue = DispatchQueue(
+        label: "SidecarBridge.PadLAN",
+        qos: .userInteractive
+    )
     private var browser: NWBrowser?
     private var endpoints: [NWEndpoint] = []
     private var connection: NWConnection?
@@ -25,7 +28,7 @@ final class PadLANService {
     private var subnetProbeGeneration = 0
     private var triedCachedHostForBrowser = false
     private var nextEndpointIndex = 0
-    private let idleDiscoveryRefreshInterval: TimeInterval = 30
+    private let idleDiscoveryRefreshInterval: TimeInterval = 12
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
     private var sessionKey: SymmetricKey?
     private var receiveBuffer = Data()
@@ -160,6 +163,9 @@ final class PadLANService {
         }
         self.browser = browser
         browser.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.tryCachedDirectHost()
+        }
     }
 
     private func connectNextAvailable() {
@@ -290,7 +296,7 @@ final class PadLANService {
     }
 
     private func retrySoon() {
-        queue.asyncAfter(deadline: .now() + 1) { [weak self] in self?.connectNextAvailable() }
+        queue.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.connectNextAvailable() }
     }
 
     /// Bonjour can be filtered by some access points even when devices can
@@ -549,7 +555,7 @@ final class PadLANService {
             self.scheduleBrowserRestart(after: 0.25)
         }
         connectionAttemptWorkItem = workItem
-        queue.asyncAfter(deadline: .now() + 7, execute: workItem)
+            queue.asyncAfter(deadline: .now() + 4, execute: workItem)
     }
 
     private func scheduleBrowserRestart(after delay: TimeInterval) {
@@ -604,11 +610,17 @@ final class PadLANService {
     private func lowLatencyParameters() -> NWParameters {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
+        tcp.disableAckStretching = true
         tcp.enableKeepalive = true
-        tcp.keepaliveIdle = 5
+        tcp.keepaliveIdle = 3
+        tcp.keepaliveInterval = 2
+        tcp.keepaliveCount = 3
+        tcp.connectionTimeout = 4
+        tcp.connectionDropTime = 8
         let parameters = NWParameters(tls: nil, tcp: tcp)
         parameters.allowLocalEndpointReuse = true
         parameters.includePeerToPeer = true
+        parameters.serviceClass = .interactiveVideo
         return parameters
     }
 }

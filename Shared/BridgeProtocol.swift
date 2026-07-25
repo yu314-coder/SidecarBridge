@@ -79,6 +79,7 @@ struct RemoteInputEvent: Codable, Equatable {
     var text: String?
     var key: String?
     var modifiers: [String]?
+    var clickCount: Int? = nil
 
     static func pointer(x: Double, y: Double) -> Self {
         Self(kind: .pointerMove, sequence: nil, x: x, y: y)
@@ -97,16 +98,16 @@ struct RemoteInputEvent: Codable, Equatable {
         )
     }
 
-    static func primaryDown(x: Double, y: Double) -> Self {
-        Self(kind: .primaryDown, sequence: nil, x: x, y: y)
+    static func primaryDown(x: Double, y: Double, clickCount: Int = 1) -> Self {
+        Self(kind: .primaryDown, sequence: nil, x: x, y: y, clickCount: max(clickCount, 1))
     }
 
-    static func primaryDrag(x: Double, y: Double) -> Self {
-        Self(kind: .primaryDrag, sequence: nil, x: x, y: y)
+    static func primaryDrag(x: Double, y: Double, clickCount: Int = 1) -> Self {
+        Self(kind: .primaryDrag, sequence: nil, x: x, y: y, clickCount: max(clickCount, 1))
     }
 
-    static func primaryUp(x: Double? = nil, y: Double? = nil) -> Self {
-        Self(kind: .primaryUp, sequence: nil, x: x, y: y)
+    static func primaryUp(x: Double? = nil, y: Double? = nil, clickCount: Int = 1) -> Self {
+        Self(kind: .primaryUp, sequence: nil, x: x, y: y, clickCount: max(clickCount, 1))
     }
 
     static func releaseButtons() -> Self {
@@ -128,6 +129,20 @@ struct RemoteInputEvent: Codable, Equatable {
             key: key.lowercased(),
             modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers)
         )
+    }
+
+    var isContinuousInput: Bool {
+        switch kind {
+        case .pointerMove, .primaryDrag, .scroll:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var shouldAcknowledge: Bool {
+        guard let sequence else { return false }
+        return !isContinuousInput || sequence.isMultiple(of: 12)
     }
 }
 

@@ -107,7 +107,7 @@ final class PadPeerService: NSObject {
             }
         }
         validationWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
     }
 
     func send(_ message: ControlMessage) {
@@ -186,7 +186,7 @@ final class PadPeerService: NSObject {
         peerSupportsHeartbeat = false
         onConnectionHealthChanged?("Verifying encrypted link", nil)
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: 4, leeway: .milliseconds(300))
+        timer.schedule(deadline: .now(), repeating: 3, leeway: .milliseconds(150))
         timer.setEventHandler { [weak self] in self?.heartbeatTick() }
         heartbeatTimer = timer
         timer.resume()
@@ -207,7 +207,7 @@ final class PadPeerService: NSObject {
             return
         }
         let now = ProcessInfo.processInfo.systemUptime
-        if peerSupportsHeartbeat, now - lastPeerActivity > 12 {
+        if peerSupportsHeartbeat, now - lastPeerActivity > 9 {
             recoverStaleConnection(reason: "Encrypted link stopped responding.")
             return
         }
@@ -257,7 +257,7 @@ final class PadPeerService: NSObject {
             browser.startBrowsingForPeers()
         }
         fallbackWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: workItem)
     }
 
     private func stopMultipeerFallback() {
@@ -297,7 +297,7 @@ final class PadPeerService: NSObject {
             self.scheduleMultipeerFallback()
         }
         mcConnectionWatchdog = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: workItem)
     }
 
     private func restartMultipeerBrowserAfterDisconnect() {

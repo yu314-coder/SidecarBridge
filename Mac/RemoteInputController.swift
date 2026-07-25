@@ -3,6 +3,44 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+final class RemoteInputPipeline {
+    private let controller = RemoteInputController()
+    private let queue = DispatchQueue(
+        label: "SidecarBridge.RemoteInput",
+        qos: .userInteractive
+    )
+
+    var isAuthorized: Bool { controller.isAuthorized }
+
+    @discardableResult
+    func requestAccess() -> Bool {
+        controller.requestAccess()
+    }
+
+    func openAccessibilitySettings() {
+        controller.openAccessibilitySettings()
+    }
+
+    func revealApplication() {
+        controller.revealApplication()
+    }
+
+    func submit(
+        _ input: RemoteInputEvent,
+        completion: @escaping (Bool) -> Void
+    ) {
+        queue.async { [controller] in
+            completion(controller.handle(input))
+        }
+    }
+
+    func releaseButtons() {
+        queue.async { [controller] in
+            controller.releaseButtons()
+        }
+    }
+}
+
 final class RemoteInputController {
     var isAuthorized: Bool { AXIsProcessTrusted() }
     private let eventSource = CGEventSource(stateID: .privateState)
@@ -38,12 +76,12 @@ final class RemoteInputController {
             movePointer(x: x, y: y)
         case .primaryDown:
             guard let x = input.x, let y = input.y else { return false }
-            primaryButtonDown(x: x, y: y)
+            primaryButtonDown(x: x, y: y, clickCount: input.clickCount ?? 1)
         case .primaryDrag:
             guard let x = input.x, let y = input.y else { return false }
-            primaryButtonDrag(x: x, y: y)
+            primaryButtonDrag(x: x, y: y, clickCount: input.clickCount ?? 1)
         case .primaryUp:
-            primaryButtonUp(x: input.x, y: input.y)
+            primaryButtonUp(x: input.x, y: input.y, clickCount: input.clickCount ?? 1)
         case .primaryClick:
             if let x = input.x, let y = input.y { movePointer(x: x, y: y) }
             click(button: .left)
@@ -101,7 +139,7 @@ final class RemoteInputController {
     private func click(button: CGMouseButton, count: Int = 1) {
         guard let location = CGEvent(source: nil)?.location else { return }
         if button == .right, isPrimaryButtonDown {
-            primaryButtonUp(x: nil, y: nil)
+            primaryButtonUp(x: nil, y: nil, clickCount: 1)
         }
         let down: CGEventType = button == .right ? .rightMouseDown : .leftMouseDown
         let up: CGEventType = button == .right ? .rightMouseUp : .leftMouseUp
@@ -126,22 +164,36 @@ final class RemoteInputController {
         }
     }
 
-    private func primaryButtonDown(x: Double, y: Double) {
+    private func primaryButtonDown(x: Double, y: Double, clickCount: Int) {
         let point = displayPoint(x: x, y: y)
         if isPrimaryButtonDown {
             CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
         }
-        CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        let event = CGEvent(
+            mouseEventSource: eventSource,
+            mouseType: .leftMouseDown,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        )
+        event?.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
+        event?.post(tap: .cghidEventTap)
         isPrimaryButtonDown = true
     }
 
-    private func primaryButtonDrag(x: Double, y: Double) {
+    private func primaryButtonDrag(x: Double, y: Double, clickCount: Int) {
         let point = displayPoint(x: x, y: y)
         let eventType: CGEventType = isPrimaryButtonDown ? .leftMouseDragged : .mouseMoved
-        CGEvent(mouseEventSource: eventSource, mouseType: eventType, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        let event = CGEvent(
+            mouseEventSource: eventSource,
+            mouseType: eventType,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        )
+        event?.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
+        event?.post(tap: .cghidEventTap)
     }
 
-    private func primaryButtonUp(x: Double?, y: Double?) {
+    private func primaryButtonUp(x: Double?, y: Double?, clickCount: Int) {
         guard isPrimaryButtonDown else { return }
         let point: CGPoint
         if let x, let y {
@@ -149,7 +201,14 @@ final class RemoteInputController {
         } else {
             point = CGEvent(source: nil)?.location ?? .zero
         }
-        CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        let event = CGEvent(
+            mouseEventSource: eventSource,
+            mouseType: .leftMouseUp,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        )
+        event?.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
+        event?.post(tap: .cghidEventTap)
         isPrimaryButtonDown = false
     }
 
