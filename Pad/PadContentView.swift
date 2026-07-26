@@ -666,7 +666,7 @@ struct PadContentView: View {
 
                 if showBottomHint {
                     Text(model.remoteInputAuthorized
-                         ? "Two-finger scroll • pinch zoom • three-finger pan • left/right click"
+                         ? "One finger moves • tap clicks • hold then drag • two fingers scroll"
                          : "On the Mac: SidecarBridge → Enable Remote Input → allow Accessibility")
                         .font(.caption)
                         .padding(.horizontal, 14)
@@ -675,7 +675,7 @@ struct PadContentView: View {
                         .padding(.bottom, 14)
                         .allowsHitTesting(false)
                         .accessibilityLabel(model.remoteInputAuthorized
-                            ? "Remote input help: two-finger scroll, pinch zoom, three-finger pan, and left or right click."
+                            ? "Remote input help: move one finger for the cursor, tap to click, hold then move to drag, or use two fingers to scroll."
                             : "Remote input requires Accessibility permission on the Mac.")
                 }
             }

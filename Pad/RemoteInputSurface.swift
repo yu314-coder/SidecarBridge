@@ -59,8 +59,71 @@ final class PointerPressGestureRecognizer: UIGestureRecognizer {
     }
 }
 
+final class DirectTouchGestureRecognizer: UIGestureRecognizer {
+    private var trackedTouch: UITouch?
+    private(set) var preciseLocation = CGPoint.zero
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesBegan(touches, with: event)
+        if let trackedTouch {
+            for touch in touches where touch != trackedTouch {
+                ignore(touch, for: event)
+            }
+            if state == .began || state == .changed {
+                state = .cancelled
+            }
+            return
+        }
+        guard state == .possible, touches.count == 1, let touch = touches.first else {
+            state = .failed
+            return
+        }
+        trackedTouch = touch
+        capture(touch, with: event)
+        state = .began
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesMoved(touches, with: event)
+        guard let trackedTouch,
+              touches.contains(trackedTouch),
+              state == .began || state == .changed else { return }
+        capture(event.coalescedTouches(for: trackedTouch)?.last ?? trackedTouch, with: event)
+        state = .changed
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesEnded(touches, with: event)
+        guard let trackedTouch,
+              touches.contains(trackedTouch),
+              state == .began || state == .changed else { return }
+        capture(trackedTouch, with: event)
+        state = .ended
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
+        guard state == .began || state == .changed else { return }
+        state = .cancelled
+    }
+
+    override func reset() {
+        super.reset()
+        trackedTouch = nil
+        preciseLocation = .zero
+    }
+
+    private func capture(_ touch: UITouch, with event: UIEvent) {
+        preciseLocation = touch.preciseLocation(in: view)
+    }
+}
+
 final class RemoteScrollGestureRecognizer: UIPanGestureRecognizer {
     var representsContinuousScroll = true
+}
+
+final class RemoteHoldGestureRecognizer: UILongPressGestureRecognizer {
+    var consumesDirectTouch = false
 }
 
 struct RemoteInputSurface: UIViewRepresentable {
@@ -138,11 +201,17 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private var pointerPressConsumedByCalibration = false
     private var primaryClickTracker = RemoteClickSequenceTracker()
     private var secondaryClickTracker = RemoteClickSequenceTracker()
+    private var directTouchClickTracker = RemoteClickSequenceTracker()
+    private var directTouchStartLocation = CGPoint.zero
+    private var directTouchStartedAt: TimeInterval = 0
+    private var directTouchMovedBeyondClickSlop = false
+    private var directTouchConsumedByHold = false
     private let suppressedSoftwareKeyboardView = UIView(frame: .zero)
     private let pointerEmissionInterval = 1.0 / 120.0
     private let pointerDoubleClickInterval: TimeInterval = 0.42
     private let pointerDoubleClickDistance = 44.0
     private let pointerClickSlop: CGFloat = 8
+    private let directTouchClickSlop: CGFloat = 12
 
     init(
         contentAspectRatio: CGFloat,
@@ -338,19 +407,22 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         pointerPress.delegate = self
         addGestureRecognizer(pointerPress)
 
+        let directTouch = DirectTouchGestureRecognizer(
+            target: self,
+            action: #selector(handleDirectTouch(_:))
+        )
+        directTouch.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        directTouch.cancelsTouchesInView = false
+        directTouch.delegate = self
+        addGestureRecognizer(directTouch)
+
         let touchDoubleClick = UITapGestureRecognizer(target: self, action: #selector(handlePrimaryDoubleClick(_:)))
         touchDoubleClick.numberOfTapsRequired = 2
-        touchDoubleClick.allowedTouchTypes = [
-            NSNumber(value: UITouch.TouchType.direct.rawValue),
-            NSNumber(value: UITouch.TouchType.stylus.rawValue)
-        ]
+        touchDoubleClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.stylus.rawValue)]
         addGestureRecognizer(touchDoubleClick)
 
         let touchPrimaryClick = UITapGestureRecognizer(target: self, action: #selector(handlePrimaryClick(_:)))
-        touchPrimaryClick.allowedTouchTypes = [
-            NSNumber(value: UITouch.TouchType.direct.rawValue),
-            NSNumber(value: UITouch.TouchType.stylus.rawValue)
-        ]
+        touchPrimaryClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.stylus.rawValue)]
         touchPrimaryClick.require(toFail: touchDoubleClick)
         addGestureRecognizer(touchPrimaryClick)
 
@@ -401,31 +473,104 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let touchDrag = UIPanGestureRecognizer(target: self, action: #selector(handlePrimaryDrag(_:)))
         touchDrag.minimumNumberOfTouches = 1
         touchDrag.maximumNumberOfTouches = 1
-        touchDrag.allowedTouchTypes = [
-            NSNumber(value: UITouch.TouchType.direct.rawValue),
-            NSNumber(value: UITouch.TouchType.stylus.rawValue)
-        ]
+        touchDrag.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.stylus.rawValue)]
         touchDrag.delegate = self
         addGestureRecognizer(touchDrag)
 
-        let touchHold = UILongPressGestureRecognizer(target: self, action: #selector(handleTouchHold(_:)))
-        touchHold.minimumPressDuration = 0.22
-        touchHold.allowableMovement = 18
-        touchHold.allowedTouchTypes = [
-            NSNumber(value: UITouch.TouchType.direct.rawValue),
-            NSNumber(value: UITouch.TouchType.stylus.rawValue)
-        ]
-        touchHold.cancelsTouchesInView = false
-        touchHold.delegate = self
-        addGestureRecognizer(touchHold)
-        touchPrimaryClick.require(toFail: touchHold)
-        touchDoubleClick.require(toFail: touchHold)
+        let directTouchHold = RemoteHoldGestureRecognizer(
+            target: self,
+            action: #selector(handleTouchHold(_:))
+        )
+        directTouchHold.consumesDirectTouch = true
+        directTouchHold.minimumPressDuration = 0.22
+        directTouchHold.allowableMovement = 18
+        directTouchHold.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        directTouchHold.cancelsTouchesInView = false
+        directTouchHold.delegate = self
+        addGestureRecognizer(directTouchHold)
+
+        let stylusHold = RemoteHoldGestureRecognizer(
+            target: self,
+            action: #selector(handleTouchHold(_:))
+        )
+        stylusHold.minimumPressDuration = 0.22
+        stylusHold.allowableMovement = 18
+        stylusHold.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.stylus.rawValue)]
+        stylusHold.cancelsTouchesInView = false
+        stylusHold.delegate = self
+        addGestureRecognizer(stylusHold)
+        touchPrimaryClick.require(toFail: stylusHold)
+        touchDoubleClick.require(toFail: stylusHold)
     }
 
     @objc private func handleHover(_ recognizer: UIHoverGestureRecognizer) {
         guard !isPrimaryDragging,
               recognizer.state == .began || recognizer.state == .changed else { return }
         sendPointer(at: recognizer.location(in: self))
+    }
+
+    @objc private func handleDirectTouch(_ recognizer: DirectTouchGestureRecognizer) {
+        let location = recognizer.preciseLocation
+        switch recognizer.state {
+        case .began:
+            directTouchStartLocation = location
+            directTouchStartedAt = ProcessInfo.processInfo.systemUptime
+            directTouchMovedBeyondClickSlop = false
+            directTouchConsumedByHold = false
+            lastPointerTime = 0
+            sendPointer(at: location, force: true)
+        case .changed:
+            if hypot(
+                location.x - directTouchStartLocation.x,
+                location.y - directTouchStartLocation.y
+            ) > directTouchClickSlop {
+                directTouchMovedBeyondClickSlop = true
+                directTouchClickTracker.reset()
+            }
+            guard !isPrimaryDragging else { return }
+            sendPointer(at: location)
+        case .ended:
+            defer {
+                directTouchConsumedByHold = false
+                directTouchMovedBeyondClickSlop = false
+            }
+            guard !directTouchConsumedByHold else { return }
+            if directTouchMovedBeyondClickSlop {
+                sendPointer(at: location, force: true)
+            } else {
+                sendDirectTouchClick(at: location)
+            }
+        case .cancelled, .failed:
+            directTouchClickTracker.reset()
+            directTouchConsumedByHold = false
+            directTouchMovedBeyondClickSlop = false
+        default:
+            break
+        }
+    }
+
+    private func sendDirectTouchClick(at location: CGPoint) {
+        guard let point = normalizedPoint(location) else { return }
+        becomeFirstResponder()
+        let now = ProcessInfo.processInfo.systemUptime
+        let count = directTouchClickTracker.nextCount(
+            x: Double(location.x),
+            y: Double(location.y),
+            at: now,
+            interval: pointerDoubleClickInterval,
+            maximumDistance: pointerDoubleClickDistance
+        )
+        directTouchClickTracker.complete(
+            count: count,
+            x: Double(location.x),
+            y: Double(location.y),
+            beganAt: directTouchStartedAt,
+            endedAt: now,
+            interval: pointerDoubleClickInterval,
+            movedBeyondClickSlop: false
+        )
+        onInput(.primaryDown(x: point.x, y: point.y, clickCount: count))
+        onInput(.primaryUp(x: point.x, y: point.y, clickCount: count))
     }
 
     @objc private func handlePointerPress(_ recognizer: PointerPressGestureRecognizer) {
@@ -583,6 +728,10 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         case .began:
             guard !isPrimaryDragging, let normalized = normalizedPoint(point) else { return }
             becomeFirstResponder()
+            if (recognizer as? RemoteHoldGestureRecognizer)?.consumesDirectTouch == true {
+                directTouchConsumedByHold = true
+                directTouchClickTracker.reset()
+            }
             activePrimaryClickCount = 1
             isPrimaryDragging = true
             lastPointerTime = 0
@@ -639,10 +788,10 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         onInput(.releaseButtons())
     }
 
-    private func sendPointer(at point: CGPoint) {
+    private func sendPointer(at point: CGPoint, force: Bool = false) {
         guard let normalized = normalizedPoint(point) else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastPointerTime >= pointerEmissionInterval else { return }
+        guard force || now - lastPointerTime >= pointerEmissionInterval else { return }
         lastPointerTime = now
         onInput(.pointer(x: normalized.x, y: normalized.y))
     }
@@ -709,6 +858,10 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
+        if gestureRecognizer is DirectTouchGestureRecognizer ||
+            otherGestureRecognizer is DirectTouchGestureRecognizer {
+            return true
+        }
         if gestureRecognizer is UILongPressGestureRecognizer ||
             otherGestureRecognizer is UILongPressGestureRecognizer ||
             gestureRecognizer is PointerPressGestureRecognizer ||

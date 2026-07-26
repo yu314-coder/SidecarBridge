@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 8** on 2026-07-26.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 9** on 2026-07-26.
 
 ## 1. Purpose
 
@@ -228,6 +228,8 @@ The iPad can forward:
 The Mac converts the normalized coordinates to the captured display and posts CGEvents. This requires explicit Accessibility permission in macOS System Settings.
 
 A mouse or trackpad primary press uses a custom continuous indirect-pointer recognizer rather than waiting for competing single- and double-tap recognizers. The recognizer stores UIKit's original event button mask and precise coalesced touch location, follows the began/changed/ended/cancelled state machine, and clears all state in `reset()`. Button-down is transmitted as soon as the physical press begins, stationary press-and-hold remains down, movement produces drag events at up to 120 Hz, and button-up is a reliable release barrier. Ambiguous primary-plus-secondary chords are ignored instead of guessed. Only short presses within an eight-point movement tolerance participate in the next double-click; a drag, long hold, or cancelled press resets that click history. Nearby valid clicks carry click-state values 1 and 2 so macOS still receives a true double-click without delaying the first press. Direct touch and Apple Pencil also provide a 0.22-second hold gesture. The viewer drawer retains separate **Left**, **Double**, and **Right** controls for users who prefer explicit buttons.
+
+Direct finger input uses a separate custom continuous recognizer rather than the Pencil tap/pan recognizers. Touch-down immediately sends an absolute pointer position. Coalesced precise touch samples then move the cursor at up to 120 Hz without pressing the primary button. A short touch-up sends an ordered primary-down/primary-up pair immediately; a second nearby tap uses click-state 2 without delaying the first tap. A dedicated direct-touch long press recognizes after 0.22 seconds, marks the pointer gesture as consumed, and owns primary-down/drag/up until release. A second or third finger cancels the direct-pointer recognizer, allowing two-finger scroll/pinch and three-finger viewport pan to proceed without an accidental click. Pencil tap, double-tap, hold, and pan remain on their prior stylus-only recognizers.
 
 SidecarBridge enables UIKit indirect-input events and reads the active physical button mask at press-begin. The viewer drawer offers **System** and **Swapped** mappings plus a one-click calibration flow: after the user chooses **Calibrate Physical Left Click**, the next reported pointer button is recorded as the intended left button. This compensates inside SidecarBridge when iPadOS or a mouse reports the physical left side as secondary. iPadOS's global mouse mapping remains under Settings → General → Trackpad & Mouse → Secondary Click.
 
@@ -471,7 +473,7 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 
 ## 14. Tests
 
-`PacketCodecTests` currently covers 30 cases:
+`PacketCodecTests` currently covers 31 cases:
 
 1. control-message round trip;
 2. heartbeat-message round trip;
@@ -502,7 +504,8 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 27. scroll-delta accumulation between phase barriers;
 28. nearby short-click classification for double-click;
 29. long-hold exclusion from the double-click sequence;
-30. drag exclusion from the double-click sequence.
+30. drag exclusion from the double-click sequence;
+31. ordered direct-touch pointer and tap barriers.
 
 Run them with all output on `/Volumes/D`:
 

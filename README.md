@@ -40,7 +40,7 @@ If the app reports `NoAuth`, macOS or iOS/iPadOS has denied Local Network access
 
 ### iPhone support
 
-Build 8 is universal (`TARGETED_DEVICE_FAMILY = 1,2`). iPhone provides the encrypted in-app display, touch input, discovery, settings, file transfer, zoom, and background Picture in Picture controls. Apple System Sidecar is an iPad-only feature, so SidecarBridge hides that mode on iPhone instead of presenting a control that cannot work.
+Build 9 is universal (`TARGETED_DEVICE_FAMILY = 1,2`). iPhone provides the encrypted in-app display, touch input, discovery, settings, file transfer, zoom, and background Picture in Picture controls. Apple System Sidecar is an iPad-only feature, so SidecarBridge hides that mode on iPhone instead of presenting a control that cannot work.
 
 ## What is and is not possible
 
@@ -65,7 +65,7 @@ Closing the Mac window leaves SidecarBridge available as a background app so an 
 Apple supports typing with a Smart Keyboard or Magic Keyboard connected to the iPad during native Sidecar, but specifies a mouse or trackpad connected to the **Mac** (or Apple Pencil on iPad) for pointing. SidecarBridge therefore defaults to **Use app stream for Magic Keyboard + trackpad** on the iPad. This selects the fallback stream and forwards:
 
 - 120 Hz-capable trackpad hover/pointer movement, immediate left-button down/up, press-and-hold, double-click, right click, click-and-drag, phase-aware continuous trackpad scrolling, mouse-wheel scrolling, and two-finger touch scrolling;
-- direct touch or Apple Pencil pointer movement and taps;
+- immediate one-finger cursor movement, tap/double-tap clicks, hold-then-drag, plus separate Apple Pencil taps and drag input;
 - text, arrows, Return, Tab, Escape, Delete, and common Command shortcuts.
 
 Remote input requires enabling SidecarBridge in **System Settings → Privacy & Security → Accessibility** on the Mac. macOS does not allow an app to add or authorize itself. In the Mac app, click **Open Accessibility**, click the `+` button in System Settings, then select SidecarBridge. If the app is hard to locate, click **Show App** first and drag the revealed app into the Accessibility list. Input events are accepted only through the already encrypted, paired app session.
@@ -74,8 +74,11 @@ The iPad viewer forwards a trackpad or mouse primary button-down immediately, ke
 
 Continuous pointer, drag, and scroll samples are coalesced before encrypted transmission: when the link is busy, SidecarBridge keeps the newest cursor/drag location and accumulated scroll distance instead of queueing stale motion. Button-down, button-up, click, scroll begin/end, and keyboard events remain ordered barriers. This keeps control responsive during momentary Wi-Fi or peer-to-peer congestion without losing press-and-hold state.
 
+Finger input does not share the delayed tap recognizers used by Apple Pencil. Touch-down immediately places the remote cursor at that screen position, one-finger movement follows the latest precise touch sample without holding the mouse button, and touch-up emits a click immediately when the finger stayed within the tap tolerance. A second nearby tap carries macOS click-state 2 without delaying the first click. Holding still for 0.22 seconds transfers control to the long-press recognizer, which sends button-down and then drag events until release. Adding a second or third finger cancels the one-finger pointer gesture so scrolling, zooming, and viewport panning do not create accidental clicks.
+
 ### Viewer zoom and file transfer
 
+- Move one finger to position the Mac cursor; tap to click, double-tap to double-click, or hold briefly and then move to drag.
 - Swipe with two fingers to scroll the remote Mac.
 - Pinch with two fingers to zoom the viewer from 100% to 400%.
 - Drag with three fingers to pan while zoomed. Pointer and click coordinates are translated through the zoom so they continue to target the visible Mac content.

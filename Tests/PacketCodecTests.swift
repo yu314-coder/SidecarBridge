@@ -376,6 +376,23 @@ final class PacketCodecTests: XCTestCase {
         )
     }
 
+    func testDirectTouchPointerAndTapBarriersStayOrdered() {
+        var coalescer = RemoteInputCoalescer()
+        let stalePointer = RemoteInputEvent.pointer(x: 0.1, y: 0.2)
+        let latestPointer = RemoteInputEvent.pointer(x: 0.4, y: 0.5)
+        let down = RemoteInputEvent.primaryDown(x: 0.4, y: 0.5, clickCount: 2)
+        let up = RemoteInputEvent.primaryUp(x: 0.4, y: 0.5, clickCount: 2)
+
+        coalescer.enqueue(stalePointer)
+        coalescer.enqueue(latestPointer)
+        coalescer.enqueue(down)
+        coalescer.enqueue(up)
+
+        XCTAssertEqual(coalescer.pending, [latestPointer, down, up])
+        XCTAssertFalse(down.isCoalescibleInput)
+        XCTAssertFalse(up.isCoalescibleInput)
+    }
+
     func testLocalNetworkPermissionStatesAreNotOptimistic() {
         XCTAssertFalse(LocalNetworkAccessState.checking.isGranted)
         XCTAssertFalse(LocalNetworkAccessState.unavailable("Wi-Fi is off").isGranted)
