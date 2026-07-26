@@ -50,6 +50,13 @@ enum RemoteInputKind: String, Codable, Equatable {
     case key
 }
 
+enum RemoteScrollPhase: String, Codable, Equatable {
+    case began
+    case changed
+    case ended
+    case cancelled
+}
+
 enum RemotePointerButton: String, Codable, Equatable, Hashable {
     case primary
     case secondary
@@ -80,6 +87,8 @@ struct RemoteInputEvent: Codable, Equatable {
     var key: String?
     var modifiers: [String]?
     var clickCount: Int? = nil
+    var scrollPhase: RemoteScrollPhase? = nil
+    var isContinuousScroll: Bool? = nil
 
     static func pointer(x: Double, y: Double) -> Self {
         Self(kind: .pointerMove, sequence: nil, x: x, y: y)
@@ -114,8 +123,20 @@ struct RemoteInputEvent: Codable, Equatable {
         Self(kind: .releaseButtons, sequence: nil)
     }
 
-    static func scroll(x: Double, y: Double) -> Self {
-        Self(kind: .scroll, sequence: nil, deltaX: x, deltaY: y)
+    static func scroll(
+        x: Double,
+        y: Double,
+        phase: RemoteScrollPhase? = nil,
+        continuous: Bool? = nil
+    ) -> Self {
+        Self(
+            kind: .scroll,
+            sequence: nil,
+            deltaX: x,
+            deltaY: y,
+            scrollPhase: phase,
+            isContinuousScroll: continuous
+        )
     }
 
     static func text(_ text: String) -> Self {
@@ -142,7 +163,113 @@ struct RemoteInputEvent: Codable, Equatable {
 
     var shouldAcknowledge: Bool {
         guard let sequence else { return false }
-        return !isContinuousInput || sequence.isMultiple(of: 12)
+        return !isCoalescibleInput || sequence.isMultiple(of: 12)
+    }
+
+    var isCoalescibleInput: Bool {
+        switch kind {
+        case .pointerMove, .primaryDrag:
+            return true
+        case .scroll:
+            return scrollPhase == nil || scrollPhase == .changed
+        default:
+            return false
+        }
+    }
+}
+
+struct RemoteInputCoalescer {
+    private(set) var pending: [RemoteInputEvent] = []
+
+    var count: Int { pending.count }
+    var isEmpty: Bool { pending.isEmpty }
+
+    mutating func enqueue(_ input: RemoteInputEvent) {
+        guard input.isCoalescibleInput else {
+            pending.append(input)
+            return
+        }
+
+        let segmentStart = (pending.lastIndex { !$0.isCoalescibleInput }?.advanced(by: 1)) ?? 0
+        let candidateIndices = pending.indices.reversed().filter { $0 >= segmentStart }
+
+        switch input.kind {
+        case .pointerMove, .primaryDrag:
+            if let index = candidateIndices.first(where: { pending[$0].kind == input.kind }) {
+                pending[index] = input
+            } else {
+                pending.append(input)
+            }
+        case .scroll:
+            if let index = candidateIndices.first(where: {
+                pending[$0].kind == .scroll &&
+                    pending[$0].isContinuousScroll == input.isContinuousScroll
+            }) {
+                var accumulated = input
+                accumulated.deltaX = (pending[index].deltaX ?? 0) + (input.deltaX ?? 0)
+                accumulated.deltaY = (pending[index].deltaY ?? 0) + (input.deltaY ?? 0)
+                pending[index] = accumulated
+            } else {
+                pending.append(input)
+            }
+        default:
+            pending.append(input)
+        }
+    }
+
+    mutating func popFirst() -> RemoteInputEvent? {
+        guard !pending.isEmpty else { return nil }
+        return pending.removeFirst()
+    }
+
+    mutating func removeAll() {
+        pending.removeAll(keepingCapacity: true)
+    }
+}
+
+struct RemoteClickSequenceTracker {
+    private var completedAt: TimeInterval = 0
+    private var completedX = 0.0
+    private var completedY = 0.0
+    private var completedCount = 0
+
+    func nextCount(
+        x: Double,
+        y: Double,
+        at timestamp: TimeInterval,
+        interval: TimeInterval,
+        maximumDistance: Double
+    ) -> Int {
+        let nearby = hypot(x - completedX, y - completedY) <= maximumDistance
+        return timestamp - completedAt <= interval && nearby
+            ? min(completedCount + 1, 2)
+            : 1
+    }
+
+    mutating func complete(
+        count: Int,
+        x: Double,
+        y: Double,
+        beganAt: TimeInterval,
+        endedAt: TimeInterval,
+        interval: TimeInterval,
+        movedBeyondClickSlop: Bool
+    ) {
+        guard !movedBeyondClickSlop, endedAt - beganAt <= interval else {
+            reset()
+            return
+        }
+        completedAt = endedAt
+        completedX = x
+        completedY = y
+        completedCount = max(count, 1)
+    }
+
+    mutating func reset() {
+        completedAt = 0
+        completedX = 0
+        completedY = 0
+        completedCount = 0
     }
 }
 

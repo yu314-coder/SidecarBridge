@@ -97,7 +97,12 @@ final class RemoteInputController {
         case .releaseButtons:
             releaseButtons()
         case .scroll:
-            scroll(x: input.deltaX ?? 0, y: input.deltaY ?? 0)
+            scroll(
+                x: input.deltaX ?? 0,
+                y: input.deltaY ?? 0,
+                phase: input.scrollPhase,
+                continuous: input.isContinuousScroll ?? true
+            )
         case .text:
             if let text = input.text { type(text) }
         case .key:
@@ -132,7 +137,12 @@ final class RemoteInputController {
             x: bounds.minX + min(max(x, 0), 1) * bounds.width,
             y: bounds.minY + min(max(y, 0), 1) * bounds.height
         )
-        let event = CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
+        let event = CGEvent(
+            mouseEventSource: eventSource,
+            mouseType: isPrimaryButtonDown ? .leftMouseDragged : .mouseMoved,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        )
         event?.post(tap: .cghidEventTap)
     }
 
@@ -220,14 +230,24 @@ final class RemoteInputController {
         )
     }
 
-    private func scroll(x: Double, y: Double) {
-        let accumulatedX = (x * 1.6) + scrollRemainderX
-        let accumulatedY = (y * 1.6) + scrollRemainderY
+    private func scroll(
+        x: Double,
+        y: Double,
+        phase: RemoteScrollPhase?,
+        continuous: Bool
+    ) {
+        if phase == .began {
+            scrollRemainderX = 0
+            scrollRemainderY = 0
+        }
+        let scale = continuous ? 1.0 : 1.8
+        let accumulatedX = (x * scale) + scrollRemainderX
+        let accumulatedY = (y * scale) + scrollRemainderY
         let wholeX = accumulatedX.rounded(.towardZero)
         let wholeY = accumulatedY.rounded(.towardZero)
         scrollRemainderX = accumulatedX - wholeX
         scrollRemainderY = accumulatedY - wholeY
-        guard wholeX != 0 || wholeY != 0 else { return }
+        guard wholeX != 0 || wholeY != 0 || phase != nil else { return }
 
         let event = CGEvent(
             scrollWheelEvent2Source: eventSource,
@@ -237,7 +257,28 @@ final class RemoteInputController {
             wheel2: Int32(clamping: Int(wholeX)),
             wheel3: 0
         )
+        event?.setIntegerValueField(
+            .scrollWheelEventIsContinuous,
+            value: continuous ? 1 : 0
+        )
+        if let phase {
+            let cgPhase: CGScrollPhase
+            switch phase {
+            case .began: cgPhase = .began
+            case .changed: cgPhase = .changed
+            case .ended: cgPhase = .ended
+            case .cancelled: cgPhase = .cancelled
+            }
+            event?.setIntegerValueField(
+                .scrollWheelEventScrollPhase,
+                value: Int64(cgPhase.rawValue)
+            )
+        }
         event?.post(tap: .cghidEventTap)
+        if phase == .ended || phase == .cancelled {
+            scrollRemainderX = 0
+            scrollRemainderY = 0
+        }
     }
 
     private func type(_ text: String) {

@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 7** on 2026-07-25.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 8** on 2026-07-26.
 
 ## 1. Purpose
 
@@ -227,13 +227,15 @@ The iPad can forward:
 
 The Mac converts the normalized coordinates to the captured display and posts CGEvents. This requires explicit Accessibility permission in macOS System Settings.
 
-A mouse or trackpad primary press now uses a continuous indirect-pointer recognizer rather than waiting for competing single- and double-tap recognizers. Button-down is transmitted as soon as the physical press begins, stationary press-and-hold remains down, movement produces drag events at up to 120 Hz, and button-up is a reliable release barrier. Nearby consecutive presses carry click-state values 1 and 2 so macOS still receives a true double-click without delaying the first press. Direct touch and Apple Pencil also provide a 0.22-second hold gesture. The viewer drawer retains separate **Left**, **Double**, and **Right** controls for users who prefer explicit buttons.
+A mouse or trackpad primary press uses a custom continuous indirect-pointer recognizer rather than waiting for competing single- and double-tap recognizers. The recognizer stores UIKit's original event button mask and precise coalesced touch location, follows the began/changed/ended/cancelled state machine, and clears all state in `reset()`. Button-down is transmitted as soon as the physical press begins, stationary press-and-hold remains down, movement produces drag events at up to 120 Hz, and button-up is a reliable release barrier. Ambiguous primary-plus-secondary chords are ignored instead of guessed. Only short presses within an eight-point movement tolerance participate in the next double-click; a drag, long hold, or cancelled press resets that click history. Nearby valid clicks carry click-state values 1 and 2 so macOS still receives a true double-click without delaying the first press. Direct touch and Apple Pencil also provide a 0.22-second hold gesture. The viewer drawer retains separate **Left**, **Double**, and **Right** controls for users who prefer explicit buttons.
 
 SidecarBridge enables UIKit indirect-input events and reads the active physical button mask at press-begin. The viewer drawer offers **System** and **Swapped** mappings plus a one-click calibration flow: after the user chooses **Calibrate Physical Left Click**, the next reported pointer button is recorded as the intended left button. This compensates inside SidecarBridge when iPadOS or a mouse reports the physical left side as secondary. iPadOS's global mouse mapping remains under Settings → General → Trackpad & Mouse → Secondary Click.
 
 Indirect-pointer dragging starts only when the calibrated mapping resolves UIKit's reported button to primary. A resolved secondary click therefore cannot enter or leave the primary drag state. Hardware keyboard presses are read from `UIKey` events rather than system-routed shortcut commands: printable characters are sent as layout-correct text, while special keys and shortcuts carry only the modifier snapshot for that exact press. The input surface reclaims first-responder status when its window becomes active or key, so typing does not require an extra trackpad click after the user focuses a Mac field with a local mouse. While the right-drawer software-keyboard control is off, the responder uses an empty input view: external keyboards keep receiving key events without automatically opening the iPadOS on-screen keyboard.
 
-The Mac posts remote input through a private `CGEventSource` state table. Apple documents this source type for remote-control applications because its keyboard and mouse state is independent from physical input sources. Input decoding and CGEvent posting run on a dedicated user-interactive serial pipeline instead of the SwiftUI main queue. Continuous pointer/drag/scroll acknowledgements are sampled while button-down, button-up, click, and keyboard barriers are always acknowledged, preventing diagnostic traffic from competing with control. Text events explicitly carry no modifier flags, and a shortcut key-up clears its flags, preventing Command, Control, Option, Shift, or Tab behavior from leaking into later text. When the viewer backgrounds, disconnects, or stops streaming, it sends a release-all-buttons event; the Mac additionally emits both left and right mouse-up events before ending the stream.
+The Mac posts remote input through a private `CGEventSource` state table. Apple documents this source type for remote-control applications because its keyboard and mouse state is independent from physical input sources. Input decoding and CGEvent posting run on a dedicated user-interactive serial pipeline instead of the SwiftUI main queue. Before encrypted transmission, a bounded coalescer replaces queued pointer or drag samples with the newest absolute location and accumulates compatible scroll deltas. Scroll begin/end, button-down, button-up, click, and keyboard events remain ordered barriers. Nearby peer delivery uses the low-latency mode only for coalescible motion; all barriers stay reliable. Continuous pointer/drag/scroll acknowledgements are sampled while barriers are always acknowledged, preventing diagnostic traffic and stale samples from competing with current control. Text events explicitly carry no modifier flags, and a shortcut key-up clears its flags, preventing Command, Control, Option, Shift, or Tab behavior from leaking into later text. When the viewer backgrounds, disconnects, or stops streaming, it sends a release-all-buttons event; the Mac additionally emits both left and right mouse-up events before ending the stream.
+
+Trackpad, mouse-wheel, and direct two-finger scrolling are identified separately. UIKit continuous scrolls carry began/changed/ended/cancelled phases across the protocol, and the Mac marks the generated pixel events with Core Graphics continuous-scroll and phase fields. Discrete mouse-wheel input remains non-continuous and uses a separate scale. Fractional deltas are retained between packets so slow scrolling is not rounded away.
 
 The viewer also supports DeskIn-style navigation without changing remote input semantics:
 
@@ -469,7 +471,7 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 
 ## 14. Tests
 
-`PacketCodecTests` currently covers 23 cases:
+`PacketCodecTests` currently covers 30 cases:
 
 1. control-message round trip;
 2. heartbeat-message round trip;
@@ -494,6 +496,13 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 21. release-all-buttons protocol round trip;
 22. press-and-hold click-count preservation;
 23. sampled acknowledgements for continuous input with reliable press barriers.
+24. continuous trackpad scroll metadata round trip;
+25. reliable acknowledgement of scroll begin/end barriers;
+26. latest-location coalescing for pointer and drag input;
+27. scroll-delta accumulation between phase barriers;
+28. nearby short-click classification for double-click;
+29. long-hold exclusion from the double-click sequence;
+30. drag exclusion from the double-click sequence.
 
 Run them with all output on `/Volumes/D`:
 

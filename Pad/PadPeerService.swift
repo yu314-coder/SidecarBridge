@@ -33,6 +33,8 @@ final class PadPeerService: NSObject {
     private var lastPeerActivity = ProcessInfo.processInfo.systemUptime
     private var validationWorkItem: DispatchWorkItem?
     private var peerSupportsHeartbeat = false
+    private var pendingMultipeerInput = RemoteInputCoalescer()
+    private var multipeerInputDrainScheduled = false
 
     override init() {
         super.init()
@@ -57,6 +59,8 @@ final class PadPeerService: NSObject {
             guard let self else { return }
             self.lanConnected = connected
             if connected {
+                self.pendingMultipeerInput.removeAll()
+                self.multipeerInputDrainScheduled = false
                 self.lanPeerName = value
                 self.fallbackWorkItem?.cancel()
                 self.stopMultipeerFallback()
@@ -122,11 +126,15 @@ final class PadPeerService: NSObject {
     func sendInput(_ input: RemoteInputEvent) {
         if lanConnected {
             lan.sendInput(input)
-        } else if !session.connectedPeers.isEmpty,
-                  let message = ControlMessage.input(input),
-                  let data = try? PacketCodec.encode(.control(message)) {
-            let mode: MCSessionSendDataMode = (input.kind == .pointerMove || input.kind == .scroll) ? .unreliable : .reliable
-            try? session.send(data, toPeers: session.connectedPeers, with: mode)
+            return
+        }
+        guard !session.connectedPeers.isEmpty else { return }
+
+        pendingMultipeerInput.enqueue(input)
+        if input.isCoalescibleInput {
+            scheduleMultipeerInputDrain()
+        } else {
+            drainMultipeerInput()
         }
     }
 
@@ -146,6 +154,30 @@ final class PadPeerService: NSObject {
             onConnectionChanged?(true, mcPeerName)
         } else {
             onConnectionChanged?(false, error)
+        }
+    }
+
+    private func scheduleMultipeerInputDrain() {
+        guard !multipeerInputDrainScheduled else { return }
+        multipeerInputDrainScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.drainMultipeerInput()
+        }
+    }
+
+    private func drainMultipeerInput() {
+        multipeerInputDrainScheduled = false
+        let peers = session.connectedPeers
+        guard !peers.isEmpty else {
+            pendingMultipeerInput.removeAll()
+            return
+        }
+
+        while let input = pendingMultipeerInput.popFirst() {
+            guard let message = ControlMessage.input(input),
+                  let data = try? PacketCodec.encode(.control(message)) else { continue }
+            let mode: MCSessionSendDataMode = input.isCoalescibleInput ? .unreliable : .reliable
+            try? session.send(data, toPeers: peers, with: mode)
         }
     }
 
@@ -353,6 +385,8 @@ extension PadPeerService: MCSessionDelegate {
             } else {
                 self.mcConnectionWatchdog?.cancel()
                 self.mcConnectionWatchdog = nil
+                self.pendingMultipeerInput.removeAll()
+                self.multipeerInputDrainScheduled = false
                 self.invitedPeers.remove(peerID.displayName)
                 self.restartMultipeerBrowserAfterDisconnect()
             }

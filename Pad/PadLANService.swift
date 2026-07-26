@@ -32,6 +32,8 @@ final class PadLANService {
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
     private var sessionKey: SymmetricKey?
     private var receiveBuffer = Data()
+    private var pendingInput = RemoteInputCoalescer()
+    private var inputSendInFlight = false
     private(set) var isConnected = false
 
     func start() {
@@ -92,9 +94,11 @@ final class PadLANService {
     }
 
     func sendInput(_ input: RemoteInputEvent) {
-        guard let message = ControlMessage.input(input),
-              let data = try? PacketCodec.encode(.control(message)) else { return }
-        sendPacket(data)
+        queue.async { [weak self] in
+            guard let self, self.isConnected else { return }
+            self.pendingInput.enqueue(input)
+            self.sendNextInputIfPossible()
+        }
     }
 
     func sendFilePacket(_ transfer: FileTransferPacket) {
@@ -292,6 +296,41 @@ final class PadLANService {
             } catch {
                 self.clearConnection(notify: true, error: error.localizedDescription)
             }
+        }
+    }
+
+    private func sendNextInputIfPossible() {
+        guard !inputSendInFlight,
+              isConnected,
+              let connection,
+              let key = sessionKey,
+              let input = pendingInput.popFirst() else { return }
+        guard let message = ControlMessage.input(input),
+              let packet = try? PacketCodec.encode(.control(message)) else {
+            sendNextInputIfPossible()
+            return
+        }
+
+        do {
+            inputSendInFlight = true
+            connection.send(
+                content: try LANWire.encrypted(packet, key: key),
+                completion: .contentProcessed { [weak self, weak connection] error in
+                    guard let self else { return }
+                    self.queue.async {
+                        guard let connection, self.connection === connection else { return }
+                        self.inputSendInFlight = false
+                        if let error {
+                            self.clearConnection(notify: true, error: error.localizedDescription)
+                        } else {
+                            self.sendNextInputIfPossible()
+                        }
+                    }
+                }
+            )
+        } catch {
+            inputSendInFlight = false
+            clearConnection(notify: true, error: error.localizedDescription)
         }
     }
 
@@ -585,6 +624,8 @@ final class PadLANService {
         privateKey = nil
         sessionKey = nil
         receiveBuffer.removeAll(keepingCapacity: true)
+        pendingInput.removeAll()
+        inputSendInFlight = false
         isConnected = false
         if shouldNotify && (wasConnected || error != nil) { notify(connected: false, value: error) }
     }

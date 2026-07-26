@@ -199,6 +199,183 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertTrue(down.shouldAcknowledge)
     }
 
+    func testTrackpadScrollMetadataRoundTrip() throws {
+        var input = RemoteInputEvent.scroll(
+            x: 2.5,
+            y: -4.25,
+            phase: .changed,
+            continuous: true
+        )
+        input.sequence = 25
+
+        let message = try XCTUnwrap(ControlMessage.input(input))
+        XCTAssertEqual(message.remoteInputEvent, input)
+        XCTAssertEqual(message.remoteInputEvent?.scrollPhase, .changed)
+        XCTAssertEqual(message.remoteInputEvent?.isContinuousScroll, true)
+    }
+
+    func testScrollPhaseBarriersAreAlwaysAcknowledged() {
+        var began = RemoteInputEvent.scroll(
+            x: 0,
+            y: 0,
+            phase: .began,
+            continuous: true
+        )
+        began.sequence = 13
+        XCTAssertTrue(began.shouldAcknowledge)
+
+        var changed = RemoteInputEvent.scroll(
+            x: 1,
+            y: 2,
+            phase: .changed,
+            continuous: true
+        )
+        changed.sequence = 13
+        XCTAssertFalse(changed.shouldAcknowledge)
+        changed.sequence = 24
+        XCTAssertTrue(changed.shouldAcknowledge)
+
+        var ended = RemoteInputEvent.scroll(
+            x: 0,
+            y: 0,
+            phase: .ended,
+            continuous: true
+        )
+        ended.sequence = 25
+        XCTAssertTrue(ended.shouldAcknowledge)
+    }
+
+    func testContinuousInputCoalescerKeepsLatestPointerAndDrag() {
+        var coalescer = RemoteInputCoalescer()
+        var firstPointer = RemoteInputEvent.pointer(x: 0.1, y: 0.2)
+        firstPointer.sequence = 1
+        var latestPointer = RemoteInputEvent.pointer(x: 0.3, y: 0.4)
+        latestPointer.sequence = 2
+        coalescer.enqueue(firstPointer)
+        coalescer.enqueue(latestPointer)
+
+        XCTAssertEqual(coalescer.count, 1)
+        XCTAssertEqual(coalescer.popFirst(), latestPointer)
+
+        let down = RemoteInputEvent.primaryDown(x: 0.3, y: 0.4)
+        var firstDrag = RemoteInputEvent.primaryDrag(x: 0.5, y: 0.6)
+        firstDrag.sequence = 3
+        var latestDrag = RemoteInputEvent.primaryDrag(x: 0.7, y: 0.8)
+        latestDrag.sequence = 4
+        let up = RemoteInputEvent.primaryUp(x: 0.7, y: 0.8)
+        coalescer.enqueue(down)
+        coalescer.enqueue(firstDrag)
+        coalescer.enqueue(latestDrag)
+        coalescer.enqueue(up)
+
+        XCTAssertEqual(coalescer.pending, [down, latestDrag, up])
+    }
+
+    func testContinuousInputCoalescerAccumulatesScrollBetweenPhaseBarriers() {
+        var coalescer = RemoteInputCoalescer()
+        let began = RemoteInputEvent.scroll(
+            x: 0,
+            y: 0,
+            phase: .began,
+            continuous: true
+        )
+        var first = RemoteInputEvent.scroll(
+            x: 1.25,
+            y: -2,
+            phase: .changed,
+            continuous: true
+        )
+        first.sequence = 10
+        var second = RemoteInputEvent.scroll(
+            x: 0.75,
+            y: -3,
+            phase: .changed,
+            continuous: true
+        )
+        second.sequence = 11
+        let ended = RemoteInputEvent.scroll(
+            x: 0,
+            y: 0,
+            phase: .ended,
+            continuous: true
+        )
+
+        coalescer.enqueue(began)
+        coalescer.enqueue(first)
+        coalescer.enqueue(second)
+        coalescer.enqueue(ended)
+
+        XCTAssertEqual(coalescer.count, 3)
+        XCTAssertEqual(coalescer.popFirst(), began)
+        let accumulated = coalescer.popFirst()
+        XCTAssertEqual(accumulated?.deltaX, 2)
+        XCTAssertEqual(accumulated?.deltaY, -5)
+        XCTAssertEqual(accumulated?.sequence, 11)
+        XCTAssertEqual(coalescer.popFirst(), ended)
+    }
+
+    func testClickSequenceRecognizesOnlyNearbyShortDoubleClick() {
+        var tracker = RemoteClickSequenceTracker()
+        XCTAssertEqual(
+            tracker.nextCount(x: 100, y: 100, at: 1, interval: 0.42, maximumDistance: 44),
+            1
+        )
+        tracker.complete(
+            count: 1,
+            x: 100,
+            y: 100,
+            beganAt: 1,
+            endedAt: 1.08,
+            interval: 0.42,
+            movedBeyondClickSlop: false
+        )
+
+        XCTAssertEqual(
+            tracker.nextCount(x: 110, y: 108, at: 1.25, interval: 0.42, maximumDistance: 44),
+            2
+        )
+        XCTAssertEqual(
+            tracker.nextCount(x: 200, y: 200, at: 1.25, interval: 0.42, maximumDistance: 44),
+            1
+        )
+    }
+
+    func testLongHoldDoesNotSeedDoubleClickSequence() {
+        var tracker = RemoteClickSequenceTracker()
+        tracker.complete(
+            count: 1,
+            x: 100,
+            y: 100,
+            beganAt: 1,
+            endedAt: 1.75,
+            interval: 0.42,
+            movedBeyondClickSlop: false
+        )
+
+        XCTAssertEqual(
+            tracker.nextCount(x: 100, y: 100, at: 1.8, interval: 0.42, maximumDistance: 44),
+            1
+        )
+    }
+
+    func testDragDoesNotSeedDoubleClickSequence() {
+        var tracker = RemoteClickSequenceTracker()
+        tracker.complete(
+            count: 1,
+            x: 100,
+            y: 100,
+            beganAt: 1,
+            endedAt: 1.08,
+            interval: 0.42,
+            movedBeyondClickSlop: true
+        )
+
+        XCTAssertEqual(
+            tracker.nextCount(x: 100, y: 100, at: 1.2, interval: 0.42, maximumDistance: 44),
+            1
+        )
+    }
+
     func testLocalNetworkPermissionStatesAreNotOptimistic() {
         XCTAssertFalse(LocalNetworkAccessState.checking.isGranted)
         XCTAssertFalse(LocalNetworkAccessState.unavailable("Wi-Fi is off").isGranted)

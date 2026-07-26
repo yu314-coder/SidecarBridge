@@ -1,29 +1,66 @@
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 
 final class PointerPressGestureRecognizer: UIGestureRecognizer {
+    private var trackedTouch: UITouch?
+    private(set) var preciseLocation = CGPoint.zero
+    private(set) var reportedButtonMask: UIEvent.ButtonMask = []
+
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard state == .possible, touches.count == 1 else {
+        super.touchesBegan(touches, with: event)
+        guard state == .possible, trackedTouch == nil, let touch = touches.first else {
+            for touch in touches { ignore(touch, for: event) }
+            return
+        }
+        guard touches.count == 1 else {
             state = .failed
             return
         }
+        trackedTouch = touch
+        capture(touch, with: event)
         state = .began
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard state == .began || state == .changed else { return }
+        super.touchesMoved(touches, with: event)
+        guard let trackedTouch,
+              touches.contains(trackedTouch),
+              state == .began || state == .changed else { return }
+        capture(event.coalescedTouches(for: trackedTouch)?.last ?? trackedTouch, with: event)
         state = .changed
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard state == .began || state == .changed else { return }
+        super.touchesEnded(touches, with: event)
+        guard let trackedTouch,
+              touches.contains(trackedTouch),
+              state == .began || state == .changed else { return }
+        capture(trackedTouch, with: event)
         state = .ended
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesCancelled(touches, with: event)
         guard state == .began || state == .changed else { return }
         state = .cancelled
     }
+
+    override func reset() {
+        super.reset()
+        trackedTouch = nil
+        preciseLocation = .zero
+        reportedButtonMask = []
+    }
+
+    private func capture(_ touch: UITouch, with event: UIEvent) {
+        preciseLocation = touch.preciseLocation(in: view)
+        reportedButtonMask = event.buttonMask
+    }
+}
+
+final class RemoteScrollGestureRecognizer: UIPanGestureRecognizer {
+    var representsContinuousScroll = true
 }
 
 struct RemoteInputSurface: UIViewRepresentable {
@@ -95,15 +132,17 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private var activePrimaryClickCount = 1
     private var activePointerButton: RemotePointerButton?
     private var activePointerLastPoint: CGPoint?
+    private var activePointerStartLocation = CGPoint.zero
+    private var activePointerStartedAt: TimeInterval = 0
+    private var activePointerExceededClickSlop = false
     private var pointerPressConsumedByCalibration = false
-    private var lastPrimaryPressTime: TimeInterval = 0
-    private var lastPrimaryPressLocation = CGPoint.zero
-    private var lastPrimaryClickCount = 0
-    private var lastSecondaryPressTime: TimeInterval = 0
-    private var lastSecondaryPressLocation = CGPoint.zero
-    private var lastSecondaryClickCount = 0
+    private var primaryClickTracker = RemoteClickSequenceTracker()
+    private var secondaryClickTracker = RemoteClickSequenceTracker()
     private let suppressedSoftwareKeyboardView = UIView(frame: .zero)
     private let pointerEmissionInterval = 1.0 / 120.0
+    private let pointerDoubleClickInterval: TimeInterval = 0.42
+    private let pointerDoubleClickDistance = 44.0
+    private let pointerClickSlop: CGFloat = 8
 
     init(
         contentAspectRatio: CGFloat,
@@ -315,19 +354,35 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         touchPrimaryClick.require(toFail: touchDoubleClick)
         addGestureRecognizer(touchPrimaryClick)
 
-        let scroll = UIPanGestureRecognizer(target: self, action: #selector(handleScroll(_:)))
-        scroll.allowedTouchTypes = []
-        scroll.allowedScrollTypesMask = .all
-        scroll.cancelsTouchesInView = false
-        scroll.delegate = self
-        addGestureRecognizer(scroll)
+        let continuousScroll = RemoteScrollGestureRecognizer(
+            target: self,
+            action: #selector(handleScroll(_:))
+        )
+        continuousScroll.representsContinuousScroll = true
+        continuousScroll.allowedTouchTypes = []
+        continuousScroll.allowedScrollTypesMask = .continuous
+        continuousScroll.cancelsTouchesInView = false
+        continuousScroll.delegate = self
+        addGestureRecognizer(continuousScroll)
+
+        let discreteScroll = RemoteScrollGestureRecognizer(
+            target: self,
+            action: #selector(handleScroll(_:))
+        )
+        discreteScroll.representsContinuousScroll = false
+        discreteScroll.allowedTouchTypes = []
+        discreteScroll.allowedScrollTypesMask = .discrete
+        discreteScroll.cancelsTouchesInView = false
+        discreteScroll.delegate = self
+        addGestureRecognizer(discreteScroll)
 
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         pinch.cancelsTouchesInView = false
         pinch.delegate = self
         addGestureRecognizer(pinch)
 
-        let touchScroll = UIPanGestureRecognizer(target: self, action: #selector(handleScroll(_:)))
+        let touchScroll = RemoteScrollGestureRecognizer(target: self, action: #selector(handleScroll(_:)))
+        touchScroll.representsContinuousScroll = true
         touchScroll.minimumNumberOfTouches = 2
         touchScroll.maximumNumberOfTouches = 2
         touchScroll.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
@@ -374,10 +429,13 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     @objc private func handlePointerPress(_ recognizer: PointerPressGestureRecognizer) {
-        let location = recognizer.location(in: self)
+        let location = recognizer.preciseLocation
         switch recognizer.state {
         case .began:
-            guard let reportedButton = reportedButton(for: recognizer.buttonMask) else { return }
+            let capturedMask = recognizer.reportedButtonMask.isEmpty
+                ? recognizer.buttonMask
+                : recognizer.reportedButtonMask
+            guard let reportedButton = reportedButton(for: capturedMask) else { return }
             becomeFirstResponder()
             if calibrateNextPointerClick {
                 pointerPressConsumedByCalibration = true
@@ -389,6 +447,9 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             let resolvedButton = pointerButtonMapping.resolvedButton(for: reportedButton)
             activePointerButton = resolvedButton
             activePointerLastPoint = point
+            activePointerStartLocation = location
+            activePointerStartedAt = ProcessInfo.processInfo.systemUptime
+            activePointerExceededClickSlop = false
             activePrimaryClickCount = nextPointerClickCount(for: resolvedButton, at: location)
             lastPointerTime = 0
             if resolvedButton == .primary {
@@ -400,10 +461,17 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
                 ))
             }
         case .changed:
-            guard activePointerButton == .primary,
-                  isPrimaryDragging,
+            guard let activePointerButton,
                   let point = normalizedPoint(location) else { return }
             activePointerLastPoint = point
+            if hypot(
+                location.x - activePointerStartLocation.x,
+                location.y - activePointerStartLocation.y
+            ) > pointerClickSlop {
+                activePointerExceededClickSlop = true
+                resetClickHistory(for: activePointerButton)
+            }
+            guard activePointerButton == .primary, isPrimaryDragging else { return }
             let now = ProcessInfo.processInfo.systemUptime
             guard now - lastPointerTime >= pointerEmissionInterval else { return }
             lastPointerTime = now
@@ -421,8 +489,12 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             }
             let point = normalizedPoint(location) ?? activePointerLastPoint
             if activePointerButton == .primary {
+                completePointerPress(for: .primary, at: location)
                 finishPrimaryDrag(at: point)
-            } else if activePointerButton == .secondary, let point {
+            } else if activePointerButton == .secondary,
+                      !activePointerExceededClickSlop,
+                      let point {
+                completePointerPress(for: .secondary, at: location)
                 if activePrimaryClickCount >= 2 {
                     onInput(.doubleClick(secondary: true, x: point.x, y: point.y))
                 } else {
@@ -432,7 +504,11 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             activePointerButton = nil
             activePointerLastPoint = nil
             activePrimaryClickCount = 1
+            activePointerExceededClickSlop = false
         case .cancelled, .failed:
+            if let activePointerButton {
+                resetClickHistory(for: activePointerButton)
+            }
             if activePointerButton == .primary {
                 finishPrimaryDrag(at: activePointerLastPoint)
             }
@@ -440,15 +516,17 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             activePointerButton = nil
             activePointerLastPoint = nil
             activePrimaryClickCount = 1
+            activePointerExceededClickSlop = false
         default:
             break
         }
     }
 
     private func reportedButton(for mask: UIEvent.ButtonMask) -> RemotePointerButton? {
-        if mask.contains(.primary) { return .primary }
-        if mask.contains(.secondary) { return .secondary }
-        return nil
+        let hasPrimary = mask.contains(.primary)
+        let hasSecondary = mask.contains(.secondary)
+        guard hasPrimary != hasSecondary else { return nil }
+        return hasPrimary ? .primary : .secondary
     }
 
     private func nextPointerClickCount(
@@ -456,31 +534,46 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         at location: CGPoint
     ) -> Int {
         let now = ProcessInfo.processInfo.systemUptime
-        let interval = 0.38
-        let maximumDistance: CGFloat = 44
-        switch button {
-        case .primary:
-            let nearby = hypot(
-                location.x - lastPrimaryPressLocation.x,
-                location.y - lastPrimaryPressLocation.y
-            ) <= maximumDistance
-            lastPrimaryClickCount = now - lastPrimaryPressTime <= interval && nearby
-                ? min(lastPrimaryClickCount + 1, 2)
-                : 1
-            lastPrimaryPressTime = now
-            lastPrimaryPressLocation = location
-            return lastPrimaryClickCount
-        case .secondary:
-            let nearby = hypot(
-                location.x - lastSecondaryPressLocation.x,
-                location.y - lastSecondaryPressLocation.y
-            ) <= maximumDistance
-            lastSecondaryClickCount = now - lastSecondaryPressTime <= interval && nearby
-                ? min(lastSecondaryClickCount + 1, 2)
-                : 1
-            lastSecondaryPressTime = now
-            lastSecondaryPressLocation = location
-            return lastSecondaryClickCount
+        let tracker = button == .primary ? primaryClickTracker : secondaryClickTracker
+        return tracker.nextCount(
+            x: Double(location.x),
+            y: Double(location.y),
+            at: now,
+            interval: pointerDoubleClickInterval,
+            maximumDistance: pointerDoubleClickDistance
+        )
+    }
+
+    private func completePointerPress(for button: RemotePointerButton, at location: CGPoint) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if button == .primary {
+            primaryClickTracker.complete(
+                count: activePrimaryClickCount,
+                x: Double(location.x),
+                y: Double(location.y),
+                beganAt: activePointerStartedAt,
+                endedAt: now,
+                interval: pointerDoubleClickInterval,
+                movedBeyondClickSlop: activePointerExceededClickSlop
+            )
+        } else {
+            secondaryClickTracker.complete(
+                count: activePrimaryClickCount,
+                x: Double(location.x),
+                y: Double(location.y),
+                beganAt: activePointerStartedAt,
+                endedAt: now,
+                interval: pointerDoubleClickInterval,
+                movedBeyondClickSlop: activePointerExceededClickSlop
+            )
+        }
+    }
+
+    private func resetClickHistory(for button: RemotePointerButton) {
+        if button == .primary {
+            primaryClickTracker.reset()
+        } else {
+            secondaryClickTracker.reset()
         }
     }
 
@@ -567,10 +660,29 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     @objc private func handleScroll(_ recognizer: UIPanGestureRecognizer) {
+        let continuous = (recognizer as? RemoteScrollGestureRecognizer)?
+            .representsContinuousScroll ?? true
         let delta = recognizer.translation(in: self)
         recognizer.setTranslation(.zero, in: self)
-        guard delta != .zero else { return }
-        onInput(.scroll(x: delta.x, y: delta.y))
+        let phase: RemoteScrollPhase?
+        if continuous {
+            switch recognizer.state {
+            case .began: phase = .began
+            case .changed: phase = .changed
+            case .ended: phase = .ended
+            case .cancelled, .failed: phase = .cancelled
+            default: phase = nil
+            }
+        } else {
+            phase = nil
+        }
+        guard delta != .zero || phase != nil else { return }
+        onInput(.scroll(
+            x: delta.x,
+            y: delta.y,
+            phase: phase,
+            continuous: continuous
+        ))
     }
 
     @objc private func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
