@@ -12,11 +12,7 @@ final class PadPeerService: NSObject {
     var onConnectionHealthChanged: ((String, Int?) -> Void)?
 
     private let peerID = MCPeerID(displayName: UIDevice.current.name)
-    private lazy var session = MCSession(
-        peer: peerID,
-        securityIdentity: nil,
-        encryptionPreference: .required
-    )
+    private var session: MCSession
     private var browser: MCNearbyServiceBrowser?
     private var invitedPeers = Set<String>()
     private let lan = PadLANService()
@@ -37,6 +33,11 @@ final class PadPeerService: NSObject {
     private var multipeerInputDrainScheduled = false
 
     override init() {
+        session = MCSession(
+            peer: peerID,
+            securityIdentity: nil,
+            encryptionPreference: .required
+        )
         super.init()
         session.delegate = self
         lan.onFrame = { [weak self] frame in
@@ -307,6 +308,7 @@ final class PadPeerService: NSObject {
         // connectedPeers. Always disconnect so a stalled invitation cannot be
         // reused by the next discovery attempt.
         session.disconnect()
+        rebuildMultipeerSession()
         mcConnected = false
         mcPeerName = nil
         invitedPeers.removeAll()
@@ -318,6 +320,7 @@ final class PadPeerService: NSObject {
             guard let self, !self.lanConnected, !self.mcConnected else { return }
             print("[SidecarBridge/P2P] Handshake timed out; resetting session")
             self.session.disconnect()
+            self.rebuildMultipeerSession()
             self.invitedPeers.remove(peerName)
             if self.browserRunning {
                 self.browser?.stopBrowsingForPeers()
@@ -329,7 +332,20 @@ final class PadPeerService: NSObject {
             self.scheduleMultipeerFallback()
         }
         mcConnectionWatchdog = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: workItem)
+        // AWDL/Bluetooth discovery can take several seconds after iOS resumes
+        // the app. Do not tear down a valid invitation while it is completing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: workItem)
+    }
+
+    private func rebuildMultipeerSession() {
+        session.delegate = nil
+        session.disconnect()
+        session = MCSession(
+            peer: peerID,
+            securityIdentity: nil,
+            encryptionPreference: .required
+        )
+        session.delegate = self
     }
 
     private func restartMultipeerBrowserAfterDisconnect() {
@@ -348,15 +364,22 @@ final class PadPeerService: NSObject {
 
 extension PadPeerService: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
-        guard !invitedPeers.contains(peerID.displayName), session.connectedPeers.isEmpty else { return }
-        print("[SidecarBridge/P2P] Found and inviting \(peerID.displayName)")
-        invitedPeers.insert(peerID.displayName)
-        browser.invitePeer(peerID, to: session, withContext: nil, timeout: 30)
-        armMultipeerConnectionWatchdog(for: peerID.displayName)
+        DispatchQueue.main.async { [weak self, weak browser] in
+            guard let self, let browser,
+                  self.browser === browser,
+                  !self.invitedPeers.contains(peerID.displayName),
+                  self.session.connectedPeers.isEmpty else { return }
+            print("[SidecarBridge/P2P] Found and inviting \(peerID.displayName)")
+            self.invitedPeers.insert(peerID.displayName)
+            browser.invitePeer(peerID, to: self.session, withContext: nil, timeout: 30)
+            self.armMultipeerConnectionWatchdog(for: peerID.displayName)
+        }
     }
 
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
-        invitedPeers.remove(peerID.displayName)
+        DispatchQueue.main.async { [weak self] in
+            self?.invitedPeers.remove(peerID.displayName)
+        }
     }
 
     func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
@@ -374,6 +397,7 @@ extension PadPeerService: MCNearbyServiceBrowserDelegate {
 extension PadPeerService: MCSessionDelegate {
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
         DispatchQueue.main.async {
+            guard session === self.session else { return }
             print("[SidecarBridge/P2P] Session with \(peerID.displayName): \(state.rawValue)")
             self.mcConnected = !session.connectedPeers.isEmpty
             self.mcPeerName = self.mcConnected ? (session.connectedPeers.first?.displayName ?? peerID.displayName) : nil

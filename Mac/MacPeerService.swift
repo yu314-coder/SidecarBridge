@@ -27,11 +27,7 @@ final class MacPeerService: NSObject {
     var onConnectionHealthChanged: ((String, Int?) -> Void)?
 
     private let peerID = MCPeerID(displayName: Host.current().localizedName ?? "Mac")
-    private lazy var session = MCSession(
-        peer: peerID,
-        securityIdentity: nil,
-        encryptionPreference: .required
-    )
+    private var session: MCSession
     private var advertiser: MCNearbyServiceAdvertiser?
     private let lan = MacLANService()
     private var mcConnected = false
@@ -52,6 +48,11 @@ final class MacPeerService: NSObject {
     private var peerSupportsHeartbeat = false
 
     override init() {
+        session = MCSession(
+            peer: peerID,
+            securityIdentity: nil,
+            encryptionPreference: .required
+        )
         super.init()
         session.delegate = self
         lan.onCommand = { [weak self] command in self?.route(command) }
@@ -344,6 +345,7 @@ final class MacPeerService: NSObject {
         advertiser?.delegate = nil
         advertiser = nil
         session.disconnect()
+        rebuildMultipeerSession()
         mcConnected = false
         mcPeerName = nil
     }
@@ -353,6 +355,7 @@ final class MacPeerService: NSObject {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, !self.lanConnected, !self.mcConnected else { return }
             self.session.disconnect()
+            self.rebuildMultipeerSession()
             if self.advertiserRunning {
                 self.advertiser?.stopAdvertisingPeer()
                 self.advertiserRunning = false
@@ -365,7 +368,19 @@ final class MacPeerService: NSObject {
             self.scheduleMultipeerFallback()
         }
         mcConnectionWatchdog = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: workItem)
+        // iOS may need several seconds to resume AWDL/Bluetooth discovery.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: workItem)
+    }
+
+    private func rebuildMultipeerSession() {
+        session.delegate = nil
+        session.disconnect()
+        session = MCSession(
+            peer: peerID,
+            securityIdentity: nil,
+            encryptionPreference: .required
+        )
+        session.delegate = self
     }
 
     private func restartMultipeerAdvertisingAfterDisconnect() {
@@ -376,6 +391,7 @@ final class MacPeerService: NSObject {
         }
         advertiser?.delegate = nil
         advertiser = nil
+        rebuildMultipeerSession()
         fallbackWorkItem?.cancel()
         fallbackWorkItem = nil
         scheduleMultipeerFallback()
@@ -427,6 +443,7 @@ extension MacPeerService: MCNearbyServiceAdvertiserDelegate {
 extension MacPeerService: MCSessionDelegate {
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
         DispatchQueue.main.async {
+            guard session === self.session else { return }
             self.mcConnected = !session.connectedPeers.isEmpty
             self.mcPeerName = self.mcConnected ? (session.connectedPeers.first?.displayName ?? peerID.displayName) : nil
             if state == .connected {
