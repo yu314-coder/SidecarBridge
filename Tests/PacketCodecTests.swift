@@ -117,6 +117,15 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(input.modifiers, ["control", "shift"])
     }
 
+    func testControlArrowShortcutsCarryControlModifier() {
+        for key in ["up", "down", "left", "right"] {
+            let event = RemoteKeyboardInput.event(key: key, modifiers: ["control"])
+            XCTAssertEqual(event?.kind, .key)
+            XCTAssertEqual(event?.key, key)
+            XCTAssertEqual(event?.modifiers, ["control"])
+        }
+    }
+
     func testRemoteKeyboardKeyFactoryNormalizesCase() {
         XCTAssertEqual(RemoteInputEvent.key("PageUp").key, "pageup")
     }

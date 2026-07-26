@@ -276,6 +276,42 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     override var canBecomeFirstResponder: Bool { true }
+
+    // UIKit can route modified arrows through UIKeyCommand instead of
+    // pressesBegan(_:with:). Register these explicitly so a Magic Keyboard or
+    // other hardware keyboard always delivers the four control-navigation
+    // shortcuts to the Mac.
+    override var keyCommands: [UIKeyCommand]? {
+        [
+            controlArrowCommand(UIKeyCommand.inputUpArrow, title: "Control–Up"),
+            controlArrowCommand(UIKeyCommand.inputDownArrow, title: "Control–Down"),
+            controlArrowCommand(UIKeyCommand.inputLeftArrow, title: "Control–Left"),
+            controlArrowCommand(UIKeyCommand.inputRightArrow, title: "Control–Right")
+        ]
+    }
+
+    private func controlArrowCommand(_ input: String, title: String) -> UIKeyCommand {
+        let command = UIKeyCommand(
+            input: input,
+            modifierFlags: [.control],
+            action: #selector(handleControlArrow(_:))
+        )
+        command.discoverabilityTitle = title
+        return command
+    }
+
+    @objc private func handleControlArrow(_ command: UIKeyCommand) {
+        let key: String
+        switch command.input {
+        case UIKeyCommand.inputUpArrow: key = "up"
+        case UIKeyCommand.inputDownArrow: key = "down"
+        case UIKeyCommand.inputLeftArrow: key = "left"
+        case UIKeyCommand.inputRightArrow: key = "right"
+        default: return
+        }
+        onInput(.key(key, modifiers: ["control"]))
+    }
+
     override var inputView: UIView? {
         showsSoftwareKeyboard ? nil : suppressedSoftwareKeyboardView
     }
