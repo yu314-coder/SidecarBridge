@@ -319,12 +319,42 @@ final class RemoteInputController {
     }
 
     private func press(code: CGKeyCode, modifiers: CGEventFlags) {
+        let modifierKeys: [(flag: CGEventFlags, code: CGKeyCode)] = [
+            (.maskCommand, 55),
+            (.maskAlternate, 58),
+            (.maskControl, 59),
+            (.maskShift, 56)
+        ]
+        let selected = modifierKeys.filter { modifiers.contains($0.flag) }
+        var activeFlags: CGEventFlags = []
+        for modifier in selected {
+            activeFlags.insert(modifier.flag)
+            let event = CGEvent(
+                keyboardEventSource: eventSource,
+                virtualKey: modifier.code,
+                keyDown: true
+            )
+            event?.flags = activeFlags
+            event?.post(tap: .cghidEventTap)
+        }
+
         let down = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: true)
-        down?.flags = modifiers
+        down?.flags = activeFlags
         down?.post(tap: .cghidEventTap)
         let up = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: false)
-        up?.flags = []
+        up?.flags = activeFlags
         up?.post(tap: .cghidEventTap)
+
+        for modifier in selected.reversed() {
+            activeFlags.remove(modifier.flag)
+            let event = CGEvent(
+                keyboardEventSource: eventSource,
+                virtualKey: modifier.code,
+                keyDown: false
+            )
+            event?.flags = activeFlags
+            event?.post(tap: .cghidEventTap)
+        }
     }
 
     private func flags(for modifiers: [String]) -> CGEventFlags {

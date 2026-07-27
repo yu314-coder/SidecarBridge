@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 13** on 2026-07-27.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 14** on 2026-07-27.
 
 ## 1. Purpose
 
@@ -204,8 +204,8 @@ The Mac never allows old frames to create an ever-growing latency queue:
 
 - ScreenCaptureKit queue depth is two surfaces;
 - only one dependent frame waits behind the in-flight frame;
-- the mobile receiver acknowledges decrypted frame receipt before SwiftUI rendering;
-- the Mac sends the next frame after that receipt acknowledgement;
+- direct LAN/AWDL sends the next frame when Network.framework finishes processing the preceding send, avoiding a frame-rate limit based on round-trip latency;
+- nearby Multipeer delivery uses a bounded six-frame acknowledgement window instead of serializing every frame behind a full round trip;
 - if the queue saturates, dependent frames are discarded;
 - transmission resumes at the next keyframe;
 - initial keyframes are retried after the iPad display layer becomes ready.
@@ -237,7 +237,7 @@ Direct finger input uses a separate custom continuous recognizer rather than the
 
 SidecarBridge enables UIKit indirect-input events and reads the active physical button mask at press-begin. The viewer drawer offers **System** and **Swapped** mappings plus a one-click calibration flow: after the user chooses **Calibrate Physical Left Click**, the next reported pointer button is recorded as the intended left button. This compensates inside SidecarBridge when iPadOS or a mouse reports the physical left side as secondary. iPadOS's global mouse mapping remains under Settings → General → Trackpad & Mouse → Secondary Click.
 
-Indirect-pointer dragging starts only when the calibrated mapping resolves UIKit's reported button to primary. A resolved secondary click therefore cannot enter or leave the primary drag state. Hardware keyboard presses are read from `UIKey` events rather than system-routed shortcut commands: printable characters are sent as layout-correct text, while special keys and shortcuts carry only the modifier snapshot for that exact press. The input surface reclaims first-responder status when its window becomes active or key, so typing does not require an extra trackpad click after the user focuses a Mac field with a local mouse. While the right-drawer software-keyboard control is off, the responder uses an empty input view: external keyboards keep receiving key events without automatically opening the iPadOS on-screen keyboard.
+Indirect-pointer dragging starts only when the calibrated mapping resolves UIKit's reported button to primary. A resolved secondary click therefore cannot enter or leave the primary drag state. Hardware keyboard presses are read from `UIKey` events rather than system-routed shortcut commands: printable characters are sent as layout-correct text, while special keys and shortcuts carry only the modifier snapshot for that exact press. Control-arrow commands are also registered explicitly with `UIKeyCommand`, because iPadOS may route those combinations away from `pressesBegan`. On the Mac, each shortcut posts real modifier-key down events, the target key down/up pair, and matching modifier-key releases, as required for macOS global shortcuts such as Mission Control and Space switching. The input surface reclaims first-responder status when its window becomes active or key, so typing does not require an extra trackpad click after the user focuses a Mac field with a local mouse. While the right-drawer software-keyboard control is off, the responder uses an empty input view: external keyboards keep receiving key events without automatically opening the iPadOS on-screen keyboard.
 
 The Mac posts remote input through a private `CGEventSource` state table. Apple documents this source type for remote-control applications because its keyboard and mouse state is independent from physical input sources. Input decoding and CGEvent posting run on a dedicated user-interactive serial pipeline instead of the SwiftUI main queue. Before encrypted transmission, a bounded coalescer replaces queued absolute pointer or drag samples with the newest location, accumulates relative finger deltas, and accumulates compatible scroll deltas. Scroll begin/end, button-down, button-up, click, and keyboard events remain ordered barriers. Nearby peer delivery uses the low-latency mode only for coalescible motion; all barriers stay reliable. Continuous pointer/drag/scroll acknowledgements are sampled while barriers are always acknowledged, preventing diagnostic traffic and stale samples from competing with current control. Text events explicitly carry no modifier flags, and a shortcut key-up clears its flags, preventing Command, Control, Option, Shift, or Tab behavior from leaking into later text. When the viewer backgrounds, disconnects, or stops streaming, it sends a release-all-buttons event; the Mac additionally emits both left and right mouse-up events before ending the stream.
 

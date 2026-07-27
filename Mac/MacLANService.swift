@@ -90,12 +90,10 @@ final class MacLANService {
     }
 
     func acknowledgeVideo(sequence: UInt64) {
-        queue.async { [weak self] in
-            guard let self, self.inFlightVideoSequence == sequence else { return }
-            self.inFlightVideoSequence = nil
-            self.sendingFrame = false
-            self.sendNextVideoIfPossible()
-        }
+        // Direct Network.framework delivery is paced by contentProcessed.
+        // Waiting for an app-level round trip limited some local links to
+        // roughly four frames per second. Keep ACK decoding for compatibility,
+        // but do not let it open another concurrent TCP send.
     }
 
     private func startListener() {
@@ -374,7 +372,7 @@ final class MacLANService {
         if inFlightVideoSequence == nil && pendingVideo.isEmpty {
             pendingVideo.append(video)
             sendNextVideoIfPossible()
-        } else if pendingVideo.isEmpty {
+        } else if pendingVideo.count < 2 {
             pendingVideo.append(video)
         } else {
             // Never let old frames build latency. Once the small burst buffer
@@ -405,6 +403,10 @@ final class MacLANService {
                 guard let self else { return }
                 if let error {
                     self.clearConnection(notify: true, error: error.localizedDescription)
+                } else if self.inFlightVideoSequence == video.sequence {
+                    self.inFlightVideoSequence = nil
+                    self.sendingFrame = false
+                    self.sendNextVideoIfPossible()
                 }
             })
             queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in

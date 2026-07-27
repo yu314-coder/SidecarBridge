@@ -39,7 +39,8 @@ final class MacPeerService: NSObject {
     private var fallbackWorkItem: DispatchWorkItem?
     private var mcConnectionWatchdog: DispatchWorkItem?
     private let mcVideoQueue = DispatchQueue(label: "SidecarBridge.MCVideo")
-    private var mcVideoInFlight: UInt64?
+    private var mcVideoInFlight = Set<UInt64>()
+    private let mcVideoWindowSize = 6
     private var pendingMCVideo: [PendingMCVideo] = []
     private var mcWaitingForKeyFrame = false
     private var heartbeatTimer: DispatchSourceTimer?
@@ -146,8 +147,7 @@ final class MacPeerService: NSObject {
             lan.acknowledgeVideo(sequence: sequence)
         } else {
             mcVideoQueue.async { [weak self] in
-                guard let self, self.mcVideoInFlight == sequence else { return }
-                self.mcVideoInFlight = nil
+                guard let self, self.mcVideoInFlight.remove(sequence) != nil else { return }
                 self.sendNextMCVideoIfPossible()
             }
         }
@@ -163,11 +163,9 @@ final class MacPeerService: NSObject {
             return
         }
 
-        if mcVideoInFlight == nil && pendingMCVideo.isEmpty {
+        if pendingMCVideo.count < 2 {
             pendingMCVideo.append(video)
             sendNextMCVideoIfPossible()
-        } else if pendingMCVideo.isEmpty {
-            pendingMCVideo.append(video)
         } else {
             pendingMCVideo.removeAll(keepingCapacity: true)
             mcWaitingForKeyFrame = true
@@ -179,32 +177,30 @@ final class MacPeerService: NSObject {
     }
 
     private func sendNextMCVideoIfPossible() {
-        guard mcVideoInFlight == nil,
-              !pendingMCVideo.isEmpty,
-              !session.connectedPeers.isEmpty else { return }
-        let video = pendingMCVideo.removeFirst()
-        do {
-            try session.send(video.data, toPeers: session.connectedPeers, with: .reliable)
-            mcVideoInFlight = video.sequence
-            // Multipeer can take longer than direct TCP to deliver a large
-            // keyframe. A one-second timeout repeatedly abandoned valid
-            // transfers and caused a keyframe/congestion loop.
-            mcVideoQueue.asyncAfter(deadline: .now() + 1) { [weak self] in
-                guard let self, self.mcVideoInFlight == video.sequence else { return }
-                self.mcVideoInFlight = nil
-                self.pendingMCVideo.removeAll(keepingCapacity: true)
-                self.mcWaitingForKeyFrame = true
+        guard !session.connectedPeers.isEmpty else { return }
+        while mcVideoInFlight.count < mcVideoWindowSize, !pendingMCVideo.isEmpty {
+            let video = pendingMCVideo.removeFirst()
+            do {
+                try session.send(video.data, toPeers: session.connectedPeers, with: .reliable)
+                mcVideoInFlight.insert(video.sequence)
+                mcVideoQueue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                    guard let self, self.mcVideoInFlight.contains(video.sequence) else { return }
+                    self.mcVideoInFlight.removeAll(keepingCapacity: true)
+                    self.pendingMCVideo.removeAll(keepingCapacity: true)
+                    self.mcWaitingForKeyFrame = true
+                }
+            } catch {
+                mcVideoInFlight.removeAll(keepingCapacity: true)
+                pendingMCVideo.removeAll(keepingCapacity: true)
+                mcWaitingForKeyFrame = true
+                return
             }
-        } catch {
-            mcVideoInFlight = nil
-            pendingMCVideo.removeAll(keepingCapacity: true)
-            mcWaitingForKeyFrame = true
         }
     }
 
     private func resetMCVideoQueue() {
         mcVideoQueue.async { [weak self] in
-            self?.mcVideoInFlight = nil
+            self?.mcVideoInFlight.removeAll(keepingCapacity: true)
             self?.pendingMCVideo.removeAll(keepingCapacity: true)
             self?.mcWaitingForKeyFrame = false
         }
