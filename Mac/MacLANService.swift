@@ -20,6 +20,10 @@ final class MacLANService {
     private var connection: NWConnection?
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
     private var sessionKey: SymmetricKey?
+    private var pendingIdentity: BridgePeerIdentity?
+    private var authenticationNonce: Data?
+    private var pendingClientPublicKey: Data?
+    private var pendingServerPublicKey: Data?
     private var receiveBuffer = Data()
     private struct PendingVideo {
         let sequence: UInt64
@@ -205,69 +209,137 @@ final class MacLANService {
                 deviceName: hello.deviceName,
                 deviceKind: hello.deviceKind ?? "iOS device"
             )
-            requestApproval(for: identity) { [weak self, weak activeConnection] accepted in
-                guard let self, let activeConnection, self.connection === activeConnection else { return }
-                guard accepted else {
-                    activeConnection.cancel()
-                    self.clearConnection(notify: true, error: "Pairing was declined on the Mac.")
-                    return
-                }
-                self.finishHandshake(client: hello, connection: activeConnection)
-            }
+            finishHandshake(client: hello, identity: identity, connection: activeConnection)
             return
         }
 
         guard let sessionKey else { return }
         let packetData = try LANWire.decrypt(payload, key: sessionKey)
         switch try PacketCodec.decode(packetData) {
+        case .authentication(let message):
+            handleAuthentication(message, connection: activeConnection)
         case .control(let command):
+            guard isConnected else { return }
             if let input = command.remoteInputEvent {
                 onInput?(input)
             } else {
                 DispatchQueue.main.async { self.onCommand?(command) }
             }
         case .file(let transfer):
+            guard isConnected else { return }
             DispatchQueue.main.async { self.onFilePacket?(transfer) }
         case .jpeg, .video:
             break
         }
     }
 
-    private func finishHandshake(client: LANHandshake, connection: NWConnection) {
-        do {
-            guard let privateKey else { return }
-            let serverPublicKey = privateKey.publicKey.rawRepresentation
-            sessionKey = try LANWire.sessionKey(
-                privateKey: privateKey,
-                peerPublicKey: client.publicKey,
-                clientPublicKey: client.publicKey,
-                serverPublicKey: serverPublicKey
-            )
-            let response = LANHandshake(
-                deviceName: Host.current().localizedName ?? "Mac",
-                publicKey: serverPublicKey
-            )
-            let data = try LANWire.handshake(response, marker: LANWire.serverHello)
-            connection.send(content: data, completion: .contentProcessed { [weak self, weak connection] error in
+    private func finishHandshake(
+        client: LANHandshake,
+        identity: BridgePeerIdentity,
+        connection: NWConnection
+    ) {
+        DispatchQueue.main.async {
+            let security = MacPairingSecurity.shared
+            let macID = security.macID
+            let requiresCode = security.requiresPairingCode(for: identity)
+            let nonce = SecureCredentialStore.randomBytes(count: 32)
+            self.queue.async { [weak self, weak connection] in
                 guard let self, let connection, self.connection === connection else { return }
-                if let error {
+                do {
+                    guard let privateKey else { return }
+                    let serverPublicKey = privateKey.publicKey.rawRepresentation
+                    self.sessionKey = try LANWire.sessionKey(
+                        privateKey: privateKey,
+                        peerPublicKey: client.publicKey,
+                        clientPublicKey: client.publicKey,
+                        serverPublicKey: serverPublicKey
+                    )
+                    self.pendingIdentity = identity
+                    self.authenticationNonce = nonce
+                    self.pendingClientPublicKey = client.publicKey
+                    self.pendingServerPublicKey = serverPublicKey
+                    let response = LANHandshake(
+                        deviceName: Host.current().localizedName ?? "Mac",
+                        publicKey: serverPublicKey,
+                        deviceID: nil,
+                        deviceKind: "Mac",
+                        macID: macID,
+                        authNonce: nonce,
+                        requiresPairingCode: requiresCode
+                    )
+                    let data = try LANWire.handshake(response, marker: LANWire.serverHello)
+                    connection.send(content: data, completion: .contentProcessed { [weak self, weak connection] error in
+                        guard let self, let connection, self.connection === connection else { return }
+                        if let error {
+                            self.clearConnection(notify: true, error: error.localizedDescription)
+                        } else {
+                            self.armAuthenticationTimeout(for: connection)
+                        }
+                    })
+                } catch {
+                    connection.cancel()
                     self.clearConnection(notify: true, error: error.localizedDescription)
-                } else {
-                    self.isConnected = true
-                    self.notify(connected: true, value: "LAN:\(client.deviceName)")
                 }
-            })
-        } catch {
-            connection.cancel()
-            clearConnection(notify: true, error: error.localizedDescription)
+            }
         }
     }
 
-    private func requestApproval(for identity: BridgePeerIdentity, completion: @escaping (Bool) -> Void) {
+    private func handleAuthentication(_ message: PairingMessage, connection: NWConnection) {
+        guard message.kind == .response,
+              let proof = message.proof,
+              let identity = pendingIdentity,
+              let nonce = authenticationNonce,
+              let clientPublicKey = pendingClientPublicKey,
+              let serverPublicKey = pendingServerPublicKey else { return }
         DispatchQueue.main.async {
-            MacDeviceAuthorizer.shared.authorize(identity) { accepted in
-                self.queue.async { completion(accepted) }
+            let result = MacPairingSecurity.shared.verify(
+                identity: identity,
+                nonce: nonce,
+                proof: proof,
+                clientPublicKey: clientPublicKey,
+                serverPublicKey: serverPublicKey
+            )
+            self.queue.async { [weak self, weak connection] in
+                guard let self, let connection, self.connection === connection else { return }
+                let response = PairingMessage(
+                    kind: result.accepted ? .accepted : .rejected,
+                    credential: result.issuedCredential,
+                    detail: result.detail
+                )
+                self.sendAuthentication(response, connection: connection) { error in
+                    guard error == nil else {
+                        if result.issuedCredential != nil {
+                            DispatchQueue.main.async {
+                                MacPairingSecurity.shared.revokeCredential(for: identity)
+                            }
+                        }
+                        self.clearConnection(notify: true, error: error?.localizedDescription)
+                        return
+                    }
+                    guard result.accepted else { return }
+                    self.handshakeTimeoutWorkItem?.cancel()
+                    self.handshakeTimeoutWorkItem = nil
+                    self.isConnected = true
+                    self.notify(connected: true, value: "LAN:\(identity.deviceName)")
+                }
             }
+        }
+    }
+
+    private func sendAuthentication(
+        _ message: PairingMessage,
+        connection: NWConnection,
+        completion: @escaping (NWError?) -> Void
+    ) {
+        do {
+            guard let sessionKey else { return }
+            let packet = try PacketCodec.encode(.authentication(message))
+            connection.send(
+                content: try LANWire.encrypted(packet, key: sessionKey),
+                completion: .contentProcessed(completion)
+            )
+        } catch {
+            clearConnection(notify: true, error: error.localizedDescription)
         }
     }
 
@@ -302,7 +374,7 @@ final class MacLANService {
         if inFlightVideoSequence == nil && pendingVideo.isEmpty {
             pendingVideo.append(video)
             sendNextVideoIfPossible()
-        } else if pendingVideo.count < 3 {
+        } else if pendingVideo.isEmpty {
             pendingVideo.append(video)
         } else {
             // Never let old frames build latency. Once the small burst buffer
@@ -335,7 +407,7 @@ final class MacLANService {
                     self.clearConnection(notify: true, error: error.localizedDescription)
                 }
             })
-            queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+            queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 guard let self, self.inFlightVideoSequence == video.sequence else { return }
                 self.inFlightVideoSequence = nil
                 self.sendingFrame = false
@@ -359,6 +431,10 @@ final class MacLANService {
         waitingForKeyFrame = false
         inFlightVideoSequence = nil
         pendingVideo.removeAll(keepingCapacity: true)
+        pendingIdentity = nil
+        authenticationNonce = nil
+        pendingClientPublicKey = nil
+        pendingServerPublicKey = nil
         isConnected = false
         if shouldNotify && (wasConnected || error != nil) { notify(connected: false, value: error) }
     }
@@ -375,6 +451,20 @@ final class MacLANService {
         }
         handshakeTimeoutWorkItem = workItem
         queue.asyncAfter(deadline: .now() + 4, execute: workItem)
+    }
+
+    private func armAuthenticationTimeout(for activeConnection: NWConnection) {
+        handshakeTimeoutWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self, weak activeConnection] in
+            guard let self,
+                  let activeConnection,
+                  self.connection === activeConnection,
+                  !self.isConnected else { return }
+            activeConnection.cancel()
+            self.clearConnection(notify: true, error: "Pairing timed out. Enter the current Mac code and reconnect.")
+        }
+        handshakeTimeoutWorkItem = workItem
+        queue.asyncAfter(deadline: .now() + 90, execute: workItem)
     }
 
     private func notify(connected: Bool, value: String?) {

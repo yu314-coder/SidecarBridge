@@ -343,6 +343,7 @@ enum BridgePacket: Equatable {
     case jpeg(Data)
     case video(VideoFrame)
     case file(FileTransferPacket)
+    case authentication(PairingMessage)
 }
 
 enum FileTransferKind: String, Codable, Equatable {
@@ -377,6 +378,7 @@ enum PacketCodec {
     private static let jpegMarker: UInt8 = 2
     private static let videoMarker: UInt8 = 3
     private static let fileMarker: UInt8 = 4
+    private static let authenticationMarker: UInt8 = 5
 
     private struct VideoHeader: Codable {
         let sequence: UInt64
@@ -415,6 +417,10 @@ enum PacketCodec {
             var data = Data([fileMarker])
             data.append(try JSONEncoder().encode(transfer))
             return data
+        case .authentication(let message):
+            var data = Data([authenticationMarker])
+            data.append(try JSONEncoder().encode(message))
+            return data
         }
     }
 
@@ -446,6 +452,8 @@ enum PacketCodec {
             ))
         case fileMarker:
             return .file(try JSONDecoder().decode(FileTransferPacket.self, from: payload))
+        case authenticationMarker:
+            return .authentication(try JSONDecoder().decode(PairingMessage.self, from: payload))
         default:
             throw PacketError.unknownMarker(marker)
         }

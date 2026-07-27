@@ -10,6 +10,7 @@ final class PadPeerService: NSObject {
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
     var onConnectionHealthChanged: ((String, Int?) -> Void)?
+    var onPairingCodeRequired: ((String, String?) -> Void)?
 
     private let peerID = MCPeerID(displayName: UIDevice.current.name)
     private var session: MCSession
@@ -55,6 +56,11 @@ final class PadPeerService: NSObject {
         }
         lan.onLocalNetworkStateChanged = { [weak self] state in
             self?.onLocalNetworkStateChanged?(state)
+        }
+        lan.onPairingCodeRequired = { [weak self] macName, error in
+            self?.fallbackWorkItem?.cancel()
+            self?.stopMultipeerFallback()
+            self?.onPairingCodeRequired?(macName, error)
         }
         lan.onConnectionChanged = { [weak self] connected, value in
             guard let self else { return }
@@ -146,6 +152,10 @@ final class PadPeerService: NSObject {
                   let data = try? PacketCodec.encode(.file(transfer)) {
             try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
         }
+    }
+
+    func submitPairingCode(_ code: String) {
+        lan.submitPairingCode(code)
     }
 
     private func reportConnection(error: String? = nil) {
@@ -431,10 +441,17 @@ extension PadPeerService: MCSessionDelegate {
                 self.onFrame?(frame)
             }
         case .video(let frame):
+            if let receipt = try? PacketCodec.encode(
+                .control(ControlMessage(.status, detail: "video-ack:\(frame.sequence)"))
+            ) {
+                try? session.send(receipt, toPeers: [peerID], with: .reliable)
+            }
             DispatchQueue.main.async {
                 self.notePeerActivity()
                 self.onVideoFrame?(frame)
             }
+        case .authentication:
+            break
         case .file(let transfer):
             DispatchQueue.main.async {
                 self.notePeerActivity()

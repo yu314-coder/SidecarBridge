@@ -166,7 +166,7 @@ final class MacPeerService: NSObject {
         if mcVideoInFlight == nil && pendingMCVideo.isEmpty {
             pendingMCVideo.append(video)
             sendNextMCVideoIfPossible()
-        } else if pendingMCVideo.count < 3 {
+        } else if pendingMCVideo.isEmpty {
             pendingMCVideo.append(video)
         } else {
             pendingMCVideo.removeAll(keepingCapacity: true)
@@ -189,7 +189,7 @@ final class MacPeerService: NSObject {
             // Multipeer can take longer than direct TCP to deliver a large
             // keyframe. A one-second timeout repeatedly abandoned valid
             // transfers and caused a keyframe/congestion loop.
-            mcVideoQueue.asyncAfter(deadline: .now() + 3) { [weak self] in
+            mcVideoQueue.asyncAfter(deadline: .now() + 1) { [weak self] in
                 guard let self, self.mcVideoInFlight == video.sequence else { return }
                 self.mcVideoInFlight = nil
                 self.pendingMCVideo.removeAll(keepingCapacity: true)
@@ -472,6 +472,8 @@ extension MacPeerService: MCSessionDelegate {
                 self.notePeerActivity()
                 self.onFilePacket?(transfer)
             }
+        case .authentication:
+            break
         case .jpeg, .video:
             break
         }

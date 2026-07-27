@@ -29,8 +29,8 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
     private var lastFrameTime: TimeInterval = 0
     private var preferredWidth = 2360
     private var transportProfile: TransportProfile = .direct
-    private var activeFrameRate = 30
-    private var foregroundFrameRate = 30
+    private var activeFrameRate = 40
+    private var foregroundFrameRate = 40
     private var viewerIsBackgrounded = false
 
     func setPreferredWidth(_ width: Int) {
@@ -65,14 +65,14 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
         let targetWidth = transportProfile == .nearbyP2P
             ? min(preferredWidth, 1728)
             : preferredWidth
-        foregroundFrameRate = transportProfile == .nearbyP2P ? 24 : 30
+        foregroundFrameRate = transportProfile == .nearbyP2P ? 30 : 40
         activeFrameRate = viewerIsBackgrounded ? min(foregroundFrameRate, 15) : foregroundFrameRate
         let targetBitrate = transportProfile == .nearbyP2P ? 5_000_000 : nil
         let scale = min(1.0, Double(targetWidth) / Double(display.width))
         configuration.width = max(960, Int(Double(display.width) * scale)) & ~1
         configuration.height = max(540, Int(Double(display.height) * scale)) & ~1
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(activeFrameRate))
-        configuration.queueDepth = 5
+        configuration.queueDepth = 2
         configuration.showsCursor = true
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         configuration.colorSpaceName = CGColorSpace.sRGB

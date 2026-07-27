@@ -12,7 +12,7 @@ When either app starts, it uses this order:
 4. On iPad only, never launch native Sidecar automatically. The separate system Sidecar session starts only after the user explicitly clicks **Open System Sidecar**.
 5. Keep a button to open Apple's Displays settings when manual intervention is needed.
 
-The in-app stream first uses Network.framework Bonjour discovery across the local network and Apple peer-to-peer link technologies. It immediately retries the last successful private Mac address while discovery runs, and starts Multipeer Connectivity as a parallel fallback after 0.75 seconds. Each direct session performs ephemeral Curve25519 key agreement and encrypts screen/input packets with ChaChaPoly. Encrypted heartbeats verify the active route every three seconds, show measured round-trip latency in both apps, and rebuild stale sessions automatically. It is intentionally local/nearby only; this project does not publish the Mac screen to the public Internet.
+The in-app stream first uses Network.framework Bonjour discovery across the local network and Apple peer-to-peer link technologies. It immediately retries the last successful private Mac address while discovery runs, and starts Multipeer Connectivity as a nearby fallback after 0.75 seconds. Each direct session performs ephemeral Curve25519 key agreement and encrypts screen/input packets with ChaChaPoly. A new device enters the Mac's rotating 8-digit one-time code; successful verification issues a random 256-bit trusted-device credential stored in Keychain, so later connections do not ask again. Encrypted heartbeats verify the active route every three seconds, show measured round-trip latency in both apps, and rebuild stale sessions automatically. It is intentionally local/nearby only; this project does not publish the Mac screen to the public Internet or require an Internet connection.
 
 ## Build and install
 
@@ -29,7 +29,7 @@ In Xcode:
 1. Select the `SidecarBridgeMac` target, choose your Apple development team, then run it on **My Mac**.
 2. Select `SidecarBridgePad`, choose the same or another valid development team, then run it on an iPhone or iPad.
 3. Accept **Local Network** on both devices.
-4. The first time each mobile device finds the Mac, approve the system Touch ID or Mac login-password prompt. SidecarBridge remembers that iPhone or iPad for later connections without asking again.
+4. The first time a direct-local device finds the Mac, enter the Mac app's 8-digit one-time code on the iPhone or iPad. SidecarBridge saves a device-specific Keychain credential and rotates the code, so later connections do not ask again. The encrypted Multipeer fallback retains macOS device-owner approval.
 5. If the fallback is needed, grant **Screen Recording** to SidecarBridge on the Mac, quit it, and reopen it.
 
 For automatic startup, use the **Automatic startup** card in the Mac app. It distinguishes enabled, disabled, and macOS-approval-required states. If the app was moved or rebuilt after startup was enabled, click **Repair** once so the Login Item points to `/Volumes/D/Applications/SidecarBridge.app` instead of an old Xcode build.
@@ -40,7 +40,7 @@ If the app reports `NoAuth`, macOS or iOS/iPadOS has denied Local Network access
 
 ### iPhone support
 
-Build 12 is universal (`TARGETED_DEVICE_FAMILY = 1,2`). iPhone provides the encrypted in-app display, touch input, discovery, settings, file transfer, zoom, and background Picture in Picture controls. Apple System Sidecar is an iPad-only feature, so SidecarBridge hides that mode on iPhone instead of presenting a control that cannot work.
+Build 13 is universal (`TARGETED_DEVICE_FAMILY = 1,2`). iPhone provides the encrypted in-app display, touch input, discovery, settings, file transfer, zoom, and background Picture in Picture controls. Apple System Sidecar is an iPad-only feature, so SidecarBridge hides that mode on iPhone instead of presenting a control that cannot work.
 
 ## What is and is not possible
 
@@ -56,7 +56,7 @@ The code automatically falls back instead of trying to bypass iPadOS security:
 - `MacLANService` and `PadLANService` use Bonjour plus Network.framework so the paired apps can connect on the same Wi-Fi even if Apple's Sidecar device list is empty. If a router filters Bonjour multicast, the iPad first retries the last successful private Mac address and then performs a bounded private-`/24` probe for SidecarBridge's fixed encrypted port `45454`.
 - The two apps use an encrypted Multipeer Connectivity session and remember each approved iPhone or iPad by its stable app device identifier for automatic reconnection.
 
-The fallback is a hardware-encoded H.264 HiDPI stream sized from the iPad's native display width (clamped to 1440–2880 pixels, up to 30 fps) with optional remote keyboard, trackpad, touch, and Apple Pencil input. JPEG packets remain supported for compatibility. It mirrors the main display rather than creating a true extra macOS display. Native Sidecar remains the preferred path for a true virtual Retina display, native Apple Pencil behavior, audio, and extended-desktop support.
+The fallback is a hardware-encoded H.264 HiDPI stream sized from the iPad's native display width (clamped to 1440–2880 pixels, up to 40 fps on the direct route) with optional remote keyboard, trackpad, touch, and Apple Pencil input. Receipt acknowledgements are sent before SwiftUI rendering, capture buffering is limited to two surfaces, and stale dependency chains restart at a keyframe within roughly 0.25 seconds. JPEG packets remain supported for compatibility. It mirrors the main display rather than creating a true extra macOS display. Native Sidecar remains the preferred path for a true virtual Retina display, native Apple Pencil behavior, audio, and extended-desktop support.
 
 Closing the Mac window leaves SidecarBridge available as a background app so an iPad can reconnect. On iPadOS, **Start PiP when switching apps** is enabled by default: when a live stream is the user's primary focus, switching apps starts the system Picture in Picture viewer and keeps the approved media session active. A PiP watchdog clears stuck starts and retries them, while the Mac lowers the background stream to 15 fps to reduce congestion and restores normal quality in the foreground. On return, the iPad verifies the encrypted session and rebuilds discovery if it was suspended. If PiP is unavailable, disabled, or closed, SidecarBridge only has iPadOS's short background-task grace period; no ordinary iPad app can run indefinitely outside an Apple-approved background mode.
 
@@ -102,7 +102,8 @@ Files can move in either direction over the active encrypted same-Wi-Fi/AWDL or 
 
 - Multipeer Connectivity encryption is required.
 - Direct-LAN file chunks use the same Curve25519/HKDF/ChaChaPoly session as display and input packets.
-- The Mac uses Apple's system device-owner authentication for the first connection from each iPhone or iPad. Touch ID or the Mac login password is evaluated by macOS and is never stored by SidecarBridge.
-- After approval, the Mac stores the mobile app's stable identifier, device kind, display name, and last-seen date locally. App relaunches and updates retain authorization; **Forget All** revokes every remembered device.
-- The stable identifier recognizes devices more reliably than a peer name, but it is app-generated rather than hardware-attested. Use this on a trusted local network.
+- Direct first-pairing uses a rotating 8-digit code. Its HMAC proof binds the mobile identity, Mac identity, random nonce, and both ephemeral Curve25519 public keys, preventing a captured proof from being replayed for a different session or relayed through a substituted key exchange.
+- Successful pairing replaces the temporary code with a random 256-bit credential stored in both devices' system Keychains. The credential is proved—not transmitted—on later connections. Five failed attempts within one minute trigger a temporary lockout.
+- The Mac stores the device kind, display name, authorization time, and last-seen date locally. App relaunches and updates retain authorization; **Forget All** deletes every trusted-device credential and rotates the code.
+- Nearby Multipeer Connectivity requires Apple's encrypted session plus macOS device-owner approval. Touch ID or the Mac login password is evaluated by macOS and is never stored by SidecarBridge.
 - Public-Internet streaming would need authenticated identities, certificate pinning, a relay/VPN path, and stronger session authorization; it is deliberately outside this MVP.

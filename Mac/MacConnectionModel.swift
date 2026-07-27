@@ -24,6 +24,7 @@ final class MacConnectionModel: ObservableObject {
     @Published var fileTransferSnapshot: FileTransferSnapshot?
     @Published var lastReceivedFile: URL?
     @Published var fileTransferError: String?
+    @Published var pairingCode = MacPairingSecurity.shared.pairingCode
 
     var localNetworkPermissionNeeded: Bool { localNetworkAccess.needsPermission }
 
@@ -44,6 +45,9 @@ final class MacConnectionModel: ObservableObject {
     private var screenRecordingPollTask: Task<Void, Never>?
 
     init() {
+        MacPairingSecurity.shared.onPairingCodeChanged = { [weak self] code in
+            self?.pairingCode = code
+        }
         pairedPeer = MacAuthorizedDeviceStore.shared.displaySummary
         refreshLaunchAtLoginStatus()
         remoteInputAuthorized = remoteInput.isAuthorized
@@ -306,8 +310,14 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func forgetPairing() {
+        MacPairingSecurity.shared.forgetAllDevices()
         MacAuthorizedDeviceStore.shared.forgetAll()
         pairedPeer = nil
+    }
+
+    func copyPairingCode() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(pairingCode, forType: .string)
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {

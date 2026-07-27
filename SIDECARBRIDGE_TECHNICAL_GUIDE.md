@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 12** on 2026-07-27.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 13** on 2026-07-27.
 
 ## 1. Purpose
 
@@ -145,17 +145,18 @@ The direct path uses a small framed protocol in `Shared/LANProtocol.swift`.
 
 ### 5.1 Handshake
 
-1. The iPad generates an ephemeral Curve25519 key pair.
-2. It sends a client hello containing its stable app device identifier, device kind, display name, and public key.
-3. For an unfamiliar identifier, the Mac asks LocalAuthentication to verify the Mac owner with Touch ID or the Mac login password. SidecarBridge never receives or stores the password.
-4. The Mac generates its own ephemeral Curve25519 key pair.
-5. Both peers derive the same 256-bit session key using Curve25519 key agreement and HKDF-SHA256.
-6. The Mac returns its public key in the server hello.
-7. All subsequent control and video packets use ChaChaPoly authenticated encryption.
+1. The mobile app generates an ephemeral Curve25519 key pair and sends its stable app identity and public key.
+2. The Mac generates its ephemeral key, stable Mac identifier, and a fresh 256-bit authentication nonce.
+3. Both peers derive a 256-bit session key with Curve25519 and HKDF-SHA256; the HKDF salt binds both public keys.
+4. A new device enters the rotating 8-digit code displayed by the Mac. A remembered device instead reads its random credential from Keychain.
+5. The mobile app sends an HMAC-SHA256 proof inside the encrypted channel. The proof transcript binds the protocol version, mobile identity, Mac identity, nonce, client public key, and server public key.
+6. The Mac verifies the proof in constant time and rate-limits failures to five per minute.
+7. On first success, the Mac issues a random 256-bit device credential inside the encrypted channel, stores its copy in Keychain, and rotates the temporary code. Future sessions prove that credential without transmitting it.
+8. Only after authentication succeeds can either transport deliver screen, input, or file packets.
 
 The HKDF salt binds both public keys and the protocol label `SidecarBridge-LAN-v1`. The shared information label is `screen-and-input`.
 
-The authorization store supports multiple remembered iPhones and iPads. It saves the identifier, device kind, current display name, and last-seen date in the Mac app's local preferences, survives app restarts and updates, and can be cleared with **Forget All**. Existing installations migrate the previously approved peer name on its next matching connection. The same authorization service handles direct LAN and Multipeer invitations, and coalesces simultaneous requests for the same device so only one system prompt appears.
+The authorization store supports multiple remembered iPhones and iPads. Secrets stay in the platform Keychains; local preferences contain only display metadata such as name, device kind, and last-seen time. **Forget All** deletes the Mac's trusted-device credentials and rotates its code. Multipeer remains separately protected by required Apple session encryption and macOS device-owner authentication.
 
 ### 5.2 Framing
 
@@ -178,7 +179,7 @@ The shared packet codec supports:
 
 ### 5.4 Trust boundary
 
-Encryption protects packet confidentiality and integrity. Pairing approval prevents silent first contact, but the remembered peer name is a convenience identifier rather than a cryptographic device identity. Use SidecarBridge on a trusted local network.
+Encryption protects packet confidentiality and integrity. The one-time-code proof authenticates the ephemeral key transcript, and the remembered 256-bit credential authenticates later sessions. The mobile identifier remains app-generated rather than hardware-attested, so **Forget All** should be used if a trusted device is lost.
 
 ## 6. Video pipeline
 
@@ -192,18 +193,19 @@ Encryption protects packet confidentiality and integrity. Pairing approval preve
 
 - native-width-aware HiDPI output;
 - width clamped to a practical 1440–2880-pixel range;
-- up to 30 frames per second;
+- up to 40 frames per second on direct LAN/AWDL and 30 on nearby fallback;
 - transport-specific bitrate and frame pacing;
 - automatic 15 fps pacing while the iPad viewer is in background PiP, restored on foreground return;
-- periodic keyframes for recovery.
+- keyframes at least every 0.25 seconds for rapid decoder recovery.
 
 ### 6.3 Flow control
 
 The Mac never allows old frames to create an ever-growing latency queue:
 
-- only a small frame burst is buffered;
-- the iPad acknowledges displayed video sequence numbers;
-- the Mac sends the next frame after acknowledgement;
+- ScreenCaptureKit queue depth is two surfaces;
+- only one dependent frame waits behind the in-flight frame;
+- the mobile receiver acknowledges decrypted frame receipt before SwiftUI rendering;
+- the Mac sends the next frame after that receipt acknowledgement;
 - if the queue saturates, dependent frames are discarded;
 - transmission resumes at the next keyframe;
 - initial keyframes are retried after the iPad display layer becomes ready.
@@ -475,7 +477,7 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 
 ## 14. Tests
 
-`PacketCodecTests` currently covers 31 cases:
+`PacketCodecTests` currently covers 37 cases:
 
 1. control-message round trip;
 2. heartbeat-message round trip;
@@ -511,6 +513,9 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 32. relative pointer-delta protocol round trip and accumulation;
 33. current-cursor click encoding without absolute coordinates;
 34. stable iPhone/iPad identity and LAN handshake fields.
+35. Control-Up/Down/Left/Right modifier preservation;
+36. pairing proof binding across password, Mac identity, nonce, and ephemeral public keys;
+37. authentication packet round trip.
 
 Run them with all output on `/Volumes/D`:
 

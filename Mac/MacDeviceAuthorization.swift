@@ -9,6 +9,139 @@ struct MacAuthorizedDevice: Codable, Equatable {
     var lastSeenAt: Date
 }
 
+struct PairingVerification {
+    let accepted: Bool
+    let issuedCredential: Data?
+    let detail: String?
+}
+
+@MainActor
+final class MacPairingSecurity {
+    static let shared = MacPairingSecurity()
+
+    var onPairingCodeChanged: ((String) -> Void)?
+
+    private(set) var pairingCode: String
+    let macID: String
+    private var failedAttemptTimes: [Date] = []
+
+    private init() {
+        if let saved = SecureCredentialStore.data(account: "mac.identity"),
+           let value = String(data: saved, encoding: .utf8),
+           !value.isEmpty {
+            macID = value
+        } else {
+            let value = UUID().uuidString
+            macID = value
+            SecureCredentialStore.set(Data(value.utf8), account: "mac.identity")
+        }
+        pairingCode = Self.makePairingCode()
+    }
+
+    func requiresPairingCode(for identity: BridgePeerIdentity) -> Bool {
+        credential(for: identity) == nil
+    }
+
+    func verify(
+        identity: BridgePeerIdentity,
+        nonce: Data,
+        proof: Data,
+        clientPublicKey: Data,
+        serverPublicKey: Data
+    ) -> PairingVerification {
+        let now = Date()
+        failedAttemptTimes.removeAll { now.timeIntervalSince($0) > 60 }
+        guard failedAttemptTimes.count < 5 else {
+            return PairingVerification(
+                accepted: false,
+                issuedCredential: nil,
+                detail: "Too many incorrect codes. Wait one minute and try again."
+            )
+        }
+
+        if let existing = credential(for: identity) {
+            let accepted = PairingProof.verify(
+                proof,
+                secret: existing,
+                identity: identity,
+                macID: macID,
+                nonce: nonce,
+                clientPublicKey: clientPublicKey,
+                serverPublicKey: serverPublicKey
+            )
+            if accepted {
+                MacAuthorizedDeviceStore.shared.authorize(identity)
+                return PairingVerification(accepted: true, issuedCredential: nil, detail: nil)
+            }
+            failedAttemptTimes.append(now)
+            return PairingVerification(
+                accepted: false,
+                issuedCredential: nil,
+                detail: "The saved device credential was not accepted. Forget this Mac on the mobile device and pair again."
+            )
+        }
+
+        let accepted = PairingProof.verify(
+            proof,
+            secret: Data(pairingCode.utf8),
+            identity: identity,
+            macID: macID,
+            nonce: nonce,
+            clientPublicKey: clientPublicKey,
+            serverPublicKey: serverPublicKey
+        )
+        guard accepted else {
+            failedAttemptTimes.append(now)
+            return PairingVerification(
+                accepted: false,
+                issuedCredential: nil,
+                detail: "Incorrect one-time code."
+            )
+        }
+
+        let credential = SecureCredentialStore.randomBytes(count: 32)
+        guard SecureCredentialStore.set(credential, account: credentialAccount(for: identity)) else {
+            return PairingVerification(
+                accepted: false,
+                issuedCredential: nil,
+                detail: "The trusted-device credential could not be saved in Keychain."
+            )
+        }
+        MacAuthorizedDeviceStore.shared.authorize(identity)
+        rotatePairingCode()
+        return PairingVerification(accepted: true, issuedCredential: credential, detail: nil)
+    }
+
+    func forgetAllDevices() {
+        SecureCredentialStore.removeAll(accountPrefix: "mac.peer.")
+        failedAttemptTimes.removeAll()
+        rotatePairingCode()
+    }
+
+    func revokeCredential(for identity: BridgePeerIdentity) {
+        SecureCredentialStore.remove(account: credentialAccount(for: identity))
+    }
+
+    private func credential(for identity: BridgePeerIdentity) -> Data? {
+        SecureCredentialStore.data(account: credentialAccount(for: identity))
+    }
+
+    private func credentialAccount(for identity: BridgePeerIdentity) -> String {
+        "mac.peer.\(identity.stableKey)"
+    }
+
+    private func rotatePairingCode() {
+        pairingCode = Self.makePairingCode()
+        onPairingCodeChanged?(pairingCode)
+    }
+
+    private static func makePairingCode() -> String {
+        let bytes = SecureCredentialStore.randomBytes(count: 4)
+        let value = bytes.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) } % 100_000_000
+        return String(format: "%08u", value)
+    }
+}
+
 @MainActor
 final class MacAuthorizedDeviceStore {
     static let shared = MacAuthorizedDeviceStore()

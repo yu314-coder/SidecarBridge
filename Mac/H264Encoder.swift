@@ -61,13 +61,14 @@ final class H264Encoder {
         self.session = session
 
         let bitrate = targetBitrate ?? min(16_000_000, max(8_000_000, width * height * 7 / 2))
+        let keyFrameInterval = max(6, frameRate / 4)
         let settings: [(CFString, CFTypeRef)] = [
             (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue),
             (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse),
             (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel),
             (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: frameRate)),
-            (kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: 15)),
-            (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 0.5)),
+            (kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: keyFrameInterval)),
+            (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 0.25)),
             (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate)),
             (kVTCompressionPropertyKey_DataRateLimits, [NSNumber(value: bitrate * 3 / 16), NSNumber(value: 1)] as CFArray)
         ]

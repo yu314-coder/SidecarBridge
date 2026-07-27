@@ -230,6 +230,11 @@ struct PadContentView: View {
 
             Divider().overlay(.white.opacity(0.08))
 
+            if model.pairingRequired {
+                pairingCodePanel
+                Divider().overlay(.white.opacity(0.08))
+            }
+
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 12) { discoveryPathTiles }
                 VStack(spacing: 12) { discoveryPathTiles }
@@ -247,6 +252,42 @@ struct PadContentView: View {
                 .stroke((model.localNetworkPermissionNeeded ? Color.orange : Color.cyan).opacity(0.22))
         )
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: model.isDiscoveryTakingLonger)
+    }
+
+    private var pairingCodePanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("First-time secure pairing", systemImage: "lock.badge.clock")
+                .font(.headline)
+                .foregroundStyle(.cyan)
+            Text("Enter the 8-digit one-time code shown by SidecarBridge on \(model.pairingMacName). It is used once, then replaced by a device credential stored in Keychain.")
+                .font(.callout)
+                .foregroundStyle(.white.opacity(0.78))
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                SecureField("8-digit code", text: $model.pairingCode)
+                    .textContentType(.oneTimeCode)
+                    .keyboardType(.numberPad)
+                    .font(.system(.title3, design: .monospaced).weight(.semibold))
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 10)
+                    .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 12))
+                    .onSubmit { model.submitPairingCode() }
+
+                Button("Trust This Mac") { model.submitPairingCode() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.cyan)
+            }
+
+            if let error = model.pairingError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(16)
+        .background(.cyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.cyan.opacity(0.22)))
     }
 
     private var discoveryIdentity: some View {

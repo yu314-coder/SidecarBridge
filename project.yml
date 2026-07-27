@@ -8,7 +8,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "12"
+    CURRENT_PROJECT_VERSION: "13"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -48,6 +48,7 @@ targets:
       - sdk: Network.framework
       - sdk: VideoToolbox.framework
       - sdk: LocalAuthentication.framework
+      - sdk: Security.framework
 
   SidecarBridgePad:
     type: application
@@ -94,6 +95,7 @@ targets:
       - sdk: Network.framework
       - sdk: AVFoundation.framework
       - sdk: AVKit.framework
+      - sdk: Security.framework
 
   SidecarBridgeTests:
     type: bundle.unit-test
@@ -105,6 +107,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.tests
         GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - sdk: Security.framework
 
 schemes:
   SidecarBridgeMac:

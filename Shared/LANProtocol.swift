@@ -6,6 +6,9 @@ struct LANHandshake: Codable {
     let publicKey: Data
     var deviceID: String? = nil
     var deviceKind: String? = nil
+    var macID: String? = nil
+    var authNonce: Data? = nil
+    var requiresPairingCode: Bool? = nil
 }
 
 enum LANWire {

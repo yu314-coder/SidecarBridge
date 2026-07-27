@@ -49,6 +49,10 @@ final class PadConnectionModel: ObservableObject {
     @Published var fileTransferSnapshot: FileTransferSnapshot?
     @Published var lastReceivedFile: URL?
     @Published var fileTransferError: String?
+    @Published var pairingCode = ""
+    @Published var pairingRequired = false
+    @Published var pairingMacName = "Mac"
+    @Published var pairingError: String?
 
     let videoDisplay = VideoDisplayController()
 
@@ -127,10 +131,22 @@ final class PadConnectionModel: ObservableObject {
             self?.connectionLatencyMS = latency
         }
 
+        peers.onPairingCodeRequired = { [weak self] macName, error in
+            guard let self else { return }
+            self.pairingRequired = true
+            self.pairingMacName = macName
+            self.pairingError = error
+            self.status = "Enter the Mac pairing code"
+            self.detail = "This one-time code creates a trusted-device credential for future local connections."
+        }
+
         peers.onConnectionChanged = { [weak self] connected, peerOrError in
             guard let self else { return }
             self.isConnected = connected
             if connected {
+                self.pairingRequired = false
+                self.pairingCode = ""
+                self.pairingError = nil
                 let isDirectLAN = peerOrError?.hasPrefix("LAN:") == true
                 self.connectedUsingDirectLAN = isDirectLAN
                 self.lastDiscoveryIssue = nil
@@ -197,9 +213,7 @@ final class PadConnectionModel: ObservableObject {
             self.status = "Mac screen"
             self.detail = "Hardware-decoded H.264 HiDPI stream."
             UIApplication.shared.isIdleTimerDisabled = true
-            if displayed {
-                self.peers.send(ControlMessage(.status, detail: "video-ack:\(frame.sequence)"))
-            } else if frame.isKeyFrame {
+            if !displayed, frame.isKeyFrame {
                 self.retryInitialKeyFrameAfterDisplayAppears(frame)
             }
         }
@@ -215,6 +229,17 @@ final class PadConnectionModel: ObservableObject {
         }
         fileTransferError = nil
         fileTransfer.sendFile(at: url)
+    }
+
+    func submitPairingCode() {
+        let normalized = pairingCode.filter(\.isNumber)
+        guard normalized.count == 8 else {
+            pairingError = "Enter all 8 digits shown in the Mac app."
+            return
+        }
+        pairingError = nil
+        detail = "Verifying the one-time code over the encrypted local link…"
+        peers.submitPairingCode(normalized)
     }
 
     private func configureFileTransfer() {
@@ -424,7 +449,6 @@ final class PadConnectionModel: ObservableObject {
                 guard !Task.isCancelled, let self, self.isStreaming else { return }
                 if self.videoDisplay.enqueue(frame) {
                     self.recordVideoFrame()
-                    self.peers.send(ControlMessage(.status, detail: "video-ack:\(frame.sequence)"))
                     return
                 }
             }

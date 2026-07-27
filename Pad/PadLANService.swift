@@ -11,6 +11,7 @@ final class PadLANService {
     var onFilePacket: ((FileTransferPacket) -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
+    var onPairingCodeRequired: ((String, String?) -> Void)?
 
     private let queue = DispatchQueue(
         label: "SidecarBridge.PadLAN",
@@ -31,6 +32,12 @@ final class PadLANService {
     private let idleDiscoveryRefreshInterval: TimeInterval = 12
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
     private var sessionKey: SymmetricKey?
+    private var pairingMacID: String?
+    private var pairingMacName: String?
+    private var pairingNonce: Data?
+    private var pairingServerPublicKey: Data?
+    private var submittedPairingCode: String?
+    private var usedSavedCredential = false
     private var receiveBuffer = Data()
     private var pendingInput = RemoteInputCoalescer()
     private var inputSendInFlight = false
@@ -104,6 +111,14 @@ final class PadLANService {
     func sendFilePacket(_ transfer: FileTransferPacket) {
         guard let data = try? PacketCodec.encode(.file(transfer)) else { return }
         sendPacket(data)
+    }
+
+    func submitPairingCode(_ code: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.submittedPairingCode = code.filter(\.isNumber)
+            self.sendPairingResponseIfPossible()
+        }
     }
 
     private func startBrowser() {
@@ -265,24 +280,136 @@ final class PadLANService {
                 clientPublicKey: clientPublicKey,
                 serverPublicKey: response.publicKey
             )
-            isConnected = true
-            print("[SidecarBridge/LAN] Encrypted handshake complete with \(response.deviceName)")
-            notify(connected: true, value: "LAN:\(response.deviceName)")
+            guard let macID = response.macID,
+                  let nonce = response.authNonce else {
+                // Compatibility with a Mac running the older encrypted
+                // handshake. Build 13 peers always use trusted-device proof.
+                isConnected = true
+                print("[SidecarBridge/LAN] Legacy encrypted handshake complete with \(response.deviceName)")
+                notify(connected: true, value: "LAN:\(response.deviceName)")
+                return
+            }
+            pairingMacID = macID
+            pairingMacName = response.deviceName
+            pairingNonce = nonce
+            pairingServerPublicKey = response.publicKey
+            sendPairingResponseIfPossible()
             return
         }
 
         guard let sessionKey else { return }
         let packet = try PacketCodec.decode(LANWire.decrypt(payload, key: sessionKey))
         switch packet {
+        case .authentication(let message):
+            handleAuthentication(message)
         case .control(let command):
+            guard isConnected else { return }
             DispatchQueue.main.async { self.onCommand?(command) }
         case .jpeg(let frame):
+            guard isConnected else { return }
             DispatchQueue.main.async { self.onFrame?(frame) }
         case .video(let frame):
+            guard isConnected else { return }
+            sendVideoReceipt(sequence: frame.sequence)
             DispatchQueue.main.async { self.onVideoFrame?(frame) }
         case .file(let transfer):
+            guard isConnected else { return }
             DispatchQueue.main.async { self.onFilePacket?(transfer) }
         }
+    }
+
+    private func sendPairingResponseIfPossible() {
+        guard !isConnected,
+              let macID = pairingMacID,
+              let nonce = pairingNonce,
+              let clientPublicKey = privateKey?.publicKey.rawRepresentation,
+              let serverPublicKey = pairingServerPublicKey else { return }
+        let identity = PadDeviceIdentity.current
+
+        let account = "pad.mac.\(macID)"
+        let secret: Data
+        if let credential = SecureCredentialStore.data(account: account) {
+            secret = credential
+            usedSavedCredential = true
+        } else if let code = submittedPairingCode, code.count == 8 {
+            secret = Data(code.utf8)
+            usedSavedCredential = false
+        } else {
+            DispatchQueue.main.async {
+                self.onPairingCodeRequired?(
+                    self.pairingMacName ?? "Mac",
+                    self.submittedPairingCode == nil ? nil : "Enter the complete 8-digit code shown on the Mac."
+                )
+            }
+            return
+        }
+
+        let proof = PairingProof.make(
+            secret: secret,
+            identity: identity,
+            macID: macID,
+            nonce: nonce,
+            clientPublicKey: clientPublicKey,
+            serverPublicKey: serverPublicKey
+        )
+        sendAuthentication(PairingMessage(kind: .response, proof: proof))
+    }
+
+    private func handleAuthentication(_ message: PairingMessage) {
+        switch message.kind {
+        case .accepted:
+            if let credential = message.credential, let macID = pairingMacID {
+                guard SecureCredentialStore.set(credential, account: "pad.mac.\(macID)") else {
+                    clearConnection(
+                        notify: true,
+                        error: "The trusted Mac credential could not be saved in Keychain. Use Forget All on the Mac, then pair again."
+                    )
+                    return
+                }
+            }
+            isConnected = true
+            submittedPairingCode = nil
+            print("[SidecarBridge/LAN] Trusted encrypted handshake complete with \(pairingMacName ?? "Mac")")
+            notify(connected: true, value: "LAN:\(pairingMacName ?? "Mac")")
+        case .rejected:
+            if usedSavedCredential, let macID = pairingMacID {
+                SecureCredentialStore.remove(account: "pad.mac.\(macID)")
+                usedSavedCredential = false
+            }
+            submittedPairingCode = nil
+            DispatchQueue.main.async {
+                self.onPairingCodeRequired?(
+                    self.pairingMacName ?? "Mac",
+                    message.detail ?? "The one-time code was not accepted."
+                )
+            }
+        case .response:
+            break
+        }
+    }
+
+    private func sendAuthentication(_ message: PairingMessage) {
+        do {
+            guard let connection, let sessionKey else { return }
+            let packet = try PacketCodec.encode(.authentication(message))
+            connection.send(
+                content: try LANWire.encrypted(packet, key: sessionKey),
+                completion: .contentProcessed { [weak self] error in
+                    if let error {
+                        self?.clearConnection(notify: true, error: error.localizedDescription)
+                    }
+                }
+            )
+        } catch {
+            clearConnection(notify: true, error: error.localizedDescription)
+        }
+    }
+
+    private func sendVideoReceipt(sequence: UInt64) {
+        guard let packet = try? PacketCodec.encode(
+            .control(ControlMessage(.status, detail: "video-ack:\(sequence)"))
+        ) else { return }
+        sendPacket(packet)
     }
 
     private func sendPacket(_ packet: Data) {
@@ -628,6 +755,12 @@ final class PadLANService {
         receiveBuffer.removeAll(keepingCapacity: true)
         pendingInput.removeAll()
         inputSendInFlight = false
+        pairingMacID = nil
+        pairingMacName = nil
+        pairingNonce = nil
+        pairingServerPublicKey = nil
+        submittedPairingCode = nil
+        usedSavedCredential = false
         isConnected = false
         if shouldNotify && (wasConnected || error != nil) { notify(connected: false, value: error) }
     }

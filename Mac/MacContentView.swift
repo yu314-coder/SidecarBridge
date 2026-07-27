@@ -199,6 +199,18 @@ struct MacContentView: View {
                 }
             }
 
+            Divider().overlay(.white.opacity(0.08))
+
+            PermissionRow(
+                icon: "lock.badge.clock",
+                title: "First-time pairing code",
+                detail: "\(model.pairingCode) • Enter once on a new iPhone or iPad; trusted credentials are then stored in Keychain.",
+                isReady: true,
+                stateLabel: "ONE-TIME"
+            ) {
+                Button("Copy") { model.copyPairingCode() }
+            }
+
             if let peer = model.pairedPeer {
                 Divider().overlay(.white.opacity(0.08))
                 PermissionRow(icon: "ipad.and.iphone", title: "Authorized devices", detail: peer, isReady: true) {

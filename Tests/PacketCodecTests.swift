@@ -131,6 +131,72 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(decoded.deviceKind, "iPhone")
     }
 
+    func testPairingProofBindsDeviceMacAndNonce() {
+        let identity = BridgePeerIdentity(
+            deviceID: "trusted-phone",
+            deviceName: "Euler’s iPhone",
+            deviceKind: "iPhone"
+        )
+        let secret = Data("12345678".utf8)
+        let nonce = Data(repeating: 7, count: 32)
+        let clientPublicKey = Data(repeating: 3, count: 32)
+        let serverPublicKey = Data(repeating: 4, count: 32)
+        let proof = PairingProof.make(
+            secret: secret,
+            identity: identity,
+            macID: "trusted-mac",
+            nonce: nonce,
+            clientPublicKey: clientPublicKey,
+            serverPublicKey: serverPublicKey
+        )
+        XCTAssertTrue(PairingProof.verify(
+            proof,
+            secret: secret,
+            identity: identity,
+            macID: "trusted-mac",
+            nonce: nonce,
+            clientPublicKey: clientPublicKey,
+            serverPublicKey: serverPublicKey
+        ))
+        XCTAssertFalse(PairingProof.verify(
+            proof,
+            secret: Data("87654321".utf8),
+            identity: identity,
+            macID: "trusted-mac",
+            nonce: nonce,
+            clientPublicKey: clientPublicKey,
+            serverPublicKey: serverPublicKey
+        ))
+        XCTAssertFalse(PairingProof.verify(
+            proof,
+            secret: secret,
+            identity: identity,
+            macID: "different-mac",
+            nonce: nonce,
+            clientPublicKey: clientPublicKey,
+            serverPublicKey: serverPublicKey
+        ))
+        XCTAssertFalse(PairingProof.verify(
+            proof,
+            secret: secret,
+            identity: identity,
+            macID: "trusted-mac",
+            nonce: nonce,
+            clientPublicKey: clientPublicKey,
+            serverPublicKey: Data(repeating: 5, count: 32)
+        ))
+    }
+
+    func testPairingPacketRoundTrip() throws {
+        let message = PairingMessage(
+            kind: .accepted,
+            credential: Data(repeating: 9, count: 32),
+            detail: nil
+        )
+        let encoded = try PacketCodec.encode(.authentication(message))
+        XCTAssertEqual(try PacketCodec.decode(encoded), .authentication(message))
+    }
+
     func testRemoteKeyboardModifiersAreCanonicalAndDoNotLeakUnknownFlags() {
         let input = RemoteInputEvent.key(
             "c",
