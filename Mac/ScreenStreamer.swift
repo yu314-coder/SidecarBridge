@@ -72,7 +72,9 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
         configuration.width = max(960, Int(Double(display.width) * scale)) & ~1
         configuration.height = max(540, Int(Double(display.height) * scale)) & ~1
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(activeFrameRate))
-        configuration.queueDepth = 2
+        // A few buffers absorb USB/Wi-Fi scheduling jitter without forcing
+        // ScreenCaptureKit to collapse the stream below 30 FPS.
+        configuration.queueDepth = transportProfile == .nearbyP2P ? 3 : 5
         configuration.showsCursor = true
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         configuration.colorSpaceName = CGColorSpace.sRGB

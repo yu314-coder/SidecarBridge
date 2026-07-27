@@ -54,6 +54,7 @@
 		DDD681F579FE17C68A57FF20 /* RemoteInputSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */; };
 		E277CF7C68908D7AB4FA2DC6 /* MacDeviceAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC5BF383941F9C156E7F434 /* MacDeviceAuthorization.swift */; };
 		EF96FEDBEB9021AEBB5607E4 /* VideoDisplaySurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECEBB8AE7F4ECF8E0D6ADF61 /* VideoDisplaySurface.swift */; };
+		F8B43CC43FFBE5550CF68338 /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C77EC1B8575D5AB3F18C18C2 /* GameController.framework */; };
 		FBDC2A47CAC1ACB40AA3BCDF /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */; };
 		FEF077EFBA61BCD06B63DB8C /* PadDeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C73B3B16472356E5FE1B1A58 /* PadDeviceIdentity.swift */; };
 /* End PBXBuildFile section */
@@ -96,6 +97,7 @@
 		C215B5E7806DF0EE7746B9C6 /* ScreenCaptureKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ScreenCaptureKit.framework; path = System/Library/Frameworks/ScreenCaptureKit.framework; sourceTree = SDKROOT; };
 		C270B0D7506B1B8A83205AC3 /* PacketCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketCodecTests.swift; sourceTree = "<group>"; };
 		C73B3B16472356E5FE1B1A58 /* PadDeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadDeviceIdentity.swift; sourceTree = "<group>"; };
+		C77EC1B8575D5AB3F18C18C2 /* GameController.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameController.framework; path = System/Library/Frameworks/GameController.framework; sourceTree = SDKROOT; };
 		CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LANProtocol.swift; sourceTree = "<group>"; };
 		CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
 		E5E700FBB5674124211D2524 /* PadConnectionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadConnectionModel.swift; sourceTree = "<group>"; };
@@ -113,6 +115,7 @@
 				0F1A65FF0EB6D78056A41646 /* Network.framework in Frameworks */,
 				8D467B67CF7786EEA5045A38 /* AVFoundation.framework in Frameworks */,
 				875EB2F7C4A025AC74DAA63F /* AVKit.framework in Frameworks */,
+				F8B43CC43FFBE5550CF68338 /* GameController.framework in Frameworks */,
 				8772700EECC1261EF4841DF7 /* Security.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -188,6 +191,7 @@
 			children = (
 				B5BBAA34470E4D405231752F /* AVFoundation.framework */,
 				487CD2D42D52E0E526CCA155 /* AVKit.framework */,
+				C77EC1B8575D5AB3F18C18C2 /* GameController.framework */,
 				74310F8BF9315A1BF696394D /* IOKit.framework */,
 				F3E2A19AD0FE529BC023FD81 /* LocalAuthentication.framework */,
 				9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */,
@@ -453,7 +457,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = LYK4LV2859;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -622,7 +626,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = LYK4LV2859;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

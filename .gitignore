@@ -3,6 +3,7 @@
 .derived*/
 .signed-*/
 DerivedData/
+.codex-build/
 *.xcresult/
 *.xcuserstate
 xcuserdata/

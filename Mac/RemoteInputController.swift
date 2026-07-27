@@ -44,6 +44,7 @@ final class RemoteInputPipeline {
 final class RemoteInputController {
     var isAuthorized: Bool { AXIsProcessTrusted() }
     private let eventSource = CGEventSource(stateID: .privateState)
+    private let keyboardEventSource = CGEventSource(stateID: .hidSystemState)
     private var isPrimaryButtonDown = false
     private var scrollRemainderX = 0.0
     private var scrollRemainderY = 0.0
@@ -308,11 +309,11 @@ final class RemoteInputController {
     private func type(_ text: String) {
         let characters = Array(text.utf16)
         guard !characters.isEmpty else { return }
-        let down = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: true)
+        let down = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: 0, keyDown: true)
         down?.flags = []
         down?.keyboardSetUnicodeString(stringLength: characters.count, unicodeString: characters)
         down?.post(tap: .cghidEventTap)
-        let up = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: false)
+        let up = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: 0, keyDown: false)
         up?.flags = []
         up?.keyboardSetUnicodeString(stringLength: characters.count, unicodeString: characters)
         up?.post(tap: .cghidEventTap)
@@ -330,7 +331,7 @@ final class RemoteInputController {
         for modifier in selected {
             activeFlags.insert(modifier.flag)
             let event = CGEvent(
-                keyboardEventSource: eventSource,
+                keyboardEventSource: keyboardEventSource,
                 virtualKey: modifier.code,
                 keyDown: true
             )
@@ -338,17 +339,17 @@ final class RemoteInputController {
             event?.post(tap: .cghidEventTap)
         }
 
-        let down = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: true)
+        let down = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: code, keyDown: true)
         down?.flags = activeFlags
         down?.post(tap: .cghidEventTap)
-        let up = CGEvent(keyboardEventSource: eventSource, virtualKey: code, keyDown: false)
+        let up = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: code, keyDown: false)
         up?.flags = activeFlags
         up?.post(tap: .cghidEventTap)
 
         for modifier in selected.reversed() {
             activeFlags.remove(modifier.flag)
             let event = CGEvent(
-                keyboardEventSource: eventSource,
+                keyboardEventSource: keyboardEventSource,
                 virtualKey: modifier.code,
                 keyDown: false
             )

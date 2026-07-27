@@ -19,6 +19,9 @@ final class VideoDisplayController: NSObject {
     private var automaticBackgroundStartEnabled = true
     private var isStartingPictureInPicture = false
     private var pictureInPictureStartWatchdog: Task<Void, Never>?
+    private var pendingSamples: [CMSampleBuffer] = []
+    private var displayDrainTask: Task<Void, Never>?
+    private let maximumPendingSamples = 12
 
     var isPictureInPictureActive: Bool {
         pictureInPictureController?.isPictureInPictureActive == true
@@ -39,7 +42,7 @@ final class VideoDisplayController: NSObject {
             parameterSets = frame.parameterSets
             formatDescription = makeFormatDescription(parameterSets: frame.parameterSets)
             needsKeyFrame = formatDescription == nil
-            view?.flush()
+            resetDisplayQueue()
         }
         guard let formatDescription, !needsKeyFrame || frame.isKeyFrame else { return false }
         guard let sampleBuffer = makeSampleBuffer(
@@ -50,18 +53,50 @@ final class VideoDisplayController: NSObject {
         ) else { return false }
 
         if view?.displayLayer.status == .failed {
-            view?.flush()
+            resetDisplayQueue()
             needsKeyFrame = true
             guard frame.isKeyFrame else { return false }
         }
-        guard view?.displayLayer.isReadyForMoreMediaData == true else { return false }
+
+        // H.264 P-frames depend on the preceding frames. Dropping an arbitrary
+        // frame whenever AVSampleBufferDisplayLayer is briefly busy breaks the
+        // dependency chain and leaves only the periodic keyframes visible
+        // (which looked like a hard 4 FPS cap). Keep a short ordered queue and
+        // drain it as soon as the display layer is ready.
+        if pendingSamples.count >= maximumPendingSamples {
+            resetDisplayQueue()
+            needsKeyFrame = true
+            guard frame.isKeyFrame else { return false }
+        }
         needsKeyFrame = false
-        view?.enqueue(sampleBuffer)
+        pendingSamples.append(sampleBuffer)
+        drainDisplayQueue()
         return true
     }
 
     func flush() {
         needsKeyFrame = true
+        resetDisplayQueue()
+    }
+
+    private func drainDisplayQueue() {
+        guard let view else { return }
+        while !pendingSamples.isEmpty, view.displayLayer.isReadyForMoreMediaData {
+            view.enqueue(pendingSamples.removeFirst())
+        }
+        guard !pendingSamples.isEmpty, displayDrainTask == nil else { return }
+        displayDrainTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(2))
+            guard let self else { return }
+            self.displayDrainTask = nil
+            self.drainDisplayQueue()
+        }
+    }
+
+    private func resetDisplayQueue() {
+        displayDrainTask?.cancel()
+        displayDrainTask = nil
+        pendingSamples.removeAll(keepingCapacity: true)
         view?.flush()
     }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import GameController
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
 
@@ -214,6 +215,8 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private let pointerDoubleClickDistance = 44.0
     private let pointerClickSlop: CGFloat = 8
     private let directTouchClickSlop: CGFloat = 12
+    private var gameControllerControlIsDown = false
+    private var lastControlArrow: (key: String, time: TimeInterval)?
 
     init(
         contentAspectRatio: CGFloat,
@@ -251,6 +254,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             UIAccessibilityCustomAction(name: "Right click", target: self, selector: #selector(accessibilityRightClick))
         ]
         configureGestures()
+        configureHardwareKeyboard()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(inputContextDidBecomeActive(_:)),
@@ -269,11 +273,18 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             name: UIApplication.willResignActiveNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(hardwareKeyboardDidConnect(_:)),
+            name: .GCKeyboardDidConnect,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) { nil }
 
     deinit {
+        GCKeyboard.coalesced?.keyboardInput?.keyChangedHandler = nil
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -311,7 +322,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         case UIKeyCommand.inputRightArrow: key = "right"
         default: return
         }
-        onInput(.key(key, modifiers: ["control"]))
+        sendControlArrow(key)
     }
 
     override var inputView: UIView? {
@@ -344,6 +355,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window != nil {
+            configureHardwareKeyboard()
             reclaimKeyboardFocus()
         } else {
             releaseRemoteButtons()
@@ -369,6 +381,10 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         releaseRemoteButtons()
     }
 
+    @objc private func hardwareKeyboardDidConnect(_ notification: Notification) {
+        configureHardwareKeyboard()
+    }
+
     func insertText(_ text: String) {
         guard let event = RemoteKeyboardInput.event(text: text) else { return }
         onInput(event)
@@ -386,11 +402,55 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
                 unhandled.insert(press)
                 continue
             }
-            onInput(remoteEvent)
+            if remoteEvent.kind == .key,
+               let key = remoteEvent.key,
+               remoteEvent.modifiers?.contains("control") == true,
+               ["up", "down", "left", "right"].contains(key) {
+                sendControlArrow(key)
+            } else {
+                onInput(remoteEvent)
+            }
         }
         if !unhandled.isEmpty {
             super.pressesBegan(unhandled, with: event)
         }
+    }
+
+    private func configureHardwareKeyboard() {
+        guard let keyboardInput = GCKeyboard.coalesced?.keyboardInput else { return }
+        keyboardInput.keyChangedHandler = { [weak self] keyboard, _, keyCode, pressed in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if keyCode == .leftControl || keyCode == .rightControl {
+                    self.gameControllerControlIsDown = pressed
+                    return
+                }
+                let controlIsPressed = self.gameControllerControlIsDown
+                    || keyboard.button(forKeyCode: .leftControl)?.isPressed == true
+                    || keyboard.button(forKeyCode: .rightControl)?.isPressed == true
+                guard pressed, controlIsPressed else { return }
+                let key: String?
+                switch keyCode {
+                case .upArrow: key = "up"
+                case .downArrow: key = "down"
+                case .leftArrow: key = "left"
+                case .rightArrow: key = "right"
+                default: key = nil
+                }
+                if let key { self.sendControlArrow(key) }
+            }
+        }
+    }
+
+    private func sendControlArrow(_ key: String) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let lastControlArrow,
+           lastControlArrow.key == key,
+           now - lastControlArrow.time < 0.08 {
+            return
+        }
+        lastControlArrow = (key, now)
+        onInput(.key(key, modifiers: ["control"]))
     }
 
     private func remoteEvent(for hardwareKey: UIKey) -> RemoteInputEvent? {

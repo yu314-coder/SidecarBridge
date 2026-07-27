@@ -53,6 +53,8 @@ final class PadConnectionModel: ObservableObject {
     @Published var pairingRequired = false
     @Published var pairingMacName = "Mac"
     @Published var pairingError: String?
+    @Published var discoveredMacs: [String] = []
+    @Published var selectedMacName: String?
 
     let videoDisplay = VideoDisplayController()
 
@@ -139,6 +141,9 @@ final class PadConnectionModel: ObservableObject {
             self.status = "Enter the Mac pairing code"
             self.detail = "This one-time code creates a trusted-device credential for future local connections."
         }
+        peers.onDiscoveredMacsChanged = { [weak self] names in
+            self?.discoveredMacs = names
+        }
 
         peers.onConnectionChanged = { [weak self] connected, peerOrError in
             guard let self else { return }
@@ -221,6 +226,16 @@ final class PadConnectionModel: ObservableObject {
     }
 
     var isFileTransferring: Bool { fileTransfer.isBusy }
+
+    func selectMac(_ name: String) {
+        selectedMacName = name
+        pairingRequired = false
+        pairingCode = ""
+        pairingError = nil
+        status = "Connecting to \(name)…"
+        detail = "Establishing an encrypted local session."
+        peers.selectMac(named: name)
+    }
 
     func sendFile(at url: URL) {
         guard isConnected else {

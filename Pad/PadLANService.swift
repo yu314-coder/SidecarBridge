@@ -12,6 +12,7 @@ final class PadLANService {
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
     var onPairingCodeRequired: ((String, String?) -> Void)?
+    var onDiscoveredMacsChanged: (([String]) -> Void)?
 
     private let queue = DispatchQueue(
         label: "SidecarBridge.PadLAN",
@@ -19,6 +20,7 @@ final class PadLANService {
     )
     private var browser: NWBrowser?
     private var endpoints: [NWEndpoint] = []
+    private var selectedMacName: String?
     private var connection: NWConnection?
     private var browserRestartWorkItem: DispatchWorkItem?
     private var idleDiscoveryRefreshWorkItem: DispatchWorkItem?
@@ -121,6 +123,22 @@ final class PadLANService {
         }
     }
 
+    func selectMac(named name: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.selectedMacName = name
+            self.connection?.cancel()
+            self.clearConnection(notify: false)
+            self.nextEndpointIndex = 0
+            self.connectNextAvailable()
+            if self.connection == nil {
+                self.triedCachedHostForBrowser = false
+                self.tryCachedDirectHost()
+                self.scheduleSubnetProbe(after: 0.6)
+            }
+        }
+    }
+
     private func startBrowser() {
         guard browser == nil else { return }
         triedCachedHostForBrowser = false
@@ -134,6 +152,13 @@ final class PadLANService {
             guard let self else { return }
             print("[SidecarBridge/LAN] Bonjour results: \(results.count)")
             self.endpoints = results.map(\.endpoint)
+            let names = self.endpoints.compactMap { endpoint -> String? in
+                guard case let .service(name, _, _, _) = endpoint else { return nil }
+                return name
+            }
+            DispatchQueue.main.async {
+                self.onDiscoveredMacsChanged?(Array(Set(names)).sorted())
+            }
             if !self.endpoints.isEmpty {
                 self.cancelSubnetProbes()
                 self.idleDiscoveryRefreshWorkItem?.cancel()
@@ -188,11 +213,16 @@ final class PadLANService {
     }
 
     private func connectNextAvailable() {
-        guard connection == nil, !endpoints.isEmpty else { return }
-        if nextEndpointIndex >= endpoints.count { nextEndpointIndex = 0 }
-        let endpoint = endpoints[nextEndpointIndex]
+        guard connection == nil, let selectedMacName else { return }
+        let selectableEndpoints = endpoints.filter {
+            guard case let .service(name, _, _, _) = $0 else { return false }
+            return name == selectedMacName
+        }
+        guard !selectableEndpoints.isEmpty else { return }
+        if nextEndpointIndex >= selectableEndpoints.count { nextEndpointIndex = 0 }
+        let endpoint = selectableEndpoints[nextEndpointIndex]
         print("[SidecarBridge/LAN] Connecting to \(endpoint)")
-        nextEndpointIndex = (nextEndpointIndex + 1) % endpoints.count
+        nextEndpointIndex = (nextEndpointIndex + 1) % selectableEndpoints.count
         let parameters = lowLatencyParameters()
         let connection = NWConnection(to: endpoint, using: parameters)
         self.connection = connection
@@ -473,7 +503,8 @@ final class PadLANService {
     /// discovery fallback. The normal Curve25519 handshake and Mac pairing
     /// approval still run before any app data is accepted.
     private func scheduleSubnetProbe(after delay: TimeInterval) {
-        guard !isConnected,
+        guard selectedMacName != nil,
+              !isConnected,
               connection == nil,
               endpoints.isEmpty,
               subnetProbeStartWorkItem == nil,
@@ -489,7 +520,8 @@ final class PadLANService {
     }
 
     private func startSubnetProbe() {
-        guard !isConnected, connection == nil, endpoints.isEmpty else { return }
+        guard selectedMacName != nil,
+              !isConnected, connection == nil, endpoints.isEmpty else { return }
         let hosts = Self.privateIPv4ProbeHosts()
         guard !hosts.isEmpty,
               let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort) else { return }
@@ -539,7 +571,8 @@ final class PadLANService {
     }
 
     private func tryCachedDirectHost() {
-        guard !triedCachedHostForBrowser,
+        guard selectedMacName != nil,
+              !triedCachedHostForBrowser,
               !isConnected,
               connection == nil,
               endpoints.isEmpty,

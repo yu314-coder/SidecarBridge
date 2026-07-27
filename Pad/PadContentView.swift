@@ -230,9 +230,11 @@ struct PadContentView: View {
 
             Divider().overlay(.white.opacity(0.08))
 
+            macSelectionPanel
+
             if model.pairingRequired {
-                pairingCodePanel
                 Divider().overlay(.white.opacity(0.08))
+                pairingCodePanel
             }
 
             ViewThatFits(in: .horizontal) {
@@ -252,6 +254,41 @@ struct PadContentView: View {
                 .stroke((model.localNetworkPermissionNeeded ? Color.orange : Color.cyan).opacity(0.22))
         )
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: model.isDiscoveryTakingLonger)
+    }
+
+    private var macSelectionPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Choose a Mac to connect", systemImage: "macbook.and.iphone")
+                .font(.headline)
+            if model.discoveredMacs.isEmpty {
+                Text("Searching on cable, the local network, and nearby peer-to-peer…")
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.7))
+            } else {
+                ForEach(model.discoveredMacs, id: \.self) { name in
+                    Button {
+                        model.selectMac(name)
+                    } label: {
+                        HStack {
+                            Image(systemName: "desktopcomputer")
+                            Text(name).fontWeight(.semibold)
+                            Spacer()
+                            if model.selectedMacName == name {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.cyan)
+                            } else {
+                                Text("Connect").foregroundStyle(.cyan)
+                            }
+                        }
+                        .padding(.vertical, 7)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Connect securely to \(name)")
+                }
+            }
+        }
+        .padding(16)
+        .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16))
     }
 
     private var pairingCodePanel: some View {

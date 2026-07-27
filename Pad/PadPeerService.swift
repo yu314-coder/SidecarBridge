@@ -11,6 +11,7 @@ final class PadPeerService: NSObject {
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
     var onConnectionHealthChanged: ((String, Int?) -> Void)?
     var onPairingCodeRequired: ((String, String?) -> Void)?
+    var onDiscoveredMacsChanged: (([String]) -> Void)?
 
     private let peerID = MCPeerID(displayName: UIDevice.current.name)
     private var session: MCSession
@@ -32,6 +33,9 @@ final class PadPeerService: NSObject {
     private var peerSupportsHeartbeat = false
     private var pendingMultipeerInput = RemoteInputCoalescer()
     private var multipeerInputDrainScheduled = false
+    private var lanDiscoveredMacs = Set<String>()
+    private var multipeerDiscoveredMacs: [String: MCPeerID] = [:]
+    private var selectedMacName: String?
 
     override init() {
         session = MCSession(
@@ -61,6 +65,11 @@ final class PadPeerService: NSObject {
             self?.fallbackWorkItem?.cancel()
             self?.stopMultipeerFallback()
             self?.onPairingCodeRequired?(macName, error)
+        }
+        lan.onDiscoveredMacsChanged = { [weak self] names in
+            guard let self else { return }
+            self.lanDiscoveredMacs = Set(names)
+            self.publishDiscoveredMacs()
         }
         lan.onConnectionChanged = { [weak self] connected, value in
             guard let self else { return }
@@ -94,6 +103,29 @@ final class PadPeerService: NSObject {
         invitedPeers.removeAll()
         lan.restart()
         scheduleMultipeerFallback()
+    }
+
+    func selectMac(named name: String) {
+        selectedMacName = name
+        invitedPeers.removeAll()
+        lan.selectMac(named: name)
+        if let peer = multipeerDiscoveredMacs[name], let browser {
+            invite(peer, using: browser)
+        }
+    }
+
+    private func publishDiscoveredMacs() {
+        let names = lanDiscoveredMacs.union(multipeerDiscoveredMacs.keys).sorted()
+        onDiscoveredMacsChanged?(names)
+    }
+
+    private func invite(_ peerID: MCPeerID, using browser: MCNearbyServiceBrowser) {
+        guard !invitedPeers.contains(peerID.displayName),
+              session.connectedPeers.isEmpty else { return }
+        invitedPeers.insert(peerID.displayName)
+        let identity = try? JSONEncoder().encode(PadDeviceIdentity.current)
+        browser.invitePeer(peerID, to: session, withContext: identity, timeout: 30)
+        armMultipeerConnectionWatchdog(for: peerID.displayName)
     }
 
     func resumeAfterBackground() {
@@ -375,21 +407,20 @@ final class PadPeerService: NSObject {
 extension PadPeerService: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         DispatchQueue.main.async { [weak self, weak browser] in
-            guard let self, let browser,
-                  self.browser === browser,
-                  !self.invitedPeers.contains(peerID.displayName),
-                  self.session.connectedPeers.isEmpty else { return }
-            print("[SidecarBridge/P2P] Found and inviting \(peerID.displayName)")
-            self.invitedPeers.insert(peerID.displayName)
-            let identity = try? JSONEncoder().encode(PadDeviceIdentity.current)
-            browser.invitePeer(peerID, to: self.session, withContext: identity, timeout: 30)
-            self.armMultipeerConnectionWatchdog(for: peerID.displayName)
+            guard let self, let browser, self.browser === browser else { return }
+            self.multipeerDiscoveredMacs[peerID.displayName] = peerID
+            self.publishDiscoveredMacs()
+            if self.selectedMacName == peerID.displayName {
+                self.invite(peerID, using: browser)
+            }
         }
     }
 
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
         DispatchQueue.main.async { [weak self] in
             self?.invitedPeers.remove(peerID.displayName)
+            self?.multipeerDiscoveredMacs.removeValue(forKey: peerID.displayName)
+            self?.publishDiscoveredMacs()
         }
     }
 

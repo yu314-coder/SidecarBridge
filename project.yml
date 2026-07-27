@@ -8,7 +8,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "14"
+    CURRENT_PROJECT_VERSION: "15"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -95,6 +95,7 @@ targets:
       - sdk: Network.framework
       - sdk: AVFoundation.framework
       - sdk: AVKit.framework
+      - sdk: GameController.framework
       - sdk: Security.framework
 
   SidecarBridgeTests:
