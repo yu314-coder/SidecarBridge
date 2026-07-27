@@ -44,7 +44,11 @@ final class RemoteInputPipeline {
 final class RemoteInputController {
     var isAuthorized: Bool { AXIsProcessTrusted() }
     private let eventSource = CGEventSource(stateID: .privateState)
-    private let keyboardEventSource = CGEventSource(stateID: .hidSystemState)
+    // A nil source makes CoreGraphics derive keyboard state from the current
+    // HID system state. WindowServer's global shortcut recognizer ignores
+    // some explicitly-created synthetic sources even though regular apps
+    // still receive their key events.
+    private let keyboardEventSource: CGEventSource? = nil
     private var isPrimaryButtonDown = false
     private var scrollRemainderX = 0.0
     private var scrollRemainderY = 0.0
@@ -110,7 +114,7 @@ final class RemoteInputController {
             if let text = input.text { type(text) }
         case .key:
             guard let key = input.key, let code = keyCode(for: key) else { return false }
-            press(code: code, modifiers: flags(for: input.modifiers ?? []))
+            return press(code: code, modifiers: flags(for: input.modifiers ?? []))
         }
         return true
     }
@@ -319,7 +323,11 @@ final class RemoteInputController {
         up?.post(tap: .cghidEventTap)
     }
 
-    private func press(code: CGKeyCode, modifiers: CGEventFlags) {
+    @discardableResult
+    private func press(code: CGKeyCode, modifiers: CGEventFlags) -> Bool {
+        if modifiers == .maskControl, (123...126).contains(code) {
+            return postSystemControlArrow(code: code)
+        }
         let modifierKeys: [(flag: CGEventFlags, code: CGKeyCode)] = [
             (.maskCommand, 55),
             (.maskAlternate, 58),
@@ -330,22 +338,56 @@ final class RemoteInputController {
         var activeFlags: CGEventFlags = []
         for modifier in selected {
             activeFlags.insert(modifier.flag)
-            let event = CGEvent(
+            guard let event = CGEvent(
                 keyboardEventSource: keyboardEventSource,
                 virtualKey: modifier.code,
                 keyDown: true
-            )
-            event?.flags = activeFlags
-            event?.post(tap: .cghidEventTap)
+            ) else { return false }
+            event.flags = activeFlags
+            event.post(tap: .cghidEventTap)
+            Thread.sleep(forTimeInterval: 0.006)
         }
 
-        let down = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: code, keyDown: true)
-        down?.flags = activeFlags
-        down?.post(tap: .cghidEventTap)
-        let up = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: code, keyDown: false)
-        up?.flags = activeFlags
-        up?.post(tap: .cghidEventTap)
+        guard let down = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: code, keyDown: true),
+              let up = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: code, keyDown: false) else {
+            releaseModifierKeys(selected, activeFlags: activeFlags)
+            return false
+        }
+        down.flags = activeFlags
+        down.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.008)
+        up.flags = activeFlags
+        up.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.006)
 
+        releaseModifierKeys(selected, activeFlags: activeFlags)
+        return true
+    }
+
+    private func postSystemControlArrow(code: CGKeyCode) -> Bool {
+        // WindowServer deliberately ignores synthesized Quartz events for
+        // Mission Control and Spaces on current macOS releases. Ask the
+        // system keyboard process to perform the user's configured shortcut
+        // instead. The sandbox entitlement limits this Apple Event target to
+        // System Events, and macOS still requires explicit user approval.
+        let script = """
+        tell application "System Events"
+            key code \(code) using control down
+        end tell
+        """
+        var error: NSDictionary?
+        let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
+        if let error {
+            NSLog("SidecarBridge system shortcut failed: %@", error)
+        }
+        return result != nil && error == nil
+    }
+
+    private func releaseModifierKeys(
+        _ selected: [(flag: CGEventFlags, code: CGKeyCode)],
+        activeFlags initialFlags: CGEventFlags
+    ) {
+        var activeFlags = initialFlags
         for modifier in selected.reversed() {
             activeFlags.remove(modifier.flag)
             let event = CGEvent(
@@ -355,6 +397,7 @@ final class RemoteInputController {
             )
             event?.flags = activeFlags
             event?.post(tap: .cghidEventTap)
+            Thread.sleep(forTimeInterval: 0.004)
         }
     }
 

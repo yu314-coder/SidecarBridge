@@ -25,6 +25,7 @@ final class MacConnectionModel: ObservableObject {
     @Published var lastReceivedFile: URL?
     @Published var fileTransferError: String?
     @Published var pairingCode = MacPairingSecurity.shared.pairingCode
+    @Published var shortcutTestStatus = "Not tested in this Mac session"
 
     var localNetworkPermissionNeeded: Bool { localNetworkAccess.needsPermission }
 
@@ -123,6 +124,7 @@ final class MacConnectionModel: ObservableObject {
                 }
                 DispatchQueue.main.async { [weak self] in
                     self?.applyRemoteInputResult(accepted)
+                    self?.recordShortcutResult(event, accepted: accepted, source: "iPad")
                 }
             }
         }
@@ -133,6 +135,31 @@ final class MacConnectionModel: ObservableObject {
     }
 
     var isFileTransferring: Bool { fileTransfer.isBusy }
+
+    func testControlShortcut(_ key: String) {
+        guard ["up", "down", "left", "right"].contains(key) else { return }
+        let event = RemoteInputEvent.key(key, modifiers: ["control"])
+        remoteInput.submit(event) { [weak self] accepted in
+            DispatchQueue.main.async {
+                self?.recordShortcutResult(event, accepted: accepted, source: "Mac test")
+            }
+        }
+    }
+
+    private func recordShortcutResult(
+        _ event: RemoteInputEvent,
+        accepted: Bool,
+        source: String
+    ) {
+        guard event.kind == .key,
+              event.modifiers?.contains("control") == true,
+              let key = event.key,
+              ["up", "down", "left", "right"].contains(key) else { return }
+        let arrow = ["up": "↑", "down": "↓", "left": "←", "right": "→"][key] ?? key
+        shortcutTestStatus = accepted
+            ? "\(source): Control-\(arrow) injected with HID timing"
+            : "\(source): Control-\(arrow) rejected — check Accessibility"
+    }
 
     func chooseFileToSend() {
         guard hasPadPeer else {

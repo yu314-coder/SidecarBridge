@@ -24,6 +24,8 @@
 	<false/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>SidecarBridge uses System Events only to perform the Control-arrow Mission Control and Spaces shortcuts you send from your authorized iPhone or iPad.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_sb-screen._tcp</string>

@@ -13,7 +13,13 @@ struct SidecarBridgeMacApp: App {
         WindowGroup {
             MacContentView(model: model)
                 .frame(minWidth: 760, minHeight: 680)
-                .task { model.start() }
+                .task {
+                    model.start()
+                    if ProcessInfo.processInfo.arguments.contains("--test-control-up") {
+                        try? await Task.sleep(for: .seconds(1))
+                        model.testControlShortcut("up")
+                    }
+                }
         }
         .windowResizability(.contentMinSize)
 

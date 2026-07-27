@@ -25,6 +25,7 @@ struct MacContentView: View {
                     header
                     statusCard
                     modeCards
+                    shortcutTestCard
                     fileTransferCard
                     permissionCard
                     startupCard
@@ -38,6 +39,31 @@ struct MacContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshPermissions()
         }
+    }
+
+    private var shortcutTestCard: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 5) {
+                Label("Mission Control shortcut test", systemImage: "keyboard")
+                    .font(.headline)
+                Text(model.shortcutTestStatus)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.62))
+            }
+            Spacer()
+            ForEach(["left", "right", "down", "up"], id: \.self) { key in
+                Button("⌃\(arrow(for: key))") { model.testControlShortcut(key) }
+                    .buttonStyle(.bordered)
+                    .help("Inject Control-\(arrow(for: key)) locally")
+            }
+        }
+        .padding(16)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+    }
+
+    private func arrow(for key: String) -> String {
+        ["left": "←", "right": "→", "down": "↓", "up": "↑"][key] ?? key
     }
 
     private var header: some View {

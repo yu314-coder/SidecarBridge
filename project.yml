@@ -8,7 +8,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "15"
+    CURRENT_PROJECT_VERSION: "16"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -29,6 +29,7 @@ targets:
           - _sb-screen._tcp
           - _sb-direct._tcp
         NSLocalNetworkUsageDescription: SidecarBridge finds your iPhone or iPad and sends the Mac screen when a local display connection is requested.
+        NSAppleEventsUsageDescription: SidecarBridge uses System Events only to perform the Control-arrow Mission Control and Spaces shortcuts you send from your authorized iPhone or iPad.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
