@@ -44,7 +44,7 @@ final class MacConnectionModel: ObservableObject {
     private var screenRecordingPollTask: Task<Void, Never>?
 
     init() {
-        pairedPeer = UserDefaults.standard.string(forKey: "pairedPeerName")
+        pairedPeer = MacAuthorizedDeviceStore.shared.displaySummary
         refreshLaunchAtLoginStatus()
         remoteInputAuthorized = remoteInput.isAuthorized
         screenRecordingAuthorized = CGPreflightScreenCaptureAccess()
@@ -79,7 +79,7 @@ final class MacConnectionModel: ObservableObject {
                 self.detail = isDirectLAN
                     ? "Waiting for the iPad's selected display mode. Apple Sidecar will not start automatically."
                     : "Waiting for the iPad's selected display mode."
-                self.pairedPeer = UserDefaults.standard.string(forKey: "pairedPeerName")
+                self.pairedPeer = MacAuthorizedDeviceStore.shared.displaySummary
                 self.sendRemoteInputPermissionStatus()
             } else if let peerOrError {
                 self.connectionHealthDetail = "Recovering connection"
@@ -306,7 +306,7 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func forgetPairing() {
-        UserDefaults.standard.removeObject(forKey: "pairedPeerName")
+        MacAuthorizedDeviceStore.shared.forgetAll()
         pairedPeer = nil
     }
 

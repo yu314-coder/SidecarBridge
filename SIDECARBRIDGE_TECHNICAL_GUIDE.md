@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 9** on 2026-07-26.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 12** on 2026-07-27.
 
 ## 1. Purpose
 
@@ -95,7 +95,7 @@ The Mac starts `MacLANService`, which:
 - publishes `_sb-direct._tcp` through Bonjour;
 - includes peer-to-peer interfaces so AWDL can participate;
 - accepts a single active iPad connection;
-- requests one-time pairing approval for an unfamiliar iPad device name.
+- requests Apple device-owner authentication once for each unfamiliar iPhone or iPad app identifier.
 
 The iPad starts `PadLANService`, which:
 
@@ -146,14 +146,16 @@ The direct path uses a small framed protocol in `Shared/LANProtocol.swift`.
 ### 5.1 Handshake
 
 1. The iPad generates an ephemeral Curve25519 key pair.
-2. It sends a client hello containing its device name and public key.
-3. The Mac asks the user to approve an unfamiliar iPad name.
+2. It sends a client hello containing its stable app device identifier, device kind, display name, and public key.
+3. For an unfamiliar identifier, the Mac asks LocalAuthentication to verify the Mac owner with Touch ID or the Mac login password. SidecarBridge never receives or stores the password.
 4. The Mac generates its own ephemeral Curve25519 key pair.
 5. Both peers derive the same 256-bit session key using Curve25519 key agreement and HKDF-SHA256.
 6. The Mac returns its public key in the server hello.
 7. All subsequent control and video packets use ChaChaPoly authenticated encryption.
 
 The HKDF salt binds both public keys and the protocol label `SidecarBridge-LAN-v1`. The shared information label is `screen-and-input`.
+
+The authorization store supports multiple remembered iPhones and iPads. It saves the identifier, device kind, current display name, and last-seen date in the Mac app's local preferences, survives app restarts and updates, and can be cleared with **Forget All**. Existing installations migrate the previously approved peer name on its next matching connection. The same authorization service handles direct LAN and Multipeer invitations, and coalesces simultaneous requests for the same device so only one system prompt appears.
 
 ### 5.2 Framing
 
@@ -229,13 +231,13 @@ The Mac converts the normalized coordinates to the captured display and posts CG
 
 A mouse or trackpad primary press uses a custom continuous indirect-pointer recognizer rather than waiting for competing single- and double-tap recognizers. The recognizer stores UIKit's original event button mask and precise coalesced touch location, follows the began/changed/ended/cancelled state machine, and clears all state in `reset()`. Button-down is transmitted as soon as the physical press begins, stationary press-and-hold remains down, movement produces drag events at up to 120 Hz, and button-up is a reliable release barrier. Ambiguous primary-plus-secondary chords are ignored instead of guessed. Only short presses within an eight-point movement tolerance participate in the next double-click; a drag, long hold, or cancelled press resets that click history. Nearby valid clicks carry click-state values 1 and 2 so macOS still receives a true double-click without delaying the first press. Direct touch and Apple Pencil also provide a 0.22-second hold gesture. The viewer drawer retains separate **Left**, **Double**, and **Right** controls for users who prefer explicit buttons.
 
-Direct finger input uses a separate custom continuous recognizer rather than the Pencil tap/pan recognizers. Touch-down immediately sends an absolute pointer position. Coalesced precise touch samples then move the cursor at up to 120 Hz without pressing the primary button. A short touch-up sends an ordered primary-down/primary-up pair immediately; a second nearby tap uses click-state 2 without delaying the first tap. A dedicated direct-touch long press recognizes after 0.22 seconds, marks the pointer gesture as consumed, and owns primary-down/drag/up until release. A second or third finger cancels the direct-pointer recognizer, allowing two-finger scroll/pinch and three-finger viewport pan to proceed without an accidental click. Pencil tap, double-tap, hold, and pan remain on their prior stylus-only recognizers.
+Direct finger input uses a separate custom continuous recognizer rather than the Pencil tap/pan recognizers. Touch-down does not reposition the Mac cursor. Coalesced precise touch samples become normalized relative deltas at up to 120 Hz, making the surface behave like a trackpad; the Mac applies the delta from the current cursor and clamps it to the display. A short touch-up sends an ordered primary-down/primary-up pair at the current cursor; a second nearby tap uses click-state 2 without delaying the first tap. A dedicated direct-touch long press recognizes after 0.22 seconds, starts primary-down at the current cursor, and then sends relative drag deltas until release. A second or third finger cancels the direct-pointer recognizer, allowing two-finger scroll/pinch and three-finger viewport pan to proceed without an accidental click. Pencil tap, double-tap, hold, and pan retain absolute stylus positioning.
 
 SidecarBridge enables UIKit indirect-input events and reads the active physical button mask at press-begin. The viewer drawer offers **System** and **Swapped** mappings plus a one-click calibration flow: after the user chooses **Calibrate Physical Left Click**, the next reported pointer button is recorded as the intended left button. This compensates inside SidecarBridge when iPadOS or a mouse reports the physical left side as secondary. iPadOS's global mouse mapping remains under Settings → General → Trackpad & Mouse → Secondary Click.
 
 Indirect-pointer dragging starts only when the calibrated mapping resolves UIKit's reported button to primary. A resolved secondary click therefore cannot enter or leave the primary drag state. Hardware keyboard presses are read from `UIKey` events rather than system-routed shortcut commands: printable characters are sent as layout-correct text, while special keys and shortcuts carry only the modifier snapshot for that exact press. The input surface reclaims first-responder status when its window becomes active or key, so typing does not require an extra trackpad click after the user focuses a Mac field with a local mouse. While the right-drawer software-keyboard control is off, the responder uses an empty input view: external keyboards keep receiving key events without automatically opening the iPadOS on-screen keyboard.
 
-The Mac posts remote input through a private `CGEventSource` state table. Apple documents this source type for remote-control applications because its keyboard and mouse state is independent from physical input sources. Input decoding and CGEvent posting run on a dedicated user-interactive serial pipeline instead of the SwiftUI main queue. Before encrypted transmission, a bounded coalescer replaces queued pointer or drag samples with the newest absolute location and accumulates compatible scroll deltas. Scroll begin/end, button-down, button-up, click, and keyboard events remain ordered barriers. Nearby peer delivery uses the low-latency mode only for coalescible motion; all barriers stay reliable. Continuous pointer/drag/scroll acknowledgements are sampled while barriers are always acknowledged, preventing diagnostic traffic and stale samples from competing with current control. Text events explicitly carry no modifier flags, and a shortcut key-up clears its flags, preventing Command, Control, Option, Shift, or Tab behavior from leaking into later text. When the viewer backgrounds, disconnects, or stops streaming, it sends a release-all-buttons event; the Mac additionally emits both left and right mouse-up events before ending the stream.
+The Mac posts remote input through a private `CGEventSource` state table. Apple documents this source type for remote-control applications because its keyboard and mouse state is independent from physical input sources. Input decoding and CGEvent posting run on a dedicated user-interactive serial pipeline instead of the SwiftUI main queue. Before encrypted transmission, a bounded coalescer replaces queued absolute pointer or drag samples with the newest location, accumulates relative finger deltas, and accumulates compatible scroll deltas. Scroll begin/end, button-down, button-up, click, and keyboard events remain ordered barriers. Nearby peer delivery uses the low-latency mode only for coalescible motion; all barriers stay reliable. Continuous pointer/drag/scroll acknowledgements are sampled while barriers are always acknowledged, preventing diagnostic traffic and stale samples from competing with current control. Text events explicitly carry no modifier flags, and a shortcut key-up clears its flags, preventing Command, Control, Option, Shift, or Tab behavior from leaking into later text. When the viewer backgrounds, disconnects, or stops streaming, it sends a release-all-buttons event; the Mac additionally emits both left and right mouse-up events before ending the stream.
 
 Trackpad, mouse-wheel, and direct two-finger scrolling are identified separately. UIKit continuous scrolls carry began/changed/ended/cancelled phases across the protocol, and the Mac marks the generated pixel events with Core Graphics continuous-scroll and phase fields. Discrete mouse-wheel input remains non-continuous and uses a separate scale. Fractional deltas are retained between packets so slow scrolling is not rounded away.
 
@@ -505,7 +507,10 @@ Native Sidecar additionally requires compatible hardware, the same Apple Account
 28. nearby short-click classification for double-click;
 29. long-hold exclusion from the double-click sequence;
 30. drag exclusion from the double-click sequence;
-31. ordered direct-touch pointer and tap barriers.
+31. ordered direct-touch pointer and tap barriers;
+32. relative pointer-delta protocol round trip and accumulation;
+33. current-cursor click encoding without absolute coordinates;
+34. stable iPhone/iPad identity and LAN handshake fields.
 
 Run them with all output on `/Volumes/D`:
 

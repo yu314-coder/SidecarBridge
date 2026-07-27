@@ -203,6 +203,8 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private var secondaryClickTracker = RemoteClickSequenceTracker()
     private var directTouchClickTracker = RemoteClickSequenceTracker()
     private var directTouchStartLocation = CGPoint.zero
+    private var directTouchLastLocation = CGPoint.zero
+    private var directTouchHoldLastLocation = CGPoint.zero
     private var directTouchStartedAt: TimeInterval = 0
     private var directTouchMovedBeyondClickSlop = false
     private var directTouchConsumedByHold = false
@@ -550,11 +552,11 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         switch recognizer.state {
         case .began:
             directTouchStartLocation = location
+            directTouchLastLocation = location
             directTouchStartedAt = ProcessInfo.processInfo.systemUptime
             directTouchMovedBeyondClickSlop = false
             directTouchConsumedByHold = false
             lastPointerTime = 0
-            sendPointer(at: location, force: true)
         case .changed:
             if hypot(
                 location.x - directTouchStartLocation.x,
@@ -563,17 +565,19 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
                 directTouchMovedBeyondClickSlop = true
                 directTouchClickTracker.reset()
             }
-            guard !isPrimaryDragging else { return }
-            sendPointer(at: location)
+            guard !isPrimaryDragging else {
+                directTouchLastLocation = location
+                return
+            }
+            sendRelativePointer(from: directTouchLastLocation, to: location)
+            directTouchLastLocation = location
         case .ended:
             defer {
                 directTouchConsumedByHold = false
                 directTouchMovedBeyondClickSlop = false
             }
             guard !directTouchConsumedByHold else { return }
-            if directTouchMovedBeyondClickSlop {
-                sendPointer(at: location, force: true)
-            } else {
+            if !directTouchMovedBeyondClickSlop {
                 sendDirectTouchClick(at: location)
             }
         case .cancelled, .failed:
@@ -586,7 +590,6 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     private func sendDirectTouchClick(at location: CGPoint) {
-        guard let point = normalizedPoint(location) else { return }
         becomeFirstResponder()
         let now = ProcessInfo.processInfo.systemUptime
         let count = directTouchClickTracker.nextCount(
@@ -605,8 +608,8 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             interval: pointerDoubleClickInterval,
             movedBeyondClickSlop: false
         )
-        onInput(.primaryDown(x: point.x, y: point.y, clickCount: count))
-        onInput(.primaryUp(x: point.x, y: point.y, clickCount: count))
+        onInput(.primaryDownAtCurrentPointer(clickCount: count))
+        onInput(.primaryUp(clickCount: count))
     }
 
     @objc private func handlePointerPress(_ recognizer: PointerPressGestureRecognizer) {
@@ -762,7 +765,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let point = recognizer.location(in: self)
         switch recognizer.state {
         case .began:
-            guard !isPrimaryDragging, let normalized = normalizedPoint(point) else { return }
+            guard !isPrimaryDragging else { return }
             becomeFirstResponder()
             if (recognizer as? RemoteHoldGestureRecognizer)?.consumesDirectTouch == true {
                 directTouchConsumedByHold = true
@@ -771,15 +774,14 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             activePrimaryClickCount = 1
             isPrimaryDragging = true
             lastPointerTime = 0
-            onInput(.primaryDown(x: normalized.x, y: normalized.y))
+            directTouchHoldLastLocation = point
+            onInput(.primaryDownAtCurrentPointer())
         case .changed:
-            guard isPrimaryDragging, let normalized = normalizedPoint(point) else { return }
-            let now = ProcessInfo.processInfo.systemUptime
-            guard now - lastPointerTime >= pointerEmissionInterval else { return }
-            lastPointerTime = now
-            onInput(.primaryDrag(x: normalized.x, y: normalized.y))
+            guard isPrimaryDragging else { return }
+            sendRelativePointer(from: directTouchHoldLastLocation, to: point)
+            directTouchHoldLastLocation = point
         case .ended, .cancelled, .failed:
-            finishPrimaryDrag(at: normalizedPoint(point))
+            finishPrimaryDrag(at: nil)
         default:
             break
         }
@@ -830,6 +832,15 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         guard force || now - lastPointerTime >= pointerEmissionInterval else { return }
         lastPointerTime = now
         onInput(.pointer(x: normalized.x, y: normalized.y))
+    }
+
+    private func sendRelativePointer(from previous: CGPoint, to current: CGPoint, force: Bool = false) {
+        guard let delta = normalizedDelta(from: previous, to: current) else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard force || now - lastPointerTime >= pointerEmissionInterval else { return }
+        lastPointerTime = now
+        guard delta != .zero else { return }
+        onInput(.pointerDelta(x: delta.x, y: delta.y))
     }
 
     @objc private func handlePrimaryClick(_ recognizer: UITapGestureRecognizer) {
@@ -931,6 +942,22 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         return CGPoint(
             x: (point.x - contentRect.minX) / contentRect.width,
             y: (point.y - contentRect.minY) / contentRect.height
+        )
+    }
+
+    private func normalizedDelta(from previous: CGPoint, to current: CGPoint) -> CGPoint? {
+        guard bounds.width > 0, bounds.height > 0, contentAspectRatio > 0 else { return nil }
+        let viewAspect = bounds.width / bounds.height
+        let contentSize: CGSize
+        if viewAspect > contentAspectRatio {
+            contentSize = CGSize(width: bounds.height * contentAspectRatio, height: bounds.height)
+        } else {
+            contentSize = CGSize(width: bounds.width, height: bounds.width / contentAspectRatio)
+        }
+        let scale = max(zoomScale, 1)
+        return CGPoint(
+            x: (current.x - previous.x) / max(contentSize.width * scale, 1),
+            y: (current.y - previous.y) / max(contentSize.height * scale, 1)
         )
     }
 }

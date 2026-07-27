@@ -74,9 +74,11 @@ final class RemoteInputController {
         case .pointerMove:
             guard let x = input.x, let y = input.y else { return false }
             movePointer(x: x, y: y)
+        case .pointerDelta:
+            guard let x = input.deltaX, let y = input.deltaY else { return false }
+            movePointerBy(x: x, y: y)
         case .primaryDown:
-            guard let x = input.x, let y = input.y else { return false }
-            primaryButtonDown(x: x, y: y, clickCount: input.clickCount ?? 1)
+            primaryButtonDown(x: input.x, y: input.y, clickCount: input.clickCount ?? 1)
         case .primaryDrag:
             guard let x = input.x, let y = input.y else { return false }
             primaryButtonDrag(x: x, y: y, clickCount: input.clickCount ?? 1)
@@ -146,6 +148,23 @@ final class RemoteInputController {
         event?.post(tap: .cghidEventTap)
     }
 
+    private func movePointerBy(x: Double, y: Double) {
+        guard let current = CGEvent(source: nil)?.location else { return }
+        let bounds = CGDisplayBounds(CGMainDisplayID())
+        let sensitivity = 1.15
+        let point = CGPoint(
+            x: min(max(current.x + x * bounds.width * sensitivity, bounds.minX), bounds.maxX - 1),
+            y: min(max(current.y + y * bounds.height * sensitivity, bounds.minY), bounds.maxY - 1)
+        )
+        let event = CGEvent(
+            mouseEventSource: eventSource,
+            mouseType: isPrimaryButtonDown ? .leftMouseDragged : .mouseMoved,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        )
+        event?.post(tap: .cghidEventTap)
+    }
+
     private func click(button: CGMouseButton, count: Int = 1) {
         guard let location = CGEvent(source: nil)?.location else { return }
         if button == .right, isPrimaryButtonDown {
@@ -174,8 +193,13 @@ final class RemoteInputController {
         }
     }
 
-    private func primaryButtonDown(x: Double, y: Double, clickCount: Int) {
-        let point = displayPoint(x: x, y: y)
+    private func primaryButtonDown(x: Double?, y: Double?, clickCount: Int) {
+        let point: CGPoint
+        if let x, let y {
+            point = displayPoint(x: x, y: y)
+        } else {
+            point = CGEvent(source: nil)?.location ?? .zero
+        }
         if isPrimaryButtonDown {
             CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
         }

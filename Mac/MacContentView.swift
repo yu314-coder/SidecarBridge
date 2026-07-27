@@ -201,8 +201,8 @@ struct MacContentView: View {
 
             if let peer = model.pairedPeer {
                 Divider().overlay(.white.opacity(0.08))
-                PermissionRow(icon: "ipad", title: "Paired iPad", detail: peer, isReady: true) {
-                    Button("Forget") { model.forgetPairing() }
+                PermissionRow(icon: "ipad.and.iphone", title: "Authorized devices", detail: peer, isReady: true) {
+                    Button("Forget All") { model.forgetPairing() }
                 }
             }
         }

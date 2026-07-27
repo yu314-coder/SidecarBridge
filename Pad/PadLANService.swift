@@ -213,8 +213,10 @@ final class PadLANService {
         do {
             guard let privateKey else { return }
             let hello = LANHandshake(
-                deviceName: UIDevice.current.name,
-                publicKey: privateKey.publicKey.rawRepresentation
+                deviceName: PadDeviceIdentity.current.deviceName,
+                publicKey: privateKey.publicKey.rawRepresentation,
+                deviceID: PadDeviceIdentity.current.deviceID,
+                deviceKind: PadDeviceIdentity.current.deviceKind
             )
             connection.send(
                 content: try LANWire.handshake(hello, marker: LANWire.clientHello),

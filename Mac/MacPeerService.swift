@@ -406,24 +406,13 @@ extension MacPeerService: MCNearbyServiceAdvertiserDelegate {
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
         onP2PStateChanged?(.connecting(peerID.displayName))
-        let paired = UserDefaults.standard.string(forKey: "pairedPeerName")
-        if paired == peerID.displayName {
-            invitationHandler(true, session)
-            return
-        }
-
+        let identity = context
+            .flatMap { try? JSONDecoder().decode(BridgePeerIdentity.self, from: $0) }
+            ?? BridgePeerIdentity(deviceID: "", deviceName: peerID.displayName, deviceKind: "iOS device")
         DispatchQueue.main.async {
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            let alert = NSAlert()
-            alert.messageText = "Pair with \(peerID.displayName)?"
-            alert.informativeText = "Allow this iPad to request Sidecar, receive your Mac screen, send input, and exchange files you choose."
-            alert.addButton(withTitle: "Pair")
-            alert.addButton(withTitle: "Cancel")
-            let accepted = alert.runModal() == .alertFirstButtonReturn
-            if accepted {
-                UserDefaults.standard.set(peerID.displayName, forKey: "pairedPeerName")
+            MacDeviceAuthorizer.shared.authorize(identity) { accepted in
+                invitationHandler(accepted, accepted ? self.session : nil)
             }
-            invitationHandler(accepted, accepted ? self.session : nil)
         }
     }
 

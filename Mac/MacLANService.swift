@@ -200,7 +200,12 @@ final class MacLANService {
             let hello = try LANWire.decodeHandshake(payload, marker: LANWire.clientHello)
             handshakeTimeoutWorkItem?.cancel()
             handshakeTimeoutWorkItem = nil
-            requestApproval(for: hello.deviceName) { [weak self, weak activeConnection] accepted in
+            let identity = BridgePeerIdentity(
+                deviceID: hello.deviceID ?? "",
+                deviceName: hello.deviceName,
+                deviceKind: hello.deviceKind ?? "iOS device"
+            )
+            requestApproval(for: identity) { [weak self, weak activeConnection] accepted in
                 guard let self, let activeConnection, self.connection === activeConnection else { return }
                 guard accepted else {
                     activeConnection.cancel()
@@ -258,23 +263,11 @@ final class MacLANService {
         }
     }
 
-    private func requestApproval(for deviceName: String, completion: @escaping (Bool) -> Void) {
-        let paired = UserDefaults.standard.string(forKey: "pairedPeerName")
-        guard paired != deviceName else {
-            completion(true)
-            return
-        }
-
+    private func requestApproval(for identity: BridgePeerIdentity, completion: @escaping (Bool) -> Void) {
         DispatchQueue.main.async {
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            let alert = NSAlert()
-            alert.messageText = "Pair with \(deviceName) over Wi-Fi?"
-            alert.informativeText = "Allow this iPad to receive the Mac screen, send keyboard or trackpad input, and exchange files you choose on this local network."
-            alert.addButton(withTitle: "Pair")
-            alert.addButton(withTitle: "Cancel")
-            let accepted = alert.runModal() == .alertFirstButtonReturn
-            if accepted { UserDefaults.standard.set(deviceName, forKey: "pairedPeerName") }
-            self.queue.async { completion(accepted) }
+            MacDeviceAuthorizer.shared.authorize(identity) { accepted in
+                self.queue.async { completion(accepted) }
+            }
         }
     }
 

@@ -4,6 +4,8 @@ import Foundation
 struct LANHandshake: Codable {
     let deviceName: String
     let publicKey: Data
+    var deviceID: String? = nil
+    var deviceKind: String? = nil
 }
 
 enum LANWire {

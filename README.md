@@ -29,7 +29,7 @@ In Xcode:
 1. Select the `SidecarBridgeMac` target, choose your Apple development team, then run it on **My Mac**.
 2. Select `SidecarBridgePad`, choose the same or another valid development team, then run it on an iPhone or iPad.
 3. Accept **Local Network** on both devices.
-4. The first time the mobile device finds the Mac, approve the one-time pairing alert on the Mac.
+4. The first time each mobile device finds the Mac, approve the system Touch ID or Mac login-password prompt. SidecarBridge remembers that iPhone or iPad for later connections without asking again.
 5. If the fallback is needed, grant **Screen Recording** to SidecarBridge on the Mac, quit it, and reopen it.
 
 For automatic startup, use the **Automatic startup** card in the Mac app. It distinguishes enabled, disabled, and macOS-approval-required states. If the app was moved or rebuilt after startup was enabled, click **Repair** once so the Login Item points to `/Volumes/D/Applications/SidecarBridge.app` instead of an old Xcode build.
@@ -40,7 +40,7 @@ If the app reports `NoAuth`, macOS or iOS/iPadOS has denied Local Network access
 
 ### iPhone support
 
-Build 9 is universal (`TARGETED_DEVICE_FAMILY = 1,2`). iPhone provides the encrypted in-app display, touch input, discovery, settings, file transfer, zoom, and background Picture in Picture controls. Apple System Sidecar is an iPad-only feature, so SidecarBridge hides that mode on iPhone instead of presenting a control that cannot work.
+Build 12 is universal (`TARGETED_DEVICE_FAMILY = 1,2`). iPhone provides the encrypted in-app display, touch input, discovery, settings, file transfer, zoom, and background Picture in Picture controls. Apple System Sidecar is an iPad-only feature, so SidecarBridge hides that mode on iPhone instead of presenting a control that cannot work.
 
 ## What is and is not possible
 
@@ -54,7 +54,7 @@ The code automatically falls back instead of trying to bypass iPadOS security:
 - `CableDetector` checks the USB registry and prefers wired transport.
 - `ScreenStreamer` uses Apple's public ScreenCaptureKit API.
 - `MacLANService` and `PadLANService` use Bonjour plus Network.framework so the paired apps can connect on the same Wi-Fi even if Apple's Sidecar device list is empty. If a router filters Bonjour multicast, the iPad first retries the last successful private Mac address and then performs a bounded private-`/24` probe for SidecarBridge's fixed encrypted port `45454`.
-- The two apps use an encrypted Multipeer Connectivity session and remember the approved iPad name for automatic reconnection.
+- The two apps use an encrypted Multipeer Connectivity session and remember each approved iPhone or iPad by its stable app device identifier for automatic reconnection.
 
 The fallback is a hardware-encoded H.264 HiDPI stream sized from the iPad's native display width (clamped to 1440–2880 pixels, up to 30 fps) with optional remote keyboard, trackpad, touch, and Apple Pencil input. JPEG packets remain supported for compatibility. It mirrors the main display rather than creating a true extra macOS display. Native Sidecar remains the preferred path for a true virtual Retina display, native Apple Pencil behavior, audio, and extended-desktop support.
 
@@ -74,7 +74,7 @@ The iPad viewer forwards a trackpad or mouse primary button-down immediately, ke
 
 Continuous pointer, drag, and scroll samples are coalesced before encrypted transmission: when the link is busy, SidecarBridge keeps the newest cursor/drag location and accumulated scroll distance instead of queueing stale motion. Button-down, button-up, click, scroll begin/end, and keyboard events remain ordered barriers. This keeps control responsive during momentary Wi-Fi or peer-to-peer congestion without losing press-and-hold state.
 
-Finger input does not share the delayed tap recognizers used by Apple Pencil. Touch-down immediately places the remote cursor at that screen position, one-finger movement follows the latest precise touch sample without holding the mouse button, and touch-up emits a click immediately when the finger stayed within the tap tolerance. A second nearby tap carries macOS click-state 2 without delaying the first click. Holding still for 0.22 seconds transfers control to the long-press recognizer, which sends button-down and then drag events until release. Adding a second or third finger cancels the one-finger pointer gesture so scrolling, zooming, and viewport panning do not create accidental clicks.
+Finger input does not share the delayed tap recognizers used by Apple Pencil. Touch-down leaves the Mac cursor where it is, and one-finger movement sends relative deltas so the finger behaves like a trackpad instead of teleporting the cursor beneath the touch. Touch-up clicks at the current cursor when the finger stayed within the tap tolerance. A second nearby tap carries macOS click-state 2 without delaying the first click. Holding still for 0.22 seconds starts a drag at the current cursor, then relative movement drags until release. Adding a second or third finger cancels the one-finger pointer gesture so scrolling, zooming, and viewport panning do not create accidental clicks.
 
 ### Viewer zoom and file transfer
 
@@ -102,6 +102,7 @@ Files can move in either direction over the active encrypted same-Wi-Fi/AWDL or 
 
 - Multipeer Connectivity encryption is required.
 - Direct-LAN file chunks use the same Curve25519/HKDF/ChaChaPoly session as display and input packets.
-- The Mac asks before pairing with a new iPad peer name and automatically accepts that name later.
-- Peer names are convenient identifiers, not strong cryptographic device identities. Use this on a trusted local network.
+- The Mac uses Apple's system device-owner authentication for the first connection from each iPhone or iPad. Touch ID or the Mac login password is evaluated by macOS and is never stored by SidecarBridge.
+- After approval, the Mac stores the mobile app's stable identifier, device kind, display name, and last-seen date locally. App relaunches and updates retain authorization; **Forget All** revokes every remembered device.
+- The stable identifier recognizes devices more reliably than a peer name, but it is app-generated rather than hardware-attested. Use this on a trusted local network.
 - Public-Internet streaming would need authenticated identities, certificate pinning, a relay/VPN path, and stronger session authorization; it is deliberately outside this MVP.

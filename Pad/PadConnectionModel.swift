@@ -375,6 +375,14 @@ final class PadConnectionModel: ObservableObject {
                 x: min(max(x, 0), 1),
                 y: min(max(y, 0), 1)
             )
+        } else if input.kind == .pointerDelta,
+                  let deltaX = input.deltaX,
+                  let deltaY = input.deltaY {
+            let current = remotePointer ?? CGPoint(x: 0.5, y: 0.5)
+            remotePointer = CGPoint(
+                x: min(max(current.x + deltaX, 0), 1),
+                y: min(max(current.y + deltaY, 0), 1)
+            )
         }
 
         switch input.kind {

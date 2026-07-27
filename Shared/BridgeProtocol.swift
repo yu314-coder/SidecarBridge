@@ -6,6 +6,18 @@ enum BridgeConstants {
     static let directPort: UInt16 = 45_454
 }
 
+struct BridgePeerIdentity: Codable, Equatable {
+    let deviceID: String
+    let deviceName: String
+    let deviceKind: String
+
+    var stableKey: String {
+        let trimmedID = deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedID.isEmpty { return trimmedID }
+        return "\(deviceKind.lowercased()):\(deviceName.lowercased())"
+    }
+}
+
 enum LocalNetworkAccessState: Equatable {
     case checking
     case granted
@@ -37,6 +49,7 @@ struct ControlMessage: Codable, Equatable {
 
 enum RemoteInputKind: String, Codable, Equatable {
     case pointerMove
+    case pointerDelta
     case primaryDown
     case primaryDrag
     case primaryUp
@@ -94,6 +107,10 @@ struct RemoteInputEvent: Codable, Equatable {
         Self(kind: .pointerMove, sequence: nil, x: x, y: y)
     }
 
+    static func pointerDelta(x: Double, y: Double) -> Self {
+        Self(kind: .pointerDelta, sequence: nil, deltaX: x, deltaY: y)
+    }
+
     static func click(secondary: Bool = false, x: Double? = nil, y: Double? = nil) -> Self {
         Self(kind: secondary ? .secondaryClick : .primaryClick, sequence: nil, x: x, y: y)
     }
@@ -109,6 +126,10 @@ struct RemoteInputEvent: Codable, Equatable {
 
     static func primaryDown(x: Double, y: Double, clickCount: Int = 1) -> Self {
         Self(kind: .primaryDown, sequence: nil, x: x, y: y, clickCount: max(clickCount, 1))
+    }
+
+    static func primaryDownAtCurrentPointer(clickCount: Int = 1) -> Self {
+        Self(kind: .primaryDown, sequence: nil, clickCount: max(clickCount, 1))
     }
 
     static func primaryDrag(x: Double, y: Double, clickCount: Int = 1) -> Self {
@@ -154,7 +175,7 @@ struct RemoteInputEvent: Codable, Equatable {
 
     var isContinuousInput: Bool {
         switch kind {
-        case .pointerMove, .primaryDrag, .scroll:
+        case .pointerMove, .pointerDelta, .primaryDrag, .scroll:
             return true
         default:
             return false
@@ -168,7 +189,7 @@ struct RemoteInputEvent: Codable, Equatable {
 
     var isCoalescibleInput: Bool {
         switch kind {
-        case .pointerMove, .primaryDrag:
+        case .pointerMove, .pointerDelta, .primaryDrag:
             return true
         case .scroll:
             return scrollPhase == nil || scrollPhase == .changed
@@ -197,6 +218,15 @@ struct RemoteInputCoalescer {
         case .pointerMove, .primaryDrag:
             if let index = candidateIndices.first(where: { pending[$0].kind == input.kind }) {
                 pending[index] = input
+            } else {
+                pending.append(input)
+            }
+        case .pointerDelta:
+            if let index = candidateIndices.first(where: { pending[$0].kind == .pointerDelta }) {
+                var accumulated = input
+                accumulated.deltaX = (pending[index].deltaX ?? 0) + (input.deltaX ?? 0)
+                accumulated.deltaY = (pending[index].deltaY ?? 0) + (input.deltaY ?? 0)
+                pending[index] = accumulated
             } else {
                 pending.append(input)
             }

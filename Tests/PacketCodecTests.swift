@@ -86,6 +86,51 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(message.remoteInputEvent, input)
     }
 
+    func testRelativePointerRoundTripAndCoalescing() throws {
+        let first = RemoteInputEvent.pointerDelta(x: 0.02, y: -0.01)
+        let second = RemoteInputEvent.pointerDelta(x: 0.03, y: 0.04)
+        let message = try XCTUnwrap(ControlMessage.input(first))
+        XCTAssertEqual(message.remoteInputEvent, first)
+
+        var coalescer = RemoteInputCoalescer()
+        coalescer.enqueue(first)
+        coalescer.enqueue(second)
+        let accumulated = try XCTUnwrap(coalescer.popFirst())
+        XCTAssertEqual(accumulated.kind, .pointerDelta)
+        XCTAssertEqual(accumulated.deltaX ?? 0, 0.05, accuracy: 0.000_001)
+        XCTAssertEqual(accumulated.deltaY ?? 0, 0.03, accuracy: 0.000_001)
+    }
+
+    func testCurrentPointerClickDoesNotCarryAbsoluteCoordinates() {
+        let input = RemoteInputEvent.primaryDownAtCurrentPointer(clickCount: 2)
+        XCTAssertEqual(input.kind, .primaryDown)
+        XCTAssertNil(input.x)
+        XCTAssertNil(input.y)
+        XCTAssertEqual(input.clickCount, 2)
+    }
+
+    func testDeviceIdentityAndLANHandshakeRoundTrip() throws {
+        let identity = BridgePeerIdentity(
+            deviceID: "stable-device-id",
+            deviceName: "Euler’s iPhone",
+            deviceKind: "iPhone"
+        )
+        XCTAssertEqual(identity.stableKey, "stable-device-id")
+
+        let handshake = LANHandshake(
+            deviceName: identity.deviceName,
+            publicKey: Data([1, 2, 3]),
+            deviceID: identity.deviceID,
+            deviceKind: identity.deviceKind
+        )
+        let framed = try LANWire.handshake(handshake, marker: LANWire.clientHello)
+        var buffer = framed
+        let payload = try XCTUnwrap(LANWire.takeFrames(from: &buffer).first)
+        let decoded = try LANWire.decodeHandshake(payload, marker: LANWire.clientHello)
+        XCTAssertEqual(decoded.deviceID, identity.deviceID)
+        XCTAssertEqual(decoded.deviceKind, "iPhone")
+    }
+
     func testRemoteKeyboardModifiersAreCanonicalAndDoNotLeakUnknownFlags() {
         let input = RemoteInputEvent.key(
             "c",

@@ -8,7 +8,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "11"
+    CURRENT_PROJECT_VERSION: "12"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -47,6 +47,7 @@ targets:
       - sdk: IOKit.framework
       - sdk: Network.framework
       - sdk: VideoToolbox.framework
+      - sdk: LocalAuthentication.framework
 
   SidecarBridgePad:
     type: application

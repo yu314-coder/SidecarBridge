@@ -371,7 +371,8 @@ extension PadPeerService: MCNearbyServiceBrowserDelegate {
                   self.session.connectedPeers.isEmpty else { return }
             print("[SidecarBridge/P2P] Found and inviting \(peerID.displayName)")
             self.invitedPeers.insert(peerID.displayName)
-            browser.invitePeer(peerID, to: self.session, withContext: nil, timeout: 30)
+            let identity = try? JSONEncoder().encode(PadDeviceIdentity.current)
+            browser.invitePeer(peerID, to: self.session, withContext: identity, timeout: 30)
             self.armMultipeerConnectionWatchdog(for: peerID.displayName)
         }
     }

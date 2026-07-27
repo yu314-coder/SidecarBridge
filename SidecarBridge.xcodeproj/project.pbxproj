@@ -11,6 +11,7 @@
 		0A6EC89FFFAC699185EA8EB6 /* PacketCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C270B0D7506B1B8A83205AC3 /* PacketCodecTests.swift */; };
 		0F1A65FF0EB6D78056A41646 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6931674BFB3F75F81BCA5C59 /* Network.framework */; };
 		136F9FBF23D970658AD94CAD /* ScreenStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */; };
+		20B298BCDAC275DC4E471CF0 /* LocalAuthentication.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F3E2A19AD0FE529BC023FD81 /* LocalAuthentication.framework */; };
 		28409B33478CD0C30D1765CC /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
 		34BD90A03AAF1334454D9850 /* PadContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B074CA5AC5C67EC30F9A42EA /* PadContentView.swift */; };
 		35BF87461BAD13C706604E5A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 722C341A866CEB112E6AE410 /* Assets.xcassets */; };
@@ -45,8 +46,10 @@
 		D2ABD59672AAD0121B799154 /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
 		DBFF6D618AFB812BC3F5EDC0 /* RemoteInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD3847ACDC7DFFDCCBAC490 /* RemoteInputController.swift */; };
 		DDD681F579FE17C68A57FF20 /* RemoteInputSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */; };
+		E277CF7C68908D7AB4FA2DC6 /* MacDeviceAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC5BF383941F9C156E7F434 /* MacDeviceAuthorization.swift */; };
 		EF96FEDBEB9021AEBB5607E4 /* VideoDisplaySurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECEBB8AE7F4ECF8E0D6ADF61 /* VideoDisplaySurface.swift */; };
 		FBDC2A47CAC1ACB40AA3BCDF /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */; };
+		FEF077EFBA61BCD06B63DB8C /* PadDeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C73B3B16472356E5FE1B1A58 /* PadDeviceIdentity.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -63,6 +66,7 @@
 		46C55DE7760B526EE98A4C2A /* H264Encoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = H264Encoder.swift; sourceTree = "<group>"; };
 		487CD2D42D52E0E526CCA155 /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = System/Library/Frameworks/AVKit.framework; sourceTree = SDKROOT; };
 		5BFDF69103D50AB830DBBC34 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		5DC5BF383941F9C156E7F434 /* MacDeviceAuthorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacDeviceAuthorization.swift; sourceTree = "<group>"; };
 		5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteInputSurface.swift; sourceTree = "<group>"; };
 		6931674BFB3F75F81BCA5C59 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
 		722C341A866CEB112E6AE410 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -83,11 +87,13 @@
 		C128FA50735B8EF865A75273 /* BridgeProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeProtocol.swift; sourceTree = "<group>"; };
 		C215B5E7806DF0EE7746B9C6 /* ScreenCaptureKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ScreenCaptureKit.framework; path = System/Library/Frameworks/ScreenCaptureKit.framework; sourceTree = SDKROOT; };
 		C270B0D7506B1B8A83205AC3 /* PacketCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketCodecTests.swift; sourceTree = "<group>"; };
+		C73B3B16472356E5FE1B1A58 /* PadDeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadDeviceIdentity.swift; sourceTree = "<group>"; };
 		CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LANProtocol.swift; sourceTree = "<group>"; };
 		CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
 		E5E700FBB5674124211D2524 /* PadConnectionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadConnectionModel.swift; sourceTree = "<group>"; };
 		E7C4B161D91984971FF7309C /* PadPeerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadPeerService.swift; sourceTree = "<group>"; };
 		ECEBB8AE7F4ECF8E0D6ADF61 /* VideoDisplaySurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDisplaySurface.swift; sourceTree = "<group>"; };
+		F3E2A19AD0FE529BC023FD81 /* LocalAuthentication.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = LocalAuthentication.framework; path = System/Library/Frameworks/LocalAuthentication.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -112,6 +118,7 @@
 				6E72D6AC0274182E61F5780D /* IOKit.framework in Frameworks */,
 				6F1F78888D0A2E48006FFAAF /* Network.framework in Frameworks */,
 				BB94E33810371F48190B51FF /* VideoToolbox.framework in Frameworks */,
+				20B298BCDAC275DC4E471CF0 /* LocalAuthentication.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -127,6 +134,7 @@
 				34875BE7BD3F9883AEFE56C5 /* Info.plist */,
 				A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */,
 				4316F908EA1732F27087B925 /* MacContentView.swift */,
+				5DC5BF383941F9C156E7F434 /* MacDeviceAuthorization.swift */,
 				74E92BAEB461529898894895 /* MacLANService.swift */,
 				068FB904EF6CA41BBDCF4992 /* MacPeerService.swift */,
 				0DD3847ACDC7DFFDCCBAC490 /* RemoteInputController.swift */,
@@ -162,6 +170,7 @@
 				B5BBAA34470E4D405231752F /* AVFoundation.framework */,
 				487CD2D42D52E0E526CCA155 /* AVKit.framework */,
 				74310F8BF9315A1BF696394D /* IOKit.framework */,
+				F3E2A19AD0FE529BC023FD81 /* LocalAuthentication.framework */,
 				9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */,
 				6931674BFB3F75F81BCA5C59 /* Network.framework */,
 				C215B5E7806DF0EE7746B9C6 /* ScreenCaptureKit.framework */,
@@ -178,6 +187,7 @@
 				ADB37E6EB752E6F75FD00F27 /* Info.plist */,
 				E5E700FBB5674124211D2524 /* PadConnectionModel.swift */,
 				B074CA5AC5C67EC30F9A42EA /* PadContentView.swift */,
+				C73B3B16472356E5FE1B1A58 /* PadDeviceIdentity.swift */,
 				0D9BF92830E37416BC52E328 /* PadLANService.swift */,
 				E7C4B161D91984971FF7309C /* PadPeerService.swift */,
 				2688DB8C49E0676ABEF1A885 /* PrivacyInfo.xcprivacy */,
@@ -354,6 +364,7 @@
 				28409B33478CD0C30D1765CC /* LANProtocol.swift in Sources */,
 				6611C2566550F8C25E509AC5 /* MacConnectionModel.swift in Sources */,
 				80FA3B6C5CA37DA293EDEE78 /* MacContentView.swift in Sources */,
+				E277CF7C68908D7AB4FA2DC6 /* MacDeviceAuthorization.swift in Sources */,
 				B83F67487E628FE3195562CA /* MacLANService.swift in Sources */,
 				05C40EDEFB916FC2A2DEB7A4 /* MacPeerService.swift in Sources */,
 				DBFF6D618AFB812BC3F5EDC0 /* RemoteInputController.swift in Sources */,
@@ -372,6 +383,7 @@
 				4179193B540F02A36A7DF0DF /* LANProtocol.swift in Sources */,
 				4682C7105E7B6FAA8AA0113E /* PadConnectionModel.swift in Sources */,
 				34BD90A03AAF1334454D9850 /* PadContentView.swift in Sources */,
+				FEF077EFBA61BCD06B63DB8C /* PadDeviceIdentity.swift in Sources */,
 				44778D308D034459FF6C8C19 /* PadLANService.swift in Sources */,
 				4785F5679556954F23F87DBB /* PadPeerService.swift in Sources */,
 				DDD681F579FE17C68A57FF20 /* RemoteInputSurface.swift in Sources */,
@@ -417,7 +429,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = LYK4LV2859;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -586,7 +598,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = LYK4LV2859;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
