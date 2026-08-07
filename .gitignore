@@ -4,6 +4,8 @@
 .signed-*/
 DerivedData/
 .codex-build/
+/.codex-tools/
+/.pip-cache/
 *.xcresult/
 *.xcuserstate
 xcuserdata/

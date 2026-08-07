@@ -8,7 +8,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "16"
+    CURRENT_PROJECT_VERSION: "38"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -28,15 +28,18 @@ targets:
         NSBonjourServices:
           - _sb-screen._tcp
           - _sb-direct._tcp
-        NSLocalNetworkUsageDescription: SidecarBridge finds your iPhone or iPad and sends the Mac screen when a local display connection is requested.
-        NSAppleEventsUsageDescription: SidecarBridge uses System Events only to perform the Control-arrow Mission Control and Spaces shortcuts you send from your authorized iPhone or iPad.
+        NSLocalNetworkUsageDescription: SidecarBridge advertises an encrypted local display service and accepts an incoming connection from the iPhone or iPad you select.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
         PRODUCT_NAME: SidecarBridge
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SIDECARBRIDGE_APP_STORE_SAFE
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Mac/SidecarBridgeMac.entitlements
         ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        DEAD_CODE_STRIPPING: YES
+        COPY_PHASE_STRIP: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Accessibility/TCC must identify the real app executable, not Xcode's
         # debug-dylib launcher arrangement.
@@ -45,11 +48,52 @@ targets:
       - sdk: ScreenCaptureKit.framework
       - sdk: MultipeerConnectivity.framework
       - sdk: ServiceManagement.framework
-      - sdk: IOKit.framework
       - sdk: Network.framework
       - sdk: VideoToolbox.framework
       - sdk: LocalAuthentication.framework
       - sdk: Security.framework
+      - sdk: Carbon.framework
+
+  SidecarBridgeMacDirect:
+    type: application
+    platform: macOS
+    sources:
+      - Shared
+      - Mac
+    info:
+      path: Mac/DirectInfo.plist
+      properties:
+        CFBundleDisplayName: SidecarBridge Direct
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.utilities
+        NSBonjourServices:
+          - _sb-screen._tcp
+          - _sb-direct._tcp
+        NSLocalNetworkUsageDescription: SidecarBridge Direct advertises an encrypted local display service and accepts an incoming connection from the iPhone or iPad you select.
+        NSAppleEventsUsageDescription: SidecarBridge Direct uses System Events to perform shortcuts sent by your authorized iPhone or iPad.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac.direct
+        PRODUCT_NAME: SidecarBridgeDirect
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Mac/SidecarBridgeMacDirect.entitlements
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        DEAD_CODE_STRIPPING: YES
+        COPY_PHASE_STRIP: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_DEBUG_DYLIB: NO
+    dependencies:
+      - sdk: ScreenCaptureKit.framework
+      - sdk: MultipeerConnectivity.framework
+      - sdk: ServiceManagement.framework
+      - sdk: Network.framework
+      - sdk: VideoToolbox.framework
+      - sdk: LocalAuthentication.framework
+      - sdk: Security.framework
+      - sdk: Carbon.framework
 
   SidecarBridgePad:
     type: application
@@ -124,6 +168,12 @@ schemes:
       config: Debug
       targets:
         - SidecarBridgeTests
+  SidecarBridgeMacDirect:
+    build:
+      targets:
+        SidecarBridgeMacDirect: all
+    run:
+      config: Debug
   SidecarBridgePad:
     build:
       targets:

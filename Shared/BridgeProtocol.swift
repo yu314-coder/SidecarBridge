@@ -4,6 +4,11 @@ enum BridgeConstants {
     static let serviceType = "sb-screen"
     static let lanServiceType = "_sb-direct._tcp"
     static let directPort: UInt16 = 45_454
+    // Bonjour TXT metadata is diagnostic only. Authentication still happens
+    // through the encrypted handshake, but advertising the protocol/build
+    // lets the mobile UI distinguish an old Mac binary before pairing fails.
+    static let protocolTXTKey = "sbp"
+    static let buildTXTKey = "build"
 }
 
 struct BridgePeerIdentity: Codable, Equatable {
@@ -15,6 +20,15 @@ struct BridgePeerIdentity: Codable, Equatable {
         let trimmedID = deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedID.isEmpty { return trimmedID }
         return "\(deviceKind.lowercased()):\(deviceName.lowercased())"
+    }
+
+    var isValidForAuthentication: Bool {
+        let identifierLength = deviceID.utf8.count
+        let nameLength = deviceName.utf8.count
+        let kindLength = deviceKind.utf8.count
+        return (1...128).contains(identifierLength) &&
+            (1...128).contains(nameLength) &&
+            (1...32).contains(kindLength)
     }
 }
 
@@ -35,6 +49,8 @@ enum ControlKind: String, Codable, Equatable {
     case stopFallback
     case status
     case input
+    case requestSystemInformation
+    case systemInformation
 }
 
 struct ControlMessage: Codable, Equatable {
@@ -61,6 +77,9 @@ enum RemoteInputKind: String, Codable, Equatable {
     case scroll
     case text
     case key
+    case inputMode
+    case cycleInputMode
+    case toggleChineseEnglishInputMode
 }
 
 enum RemoteScrollPhase: String, Codable, Equatable {
@@ -98,6 +117,7 @@ struct RemoteInputEvent: Codable, Equatable {
     var deltaY: Double?
     var text: String?
     var key: String?
+    var hidUsage: Int?
     var modifiers: [String]?
     var clickCount: Int? = nil
     var scrollPhase: RemoteScrollPhase? = nil
@@ -171,6 +191,31 @@ struct RemoteInputEvent: Codable, Equatable {
             key: key.lowercased(),
             modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers)
         )
+    }
+
+    static func hardwareKey(hidUsage: Int, modifiers: [String] = []) -> Self {
+        Self(
+            kind: .key,
+            sequence: nil,
+            hidUsage: hidUsage,
+            modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers)
+        )
+    }
+
+    static func inputMode(language: String) -> Self {
+        Self(
+            kind: .inputMode,
+            sequence: nil,
+            text: RemoteKeyboardInput.normalizedLanguage(language)
+        )
+    }
+
+    static func cycleInputMode() -> Self {
+        Self(kind: .cycleInputMode, sequence: nil)
+    }
+
+    static func toggleChineseEnglishInputMode() -> Self {
+        Self(kind: .toggleChineseEnglishInputMode, sequence: nil)
     }
 
     var isContinuousInput: Bool {
@@ -311,17 +356,112 @@ enum RemoteKeyboardInput {
         return modifierOrder.filter(requested.contains)
     }
 
+    static func normalizedLanguage(_ language: String) -> String {
+        language
+            .replacingOccurrences(of: "_", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func supportsRemoteHIDUsage(_ usage: Int) -> Bool {
+        macVirtualKeyCode(forHIDUsage: usage) != nil
+    }
+
+    static func isLanguageSwitchHIDUsage(_ usage: Int) -> Bool {
+        // The Chinese iPad Magic Keyboard labels its Caps Lock position
+        // "中/英". Apple reports that physical position as keyboardCapsLock
+        // (USB HID usage 57), while iPadOS gives it language-switch semantics.
+        // Treat it as an input-source key before the generic HID-to-Mac mapping
+        // can consume it as Caps Lock. LANG1...LANG9 cover dedicated language
+        // keys on other regional keyboards.
+        usage == 57 || (144...152).contains(usage)
+    }
+
+    static func isChineseEnglishToggleHIDUsage(_ usage: Int) -> Bool {
+        usage == 57
+    }
+
+    static func isDedicatedLanguageSwitchHIDUsage(_ usage: Int) -> Bool {
+        (144...152).contains(usage)
+    }
+
+    static func isInputModeSwitchShortcut(
+        hidUsage: Int,
+        modifiers: [String]
+    ) -> Bool {
+        // Apple documents Control-Space as the external-keyboard shortcut for
+        // cycling keyboards. Require Control alone so modified Space shortcuts
+        // remain available to the remote Mac.
+        hidUsage == 44 && normalizedModifiers(modifiers) == ["control"]
+    }
+
+    static func nextInputSourceID(
+        currentID: String?,
+        orderedIDs: [String]
+    ) -> String? {
+        guard !orderedIDs.isEmpty else { return nil }
+        guard let currentID,
+              let currentIndex = orderedIDs.firstIndex(of: currentID) else {
+            return orderedIDs[0]
+        }
+        return orderedIDs[(currentIndex + 1) % orderedIDs.count]
+    }
+
+    static func macVirtualKeyCode(forHIDUsage usage: Int) -> UInt16? {
+        let map: [Int: UInt16] = [
+            4: 0, 5: 11, 6: 8, 7: 2, 8: 14, 9: 3, 10: 5, 11: 4,
+            12: 34, 13: 38, 14: 40, 15: 37, 16: 46, 17: 45, 18: 31,
+            19: 35, 20: 12, 21: 15, 22: 1, 23: 17, 24: 32, 25: 9,
+            26: 13, 27: 7, 28: 16, 29: 6,
+            30: 18, 31: 19, 32: 20, 33: 21, 34: 23, 35: 22, 36: 26,
+            37: 28, 38: 25, 39: 29,
+            40: 36, 41: 53, 42: 51, 43: 48, 44: 49, 45: 27, 46: 24,
+            47: 33, 48: 30, 49: 42, 50: 10, 51: 41, 52: 39, 53: 50,
+            54: 43, 55: 47, 56: 44, 57: 57,
+            58: 122, 59: 120, 60: 99, 61: 118, 62: 96, 63: 97,
+            64: 98, 65: 100, 66: 101, 67: 109, 68: 103, 69: 111,
+            73: 114, 74: 115, 75: 116, 76: 117, 77: 119, 78: 121,
+            79: 124, 80: 123, 81: 125, 82: 126,
+            83: 71, 84: 75, 85: 67, 86: 78, 87: 69, 88: 76,
+            89: 83, 90: 84, 91: 85, 92: 86, 93: 87, 94: 88,
+            95: 89, 96: 91, 97: 92, 98: 82, 99: 65, 103: 81
+        ]
+        return map[usage]
+    }
+
     static func event(
         text: String? = nil,
         key: String? = nil,
+        hidUsage: Int? = nil,
         modifiers: [String] = []
     ) -> RemoteInputEvent? {
         let normalized = normalizedModifiers(modifiers)
+        if let hidUsage, supportsRemoteHIDUsage(hidUsage) {
+            return .hardwareKey(hidUsage: hidUsage, modifiers: normalized)
+        }
         if let key, !key.isEmpty {
             return .key(key.lowercased(), modifiers: normalized)
         }
         guard let text, !text.isEmpty else { return nil }
         return .text(text)
+    }
+}
+
+enum RemoteSessionLifecyclePolicy {
+    static let streamResumeRetentionInterval: TimeInterval = 5 * 60
+
+    static func shouldRecoverStaleConnection(
+        isViewerBackgrounded: Bool,
+        peerSupportsHeartbeat: Bool,
+        secondsSinceActivity: TimeInterval,
+        timeout: TimeInterval = 9
+    ) -> Bool {
+        !isViewerBackgrounded
+            && peerSupportsHeartbeat
+            && secondsSinceActivity > timeout
+    }
+
+    static func shouldRetainStreamAfterDisconnect(isStreaming: Bool) -> Bool {
+        isStreaming
     }
 }
 
@@ -362,6 +502,7 @@ struct FileTransferPacket: Codable, Equatable {
     var offset: Int64?
     var payload: Data?
     var message: String?
+    var sha256: Data? = nil
 }
 
 struct VideoFrame: Equatable {
@@ -374,6 +515,9 @@ struct VideoFrame: Equatable {
 }
 
 enum PacketCodec {
+    private static let maximumVideoDimension = 8_192
+    private static let maximumVideoParameterSetCount = 8
+    private static let maximumVideoParameterSetSize = 1 * 1024 * 1024
     private static let controlMarker: UInt8 = 1
     private static let jpegMarker: UInt8 = 2
     private static let videoMarker: UInt8 = 3
@@ -430,7 +574,11 @@ enum PacketCodec {
 
         switch marker {
         case controlMarker:
-            return .control(try JSONDecoder().decode(ControlMessage.self, from: payload))
+            let message = try JSONDecoder().decode(ControlMessage.self, from: payload)
+            guard (message.detail?.utf8.count ?? 0) <= 64 * 1024 else {
+                throw PacketError.invalidControlMessage
+            }
+            return .control(message)
         case jpegMarker:
             guard !payload.isEmpty else { throw PacketError.emptyFrame }
             return .jpeg(Data(payload))
@@ -441,7 +589,15 @@ enum PacketCodec {
             let headerEnd = 4 + Int(headerLength)
             guard headerLength > 0, videoData.count > headerEnd else { throw PacketError.invalidVideoFrame }
             let header = try JSONDecoder().decode(VideoHeader.self, from: videoData[4..<headerEnd])
-            guard header.width > 0, header.height > 0 else { throw PacketError.invalidVideoFrame }
+            guard (1...maximumVideoDimension).contains(header.width),
+                  (1...maximumVideoDimension).contains(header.height),
+                  header.parameterSets.count <= maximumVideoParameterSetCount,
+                  header.parameterSets.allSatisfy({
+                      !$0.isEmpty && $0.count <= maximumVideoParameterSetSize
+                  }),
+                  videoData.count - headerEnd <= LANWire.maximumPayloadSize else {
+                throw PacketError.invalidVideoFrame
+            }
             return .video(VideoFrame(
                 sequence: header.sequence,
                 width: header.width,
@@ -453,7 +609,9 @@ enum PacketCodec {
         case fileMarker:
             return .file(try JSONDecoder().decode(FileTransferPacket.self, from: payload))
         case authenticationMarker:
-            return .authentication(try JSONDecoder().decode(PairingMessage.self, from: payload))
+            let message = try JSONDecoder().decode(PairingMessage.self, from: payload)
+            guard message.isStructurallyValid else { throw PacketError.invalidAuthenticationMessage }
+            return .authentication(message)
         default:
             throw PacketError.unknownMarker(marker)
         }
@@ -463,6 +621,8 @@ enum PacketCodec {
         case empty
         case emptyFrame
         case invalidVideoFrame
+        case invalidControlMessage
+        case invalidAuthenticationMessage
         case unknownMarker(UInt8)
 
         var errorDescription: String? {
@@ -470,6 +630,8 @@ enum PacketCodec {
             case .empty: return "The packet is empty."
             case .emptyFrame: return "The frame has no image data."
             case .invalidVideoFrame: return "The video frame is malformed."
+            case .invalidControlMessage: return "The control packet is too large."
+            case .invalidAuthenticationMessage: return "The authentication packet is malformed."
             case .unknownMarker(let marker): return "Unknown packet marker: \(marker)."
             }
         }

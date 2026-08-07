@@ -2,6 +2,71 @@ import XCTest
 import CryptoKit
 
 final class PacketCodecTests: XCTestCase {
+    func testShutdownProtectionOnlyEngagesForRemoteSystemTerminationWithBlockers() {
+        XCTAssertTrue(ShutdownProtectionPolicy.shouldEngage(
+            isSystemTermination: true,
+            isEnabled: true,
+            hasRemoteSession: true,
+            blockingApplicationCount: 2
+        ))
+        XCTAssertFalse(ShutdownProtectionPolicy.shouldEngage(
+            isSystemTermination: false,
+            isEnabled: true,
+            hasRemoteSession: true,
+            blockingApplicationCount: 2
+        ))
+        XCTAssertFalse(ShutdownProtectionPolicy.shouldEngage(
+            isSystemTermination: true,
+            isEnabled: true,
+            hasRemoteSession: false,
+            blockingApplicationCount: 2
+        ))
+        XCTAssertFalse(ShutdownProtectionPolicy.shouldEngage(
+            isSystemTermination: true,
+            isEnabled: true,
+            hasRemoteSession: true,
+            blockingApplicationCount: 0
+        ))
+    }
+
+    func testShutdownProtectionWaitsUntilOtherAppsFinish() {
+        XCTAssertEqual(
+            ShutdownProtectionPolicy.decisionWhileEngaged(
+                hasRemoteSession: true,
+                blockingApplicationCount: 2,
+                elapsed: 10
+            ),
+            .hold
+        )
+        XCTAssertEqual(
+            ShutdownProtectionPolicy.decisionWhileEngaged(
+                hasRemoteSession: true,
+                blockingApplicationCount: 0,
+                elapsed: 10
+            ),
+            .finishTermination
+        )
+    }
+
+    func testShutdownProtectionCancelsUnsafeTermination() {
+        XCTAssertEqual(
+            ShutdownProtectionPolicy.decisionWhileEngaged(
+                hasRemoteSession: false,
+                blockingApplicationCount: 1,
+                elapsed: 10
+            ),
+            .cancelTermination
+        )
+        XCTAssertEqual(
+            ShutdownProtectionPolicy.decisionWhileEngaged(
+                hasRemoteSession: true,
+                blockingApplicationCount: 1,
+                elapsed: ShutdownProtectionPolicy.maximumHoldDuration
+            ),
+            .cancelTermination
+        )
+    }
+
     func testControlRoundTrip() throws {
         let input = ControlMessage(.trySidecar, detail: "Desk iPad")
         let data = try PacketCodec.encode(.control(input))
@@ -42,7 +107,8 @@ final class PacketCodecTests: XCTestCase {
             totalSize: 4,
             offset: 0,
             payload: Data([1, 2, 3, 4]),
-            message: nil
+            message: nil,
+            sha256: Data(repeating: 7, count: SHA256.Digest.byteCount)
         )
         XCTAssertEqual(try PacketCodec.decode(PacketCodec.encode(.file(transfer))), .file(transfer))
     }
@@ -73,6 +139,47 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destination), original)
         XCTAssertFalse(sender.isBusy)
         XCTAssertFalse(receiver.isBusy)
+        XCTAssertFalse(
+            try FileManager.default.contentsOfDirectory(atPath: receiverDirectory.path)
+                .contains(where: { $0.hasSuffix(".partial") })
+        )
+    }
+
+    @MainActor
+    func testFileTransferRejectsWrongDigestAndDeletesPartialFile() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/TestTransfers/\(UUID().uuidString)", isDirectory: true)
+        let senderDirectory = root.appendingPathComponent("sender", isDirectory: true)
+        let receiverDirectory = root.appendingPathComponent("receiver", isDirectory: true)
+        try FileManager.default.createDirectory(at: senderDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let source = senderDirectory.appendingPathComponent("tampered.bin")
+        try Data(repeating: 0x5A, count: FileTransferEngine.chunkSize + 1).write(to: source)
+        let sender = FileTransferEngine { senderDirectory }
+        let receiver = FileTransferEngine { receiverDirectory }
+        sender.sendPacket = { packet in
+            var delivered = packet
+            if packet.kind == .complete, packet.message == nil {
+                delivered.sha256 = Data(repeating: 0, count: SHA256.Digest.byteCount)
+            }
+            receiver.handle(delivered)
+        }
+        receiver.sendPacket = { sender.handle($0) }
+
+        var receivedURL: URL?
+        var receivedError: String?
+        receiver.onReceived = { receivedURL = $0 }
+        receiver.onError = { receivedError = $0 }
+        sender.sendFile(at: source)
+
+        XCTAssertNil(receivedURL)
+        XCTAssertNotNil(receivedError)
+        XCTAssertFalse(receiver.isBusy)
+        XCTAssertTrue(
+            (try? FileManager.default.contentsOfDirectory(atPath: receiverDirectory.path).isEmpty)
+                ?? true
+        )
     }
 
     func testEmptyPacketRejected() {
@@ -118,8 +225,9 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(identity.stableKey, "stable-device-id")
 
         let handshake = LANHandshake(
+            protocolVersion: LANWire.securityProtocolVersion,
             deviceName: identity.deviceName,
-            publicKey: Data([1, 2, 3]),
+            publicKey: Data(repeating: 3, count: 32),
             deviceID: identity.deviceID,
             deviceKind: identity.deviceKind
         )
@@ -137,64 +245,188 @@ final class PacketCodecTests: XCTestCase {
             deviceName: "Euler’s iPhone",
             deviceKind: "iPhone"
         )
-        let secret = Data("12345678".utf8)
+        let secret = Data("ABCD2345EFGH6789".utf8)
         let nonce = Data(repeating: 7, count: 32)
         let clientPublicKey = Data(repeating: 3, count: 32)
         let serverPublicKey = Data(repeating: 4, count: 32)
+        let channelBinding = PairingProof.lanChannelBinding(
+            clientPublicKey: clientPublicKey,
+            serverPublicKey: serverPublicKey
+        )
         let proof = PairingProof.make(
             secret: secret,
+            role: .client,
             identity: identity,
             macID: "trusted-mac",
             nonce: nonce,
-            clientPublicKey: clientPublicKey,
-            serverPublicKey: serverPublicKey
+            channelBinding: channelBinding
         )
         XCTAssertTrue(PairingProof.verify(
             proof,
             secret: secret,
+            role: .client,
             identity: identity,
             macID: "trusted-mac",
             nonce: nonce,
-            clientPublicKey: clientPublicKey,
-            serverPublicKey: serverPublicKey
+            channelBinding: channelBinding
         ))
         XCTAssertFalse(PairingProof.verify(
             proof,
-            secret: Data("87654321".utf8),
+            secret: Data("ZZZZ2345EFGH6789".utf8),
+            role: .client,
             identity: identity,
             macID: "trusted-mac",
             nonce: nonce,
-            clientPublicKey: clientPublicKey,
-            serverPublicKey: serverPublicKey
+            channelBinding: channelBinding
         ))
         XCTAssertFalse(PairingProof.verify(
             proof,
             secret: secret,
+            role: .client,
             identity: identity,
             macID: "different-mac",
             nonce: nonce,
-            clientPublicKey: clientPublicKey,
-            serverPublicKey: serverPublicKey
+            channelBinding: channelBinding
         ))
         XCTAssertFalse(PairingProof.verify(
             proof,
             secret: secret,
+            role: .client,
             identity: identity,
             macID: "trusted-mac",
             nonce: nonce,
-            clientPublicKey: clientPublicKey,
-            serverPublicKey: Data(repeating: 5, count: 32)
+            channelBinding: PairingProof.lanChannelBinding(
+                clientPublicKey: clientPublicKey,
+                serverPublicKey: Data(repeating: 5, count: 32)
+            )
         ))
+        XCTAssertFalse(PairingProof.verify(
+            proof,
+            secret: secret,
+            role: .server,
+            identity: identity,
+            macID: "trusted-mac",
+            nonce: nonce,
+            channelBinding: channelBinding
+        ))
+    }
+
+    func testServerAcceptanceRequiresIndependentRoleSeparatedProof() {
+        let identity = BridgePeerIdentity(
+            deviceID: "trusted-pad",
+            deviceName: "iPad",
+            deviceKind: "iPad"
+        )
+        let secret = Data("ABCD2345EFGH6789".utf8)
+        let nonce = Data(repeating: 1, count: 32)
+        let binding = Data("p2p-session".utf8)
+        let clientProof = PairingProof.make(
+            secret: secret,
+            role: .client,
+            identity: identity,
+            macID: "mac",
+            nonce: nonce,
+            channelBinding: binding
+        )
+        let serverProof = PairingProof.make(
+            secret: secret,
+            role: .server,
+            identity: identity,
+            macID: "mac",
+            nonce: nonce,
+            channelBinding: binding
+        )
+
+        XCTAssertNotEqual(clientProof, serverProof)
+        XCTAssertTrue(PairingProof.verify(
+            serverProof,
+            secret: secret,
+            role: .server,
+            identity: identity,
+            macID: "mac",
+            nonce: nonce,
+            channelBinding: binding
+        ))
+        XCTAssertFalse(PairingProof.verify(
+            clientProof,
+            secret: secret,
+            role: .server,
+            identity: identity,
+            macID: "mac",
+            nonce: nonce,
+            channelBinding: binding
+        ))
+    }
+
+    func testPairingCodeHasEightyBitsAndNormalizesGroupedInput() {
+        let code = PairingCode.generate()
+        XCTAssertEqual(code.count, PairingCode.characterCount)
+        XCTAssertEqual(PairingCode.normalize(PairingCode.formatted(code)), code)
+        XCTAssertEqual(PairingCode.normalize("abcd-2345-efgh-6789"), "ABCD2345EFGH6789")
+    }
+
+    func testLegacyHandshakeFailsClosed() throws {
+        let legacy = LANHandshake(
+            deviceName: "Old Mac",
+            publicKey: Data(repeating: 2, count: 32)
+        )
+        var buffer = try LANWire.handshake(legacy, marker: LANWire.serverHello)
+        let payload = try XCTUnwrap(LANWire.takeFrames(from: &buffer).first)
+
+        XCTAssertThrowsError(try LANWire.decodeHandshake(payload, marker: LANWire.serverHello)) {
+            XCTAssertEqual(
+                ($0 as? LANWire.LANError)?.localizedDescription,
+                LANWire.LANError.unsupportedSecurityProtocol.localizedDescription
+            )
+        }
+    }
+
+    func testMultipeerInvitationRequiresCurrentSecurityProtocol() throws {
+        let invitation = MultipeerInvitationContext(
+            protocolVersion: LANWire.securityProtocolVersion,
+            identity: BridgePeerIdentity(
+                deviceID: "trusted-pad",
+                deviceName: "iPad",
+                deviceKind: "iPad"
+            ),
+            clientPublicKey: Data(repeating: 3, count: 32)
+        )
+        let encoded = try JSONEncoder().encode(invitation)
+        XCTAssertEqual(try JSONDecoder().decode(MultipeerInvitationContext.self, from: encoded), invitation)
     }
 
     func testPairingPacketRoundTrip() throws {
         let message = PairingMessage(
             kind: .accepted,
+            protocolVersion: LANWire.securityProtocolVersion,
+            proof: Data(repeating: 7, count: 32),
             credential: Data(repeating: 9, count: 32),
             detail: nil
         )
         let encoded = try PacketCodec.encode(.authentication(message))
         XCTAssertEqual(try PacketCodec.decode(encoded), .authentication(message))
+    }
+
+    func testAcceptedAuthenticationWithoutServerProofIsRejected() throws {
+        let message = PairingMessage(
+            kind: .accepted,
+            protocolVersion: LANWire.securityProtocolVersion
+        )
+        var encoded = Data([5])
+        encoded.append(try JSONEncoder().encode(message))
+
+        XCTAssertThrowsError(try PacketCodec.decode(encoded)) {
+            XCTAssertEqual($0 as? PacketCodec.PacketError, .invalidAuthenticationMessage)
+        }
+    }
+
+    func testOversizedControlMessageIsRejected() throws {
+        let message = ControlMessage(.status, detail: String(repeating: "x", count: 64 * 1024 + 1))
+        let encoded = try PacketCodec.encode(.control(message))
+
+        XCTAssertThrowsError(try PacketCodec.decode(encoded)) {
+            XCTAssertEqual($0 as? PacketCodec.PacketError, .invalidControlMessage)
+        }
     }
 
     func testRemoteKeyboardModifiersAreCanonicalAndDoNotLeakUnknownFlags() {
@@ -215,6 +447,259 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(input.kind, .text)
         XCTAssertEqual(input.text, "A")
         XCTAssertNil(input.modifiers)
+    }
+
+    func testRemoteKeyboardChineseTextRoundTripsWithoutUnicodeLoss() throws {
+        let text = "中文输入法测试：你好，世界！"
+        let input = try XCTUnwrap(RemoteKeyboardInput.event(text: text))
+        let message = try XCTUnwrap(ControlMessage.input(input))
+
+        XCTAssertEqual(message.remoteInputEvent?.kind, .text)
+        XCTAssertEqual(message.remoteInputEvent?.text, text)
+        XCTAssertNil(message.remoteInputEvent?.modifiers)
+    }
+
+    func testRemoteKeyboardInputModeRoundTripsAsBCP47Language() throws {
+        let input = RemoteInputEvent.inputMode(language: " zh_Hans ")
+        let message = try XCTUnwrap(ControlMessage.input(input))
+
+        XCTAssertEqual(message.remoteInputEvent?.kind, .inputMode)
+        XCTAssertEqual(message.remoteInputEvent?.text, "zh-Hans")
+    }
+
+    func testRemoteKeyboardInputModeCycleRoundTrips() throws {
+        let input = RemoteInputEvent.cycleInputMode()
+        let message = try XCTUnwrap(ControlMessage.input(input))
+
+        XCTAssertEqual(message.remoteInputEvent?.kind, .cycleInputMode)
+        XCTAssertNil(message.remoteInputEvent?.text)
+        XCTAssertNil(message.remoteInputEvent?.hidUsage)
+    }
+
+    func testAnnouncedInputLanguageIsNotOverwrittenByStaleResponder() {
+        var state = RemoteInputLanguageState()
+        XCTAssertEqual(
+            state.resolve(
+                announcedLanguage: "zh_Hant",
+                responderLanguage: "en-US"
+            ),
+            "zh-Hant"
+        )
+        XCTAssertEqual(
+            state.resolve(
+                announcedLanguage: nil,
+                responderLanguage: "en-US"
+            ),
+            "zh-Hant"
+        )
+        XCTAssertEqual(
+            state.resolve(
+                announcedLanguage: "en-US",
+                responderLanguage: "zh-Hant"
+            ),
+            "en-US"
+        )
+    }
+
+    func testInputModeSwitchWaitsForNewLanguageInsteadOfRestoringOldOne() {
+        var state = RemoteInputLanguageState()
+        XCTAssertEqual(
+            state.resolve(
+                announcedLanguage: "en-US",
+                responderLanguage: nil
+            ),
+            "en-US"
+        )
+
+        state.beginInputModeSwitch()
+        XCTAssertNil(
+            state.resolve(
+                announcedLanguage: nil,
+                responderLanguage: "en-US"
+            )
+        )
+        XCTAssertEqual(
+            state.resolve(
+                announcedLanguage: nil,
+                responderLanguage: "zh-Hant"
+            ),
+            "zh-Hant"
+        )
+    }
+
+    func testPhysicalKeyboardUsesHIDPositionForMacInputMethods() throws {
+        let input = try XCTUnwrap(RemoteKeyboardInput.event(
+            hidUsage: 4,
+            modifiers: ["shift"]
+        ))
+        let message = try XCTUnwrap(ControlMessage.input(input))
+
+        XCTAssertEqual(message.remoteInputEvent?.kind, .key)
+        XCTAssertEqual(message.remoteInputEvent?.hidUsage, 4)
+        XCTAssertNil(message.remoteInputEvent?.key)
+        XCTAssertEqual(message.remoteInputEvent?.modifiers, ["shift"])
+    }
+
+    func testLanguageSwitchHIDUsagesAreRecognizedWithoutBecomingTextKeys() {
+        XCTAssertTrue(RemoteKeyboardInput.isLanguageSwitchHIDUsage(57))
+        XCTAssertTrue(RemoteKeyboardInput.isChineseEnglishToggleHIDUsage(57))
+        XCTAssertFalse(RemoteKeyboardInput.isDedicatedLanguageSwitchHIDUsage(57))
+        XCTAssertTrue(RemoteKeyboardInput.isLanguageSwitchHIDUsage(144))
+        XCTAssertTrue(RemoteKeyboardInput.isDedicatedLanguageSwitchHIDUsage(144))
+        XCTAssertFalse(RemoteKeyboardInput.isChineseEnglishToggleHIDUsage(144))
+        XCTAssertTrue(RemoteKeyboardInput.isLanguageSwitchHIDUsage(152))
+        XCTAssertFalse(RemoteKeyboardInput.isLanguageSwitchHIDUsage(56))
+        XCTAssertFalse(RemoteKeyboardInput.isLanguageSwitchHIDUsage(143))
+        XCTAssertFalse(RemoteKeyboardInput.isLanguageSwitchHIDUsage(153))
+        XCTAssertFalse(RemoteKeyboardInput.supportsRemoteHIDUsage(0))
+        XCTAssertNil(RemoteKeyboardInput.event(hidUsage: 0))
+    }
+
+    func testChineseEnglishInputModeToggleRoundTrips() throws {
+        let input = RemoteInputEvent.toggleChineseEnglishInputMode()
+        let message = try XCTUnwrap(ControlMessage.input(input))
+
+        XCTAssertEqual(
+            message.remoteInputEvent?.kind,
+            .toggleChineseEnglishInputMode
+        )
+    }
+
+    func testControlSpaceIsTheExplicitInputModeSwitchShortcut() {
+        XCTAssertTrue(
+            RemoteKeyboardInput.isInputModeSwitchShortcut(
+                hidUsage: 44,
+                modifiers: ["control"]
+            )
+        )
+        XCTAssertTrue(
+            RemoteKeyboardInput.isInputModeSwitchShortcut(
+                hidUsage: 44,
+                modifiers: ["CONTROL"]
+            )
+        )
+        XCTAssertFalse(
+            RemoteKeyboardInput.isInputModeSwitchShortcut(
+                hidUsage: 44,
+                modifiers: []
+            )
+        )
+        XCTAssertFalse(
+            RemoteKeyboardInput.isInputModeSwitchShortcut(
+                hidUsage: 44,
+                modifiers: ["control", "shift"]
+            )
+        )
+        XCTAssertFalse(
+            RemoteKeyboardInput.isInputModeSwitchShortcut(
+                hidUsage: 43,
+                modifiers: ["control"]
+            )
+        )
+    }
+
+    func testBackgroundedViewerDoesNotTriggerHeartbeatReconnect() {
+        XCTAssertFalse(
+            RemoteSessionLifecyclePolicy.shouldRecoverStaleConnection(
+                isViewerBackgrounded: true,
+                peerSupportsHeartbeat: true,
+                secondsSinceActivity: 120
+            )
+        )
+        XCTAssertFalse(
+            RemoteSessionLifecyclePolicy.shouldRecoverStaleConnection(
+                isViewerBackgrounded: false,
+                peerSupportsHeartbeat: false,
+                secondsSinceActivity: 120
+            )
+        )
+        XCTAssertTrue(
+            RemoteSessionLifecyclePolicy.shouldRecoverStaleConnection(
+                isViewerBackgrounded: false,
+                peerSupportsHeartbeat: true,
+                secondsSinceActivity: 10
+            )
+        )
+    }
+
+    func testActiveStreamIsRetainedForViewerResume() {
+        XCTAssertTrue(
+            RemoteSessionLifecyclePolicy.shouldRetainStreamAfterDisconnect(
+                isStreaming: true
+            )
+        )
+        XCTAssertFalse(
+            RemoteSessionLifecyclePolicy.shouldRetainStreamAfterDisconnect(
+                isStreaming: false
+            )
+        )
+        XCTAssertEqual(
+            RemoteSessionLifecyclePolicy.streamResumeRetentionInterval,
+            300
+        )
+    }
+
+    func testInputSourceCycleUsesOrderedSourcesAndWraps() {
+        let sources = ["ABC", "Zhuyin", "Pinyin"]
+        XCTAssertEqual(
+            RemoteKeyboardInput.nextInputSourceID(
+                currentID: "ABC",
+                orderedIDs: sources
+            ),
+            "Zhuyin"
+        )
+        XCTAssertEqual(
+            RemoteKeyboardInput.nextInputSourceID(
+                currentID: "Pinyin",
+                orderedIDs: sources
+            ),
+            "ABC"
+        )
+        XCTAssertEqual(
+            RemoteKeyboardInput.nextInputSourceID(
+                currentID: "Missing",
+                orderedIDs: sources
+            ),
+            "ABC"
+        )
+        XCTAssertNil(
+            RemoteKeyboardInput.nextInputSourceID(
+                currentID: "ABC",
+                orderedIDs: []
+            )
+        )
+    }
+
+    func testPhysicalHIDPositionsMapToMacVirtualKeys() {
+        XCTAssertEqual(RemoteKeyboardInput.macVirtualKeyCode(forHIDUsage: 4), 0)
+        XCTAssertEqual(RemoteKeyboardInput.macVirtualKeyCode(forHIDUsage: 30), 18)
+        XCTAssertEqual(RemoteKeyboardInput.macVirtualKeyCode(forHIDUsage: 44), 49)
+        XCTAssertEqual(RemoteKeyboardInput.macVirtualKeyCode(forHIDUsage: 79), 124)
+        XCTAssertNil(RemoteKeyboardInput.macVirtualKeyCode(forHIDUsage: 0))
+    }
+
+    func testRemoteTextDeltaWaitsForCommittedChineseReplacement() {
+        let anchor = String(repeating: "1", count: 64)
+        let delta = RemoteTextDelta.between(anchor, and: anchor + "中文")
+
+        XCTAssertEqual(delta.deleteCount, 0)
+        XCTAssertEqual(delta.insertedText, "中文")
+    }
+
+    func testRemoteTextDeltaHandlesBackspaceByCharacter() {
+        let anchor = String(repeating: "1", count: 64)
+        let delta = RemoteTextDelta.between(anchor + "你好", and: anchor + "你")
+
+        XCTAssertEqual(delta.deleteCount, 1)
+        XCTAssertEqual(delta.insertedText, "")
+    }
+
+    func testRemoteTextDeltaDoesNotSplitEmojiGrapheme() {
+        let anchor = String(repeating: "1", count: 64)
+        let delta = RemoteTextDelta.between(anchor + "👨‍👩‍👧‍👦", and: anchor)
+
+        XCTAssertEqual(delta.deleteCount, 1)
+        XCTAssertEqual(delta.insertedText, "")
     }
 
     func testRemoteKeyboardSpecialKeyPreservesOnlyCurrentModifiers() throws {
@@ -555,21 +1040,203 @@ final class PacketCodecTests: XCTestCase {
         let server = Curve25519.KeyAgreement.PrivateKey()
         let clientPublic = client.publicKey.rawRepresentation
         let serverPublic = server.publicKey.rawRepresentation
-        let clientKey = try LANWire.sessionKey(
+        let clientSession = try LANWire.secureSession(
             privateKey: client,
             peerPublicKey: serverPublic,
             clientPublicKey: clientPublic,
-            serverPublicKey: serverPublic
+            serverPublicKey: serverPublic,
+            role: .client
         )
-        let serverKey = try LANWire.sessionKey(
+        let serverSession = try LANWire.secureSession(
             privateKey: server,
             peerPublicKey: clientPublic,
             clientPublicKey: clientPublic,
-            serverPublicKey: serverPublic
+            serverPublicKey: serverPublic,
+            role: .server
         )
         let packet = try PacketCodec.encode(.control(ControlMessage(.startFallback)))
-        var buffer = try LANWire.encrypted(packet, key: clientKey)
+        var buffer = try LANWire.encrypted(packet, session: clientSession)
         let encryptedPayload = try XCTUnwrap(LANWire.takeFrames(from: &buffer).first)
-        XCTAssertEqual(try LANWire.decrypt(encryptedPayload, key: serverKey), packet)
+        XCTAssertEqual(try LANWire.decrypt(encryptedPayload, session: serverSession), packet)
+
+        let response = try PacketCodec.encode(.control(ControlMessage(.stopFallback)))
+        var responseBuffer = try LANWire.encrypted(response, session: serverSession)
+        let responsePayload = try XCTUnwrap(LANWire.takeFrames(from: &responseBuffer).first)
+        XCTAssertEqual(try LANWire.decrypt(responsePayload, session: clientSession), response)
+    }
+
+    func testSecurePacketRejectsReplayAndTampering() throws {
+        let sessions = try makeSecureSessionPair(context: "replay-test")
+        let encrypted = try sessions.client.seal(Data("click".utf8))
+        XCTAssertEqual(try sessions.server.open(encrypted), Data("click".utf8))
+        XCTAssertThrowsError(try sessions.server.open(encrypted)) {
+            XCTAssertEqual(
+                $0 as? SecurePacketSession.SecurePacketError,
+                .replayedPacket
+            )
+        }
+
+        let secondPair = try makeSecureSessionPair(context: "tamper-test")
+        var tampered = try secondPair.client.seal(Data("keyboard".utf8))
+        tampered[tampered.index(before: tampered.endIndex)] ^= 0x01
+        XCTAssertThrowsError(try secondPair.server.open(tampered))
+    }
+
+    func testSecurePacketAllowsLimitedOutOfOrderDeliveryButRejectsDuplicates() throws {
+        let sessions = try makeSecureSessionPair(context: "window-test")
+        let zero = try sessions.client.seal(Data([0]))
+        let one = try sessions.client.seal(Data([1]))
+        let two = try sessions.client.seal(Data([2]))
+
+        XCTAssertEqual(try sessions.server.open(two), Data([2]))
+        XCTAssertEqual(try sessions.server.open(zero), Data([0]))
+        XCTAssertEqual(try sessions.server.open(one), Data([1]))
+        XCTAssertThrowsError(try sessions.server.open(zero))
+    }
+
+    func testSecurePacketUsesDirectionalKeys() throws {
+        let first = try makeSecureSessionPair(context: "direction-test")
+        let second = try makeSecureSessionPair(
+            context: "direction-test",
+            client: first.clientPrivateKey,
+            server: first.serverPrivateKey
+        )
+        let clientPacket = try first.client.seal(Data("client".utf8))
+        XCTAssertThrowsError(try second.client.open(clientPacket))
+    }
+
+    func testSecurePacketVideoThroughput() throws {
+        let payload = Data(repeating: 0xA5, count: 512 * 1024)
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        measure(options: options) {
+            let sessions = try! makeSecureSessionPair(context: "throughput-test")
+            for _ in 0..<16 {
+                let encrypted = try! sessions.client.seal(payload)
+                XCTAssertEqual(try! sessions.server.open(encrypted).count, payload.count)
+            }
+        }
+    }
+
+    func testSystemInformationControlRoundTrip() throws {
+        let information = makeSystemInformation()
+        let message = try XCTUnwrap(ControlMessage.systemInformation(information))
+        let packet = try PacketCodec.decode(PacketCodec.encode(.control(message)))
+        guard case .control(let decoded) = packet else {
+            return XCTFail("Expected a control packet")
+        }
+        XCTAssertEqual(decoded.systemInformationPayload, information)
+    }
+
+    func testSystemInformationRejectsMalformedPeerSnapshot() throws {
+        var information = makeSystemInformation()
+        information = SystemInformation(
+            platform: information.platform,
+            operatingSystem: information.operatingSystem,
+            deviceModel: information.deviceModel,
+            architecture: information.architecture,
+            processorCount: 0,
+            physicalMemoryBytes: information.physicalMemoryBytes,
+            availableStorageBytes: information.availableStorageBytes,
+            totalStorageBytes: information.totalStorageBytes,
+            thermalState: information.thermalState,
+            lowPowerModeEnabled: information.lowPowerModeEnabled,
+            appVersion: information.appVersion,
+            appBuild: information.appBuild,
+            systemUptimeSeconds: information.systemUptimeSeconds,
+            collectedAt: information.collectedAt
+        )
+        let data = try JSONEncoder().encode(information)
+        let message = ControlMessage(.systemInformation, detail: String(decoding: data, as: UTF8.self))
+        XCTAssertNil(message.systemInformationPayload)
+        XCTAssertNil(ControlMessage.systemInformation(information))
+    }
+
+    func testDiagnosticReportIsStructuredAndPrivacySafe() {
+        let information = makeSystemInformation()
+        let report = DiagnosticReportBuilder.make(
+            local: information,
+            remote: information,
+            connection: [
+                DiagnosticField("Status", "Connected\nhealthy"),
+                DiagnosticField("Pairing code", "AAAA-BBBB-CCCC-DDDD"),
+                DiagnosticField("IP address", "192.168.1.20"),
+                DiagnosticField("File path", "/private/example")
+            ],
+            generatedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertTrue(report.contains("[This Device]"))
+        XCTAssertTrue(report.contains("[Connected Device]"))
+        XCTAssertTrue(report.contains("Status: Connected healthy"))
+        XCTAssertTrue(report.contains("Privacy: excludes"))
+        XCTAssertFalse(report.contains("AAAA-BBBB"))
+        XCTAssertFalse(report.contains("192.168.1.20"))
+        XCTAssertFalse(report.contains("/private/example"))
+    }
+
+    private func makeSystemInformation() -> SystemInformation {
+        SystemInformation(
+            platform: "iPadOS",
+            operatingSystem: "Version 26.0",
+            deviceModel: "iPad14,6",
+            architecture: "arm64",
+            processorCount: 8,
+            physicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024,
+            availableStorageBytes: 100 * 1_024 * 1_024,
+            totalStorageBytes: 256 * 1_024 * 1_024,
+            thermalState: "Nominal",
+            lowPowerModeEnabled: false,
+            appVersion: "1.0",
+            appBuild: "31",
+            systemUptimeSeconds: 3_661,
+            collectedAt: Date(timeIntervalSince1970: 0)
+        )
+    }
+
+    private func makeSecureSessionPair(
+        context: String,
+        client: Curve25519.KeyAgreement.PrivateKey = .init(),
+        server: Curve25519.KeyAgreement.PrivateKey = .init()
+    ) throws -> (
+        client: SecurePacketSession,
+        server: SecurePacketSession,
+        clientPrivateKey: Curve25519.KeyAgreement.PrivateKey,
+        serverPrivateKey: Curve25519.KeyAgreement.PrivateKey
+    ) {
+        let clientPublic = client.publicKey.rawRepresentation
+        let serverPublic = server.publicKey.rawRepresentation
+        return (
+            try SecurePacketSession.keyAgreement(
+                privateKey: client,
+                peerPublicKey: serverPublic,
+                clientPublicKey: clientPublic,
+                serverPublicKey: serverPublic,
+                role: .client,
+                context: context
+            ),
+            try SecurePacketSession.keyAgreement(
+                privateKey: server,
+                peerPublicKey: clientPublic,
+                clientPublicKey: clientPublic,
+                serverPublicKey: serverPublic,
+                role: .server,
+                context: context
+            ),
+            client,
+            server
+        )
+    }
+
+    func testMainQueueExecutorMovesBackgroundWorkToMainThread() {
+        let completed = expectation(description: "main queue operation")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ranOnMainThread = MainQueueExecutor.sync {
+                Thread.isMainThread
+            }
+            XCTAssertTrue(ranOnMainThread)
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 2)
     }
 }

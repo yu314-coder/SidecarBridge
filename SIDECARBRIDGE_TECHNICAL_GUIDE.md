@@ -2,6 +2,24 @@
 
 This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 14** on 2026-07-27.
 
+## App Store links
+
+The macOS and iOS/iPadOS targets are published through the same universal App Store record:
+
+- [iOS/iPadOS App Store listing](https://apps.apple.com/app/id6792298083)
+- [Mac App Store listing](https://apps.apple.com/app/id6792298083?mt=12)
+
+The `mt=12` parameter selects Apple's Mac App Store media type. Apple controls the timing of listing propagation and regional redirects after approval.
+
+## macOS session lifecycle
+
+- The main app remains running when its last window closes and can register itself with `SMAppService.mainApp` to start after sign-in.
+- `NSWorkspace.willPowerOffNotification` marks logout/restart/shutdown. With Shutdown Handoff enabled and an authenticated iPhone/iPad connected, the app returns `terminateLater` and keeps the encrypted stream/input path active while other regular GUI apps close.
+- Finder and the login window are excluded from the blocker list. When no other user app remains, SidecarBridge performs cleanup and replies that termination may continue.
+- If the remote connection drops or another app remains after 105 seconds, SidecarBridge replies that termination should be cancelled. This stays below AppKit's two-minute graceful-termination limit.
+- A normal Command-Q is never held.
+- App Store login items run in the signed-in user's session. They cannot provide input at FileVault preboot or the macOS login window; doing so would require a separately installed authorization or privileged component outside this App Store architecture.
+
 ## 1. Purpose
 
 SidecarBridge makes an iPhone or iPad usable as a low-latency Mac screen and input surface when a local display is needed or Apple's normal Sidecar discovery is unreliable.
@@ -11,7 +29,7 @@ It provides two deliberately separate experiences:
 1. **In-App Display** mirrors the Mac's main display inside SidecarBridge on iPhone or iPad. It uses public screen-capture, video, local-network, and input APIs. This mode supports touch on both devices plus iPad keyboard, trackpad, and Apple Pencil input.
 2. **System Sidecar** is shown only on iPad and asks macOS to open Apple's native Sidecar session. It provides a true virtual Retina display, but Apple presents it in the separate system Continuity experience rather than inside the app.
 
-SidecarBridge never pretends that native Sidecar can be embedded in a third-party app. It keeps the public in-app transport and private native Sidecar launcher visibly separate.
+SidecarBridge never pretends that native Sidecar can be embedded in a third-party app. It keeps the public in-app transport separate from the public Displays settings shortcut.
 
 ## 2. Confirmed working state
 
@@ -131,13 +149,7 @@ Both transports exchange an encrypted ping/pong every three seconds. The apps ex
 
 Native Sidecar is never launched automatically. The user must explicitly select **Open System Sidecar**.
 
-`SidecarConnector` dynamically loads:
-
-```text
-/System/Library/PrivateFrameworks/SidecarCore.framework/SidecarCore
-```
-
-It lists Sidecar-capable devices and requests a wired or wireless connection. This private-framework path is for personal development or sideloaded use. It is not suitable for Mac App Store review.
+`SidecarConnector` uses the public System Settings URL to open Displays settings. Apple does not expose a documented API for enumerating Sidecar devices or starting a native session, so the App Store build contains no private Sidecar framework path or selector.
 
 ## 5. Encrypted LAN protocol
 
@@ -147,16 +159,17 @@ The direct path uses a small framed protocol in `Shared/LANProtocol.swift`.
 
 1. The mobile app generates an ephemeral Curve25519 key pair and sends its stable app identity and public key.
 2. The Mac generates its ephemeral key, stable Mac identifier, and a fresh 256-bit authentication nonce.
-3. Both peers derive a 256-bit session key with Curve25519 and HKDF-SHA256; the HKDF salt binds both public keys.
-4. A new device enters the rotating 8-digit code displayed by the Mac. A remembered device instead reads its random credential from Keychain.
-5. The mobile app sends an HMAC-SHA256 proof inside the encrypted channel. The proof transcript binds the protocol version, mobile identity, Mac identity, nonce, client public key, and server public key.
-6. The Mac verifies the proof in constant time and rate-limits failures to five per minute.
-7. On first success, the Mac issues a random 256-bit device credential inside the encrypted channel, stores its copy in Keychain, and rotates the temporary code. Future sessions prove that credential without transmitting it.
-8. Only after authentication succeeds can either transport deliver screen, input, or file packets.
+3. Both peers use Curve25519 and HKDF-SHA256 to derive independent client-to-server and server-to-client keys; the HKDF salt binds both public keys.
+4. A new device enters the rotating 16-character code displayed by the Mac. It has about 80 bits of entropy and expires after five minutes. A remembered device instead reads its random credential from Keychain.
+5. The mobile app sends a role-separated client HMAC-SHA256 proof inside the encrypted channel. The proof transcript binds the protocol version, mobile identity, Mac identity, nonce, and transport channel binding.
+6. The Mac verifies the proof in constant time, rate-limits failures to five per device and twenty globally per minute, and returns an independent role-separated server proof.
+7. The mobile app verifies the server proof before marking the connection trusted or storing a newly issued credential. Missing authentication metadata and older protocol versions fail closed.
+8. On first success, the Mac issues a random 256-bit device credential inside the encrypted channel, stores its copy in Keychain, and rotates the temporary code. Future LAN and Multipeer sessions mutually prove that credential without transmitting it.
+9. Only after mutual authentication succeeds can either transport deliver screen, input, or file packets.
 
 The HKDF salt binds both public keys and the protocol label `SidecarBridge-LAN-v1`. The shared information label is `screen-and-input`.
 
-The authorization store supports multiple remembered iPhones and iPads. Secrets stay in the platform Keychains; local preferences contain only display metadata such as name, device kind, and last-seen time. **Forget All** deletes the Mac's trusted-device credentials and rotates its code. Multipeer remains separately protected by required Apple session encryption and macOS device-owner authentication.
+The authorization store supports multiple remembered iPhones and iPads. Secrets stay in the Data Protection Keychain; local preferences contain only display metadata such as name, device kind, and last-seen time. Existing legacy Keychain items migrate on first successful read. **Forget All** deletes the Mac's trusted-device credentials and rotates its code. Multipeer requires Apple session encryption plus the same application-level key agreement, mutual proof, direction-separated keys, and replay protection.
 
 ### 5.2 Framing
 
@@ -177,6 +190,12 @@ The shared packet codec supports:
 - JPEG frames retained for compatibility;
 - structured H.264 frames containing sequence, dimensions, keyframe state, parameter sets, and encoded sample bytes.
 
+Authenticated peers also exchange a bounded system-information snapshot through
+the encrypted control channel. The receiver validates string lengths, processor
+and storage ranges, and the 16 KiB encoded limit before displaying it. This
+snapshot deliberately omits authentication secrets, stable device identifiers,
+network addresses, and filesystem paths.
+
 ### 5.4 Trust boundary
 
 Encryption protects packet confidentiality and integrity. The one-time-code proof authenticates the ephemeral key transcript, and the remembered 256-bit credential authenticates later sessions. The mobile identifier remains app-generated rather than hardware-attested, so **Forget All** should be used if a trusted device is lost.
@@ -196,7 +215,7 @@ Encryption protects packet confidentiality and integrity. The one-time-code proo
 - up to 40 frames per second on direct LAN/AWDL and 30 on nearby fallback;
 - transport-specific bitrate and frame pacing;
 - automatic 15 fps pacing while the iPad viewer is in background PiP, restored on foreground return;
-- keyframes at least every 0.25 seconds for rapid decoder recovery.
+- one periodic keyframe per second, plus an immediate keyframe request when a transport drops a dependent frame chain.
 
 ### 6.3 Flow control
 
@@ -205,7 +224,7 @@ The Mac never allows old frames to create an ever-growing latency queue:
 - ScreenCaptureKit queue depth is two surfaces;
 - only one dependent frame waits behind the in-flight frame;
 - direct LAN/AWDL sends the next frame when Network.framework finishes processing the preceding send, avoiding a frame-rate limit based on round-trip latency;
-- nearby Multipeer delivery uses a bounded six-frame acknowledgement window instead of serializing every frame behind a full round trip;
+- nearby Multipeer video does not send a reliable receipt for every frame, avoiding reverse-path congestion and round-trip gating;
 - if the queue saturates, dependent frames are discarded;
 - transmission resumes at the next keyframe;
 - initial keyframes are retried after the iPad display layer becomes ready.
@@ -322,8 +341,7 @@ On iPadOS:
 | `Mac/ScreenStreamer.swift` | ScreenCaptureKit capture |
 | `Mac/H264Encoder.swift` | VideoToolbox H.264 encoding |
 | `Mac/RemoteInputController.swift` | Accessibility checks and CGEvent injection |
-| `Mac/SidecarConnector.swift` | Explicit private SidecarCore launcher |
-| `Mac/CableDetector.swift` | USB iPad detection through IOKit |
+| `Mac/SidecarConnector.swift` | Public Displays settings shortcut |
 | `Pad/SidecarBridgePadApp.swift` | iPadOS app lifecycle |
 | `Pad/PadConnectionModel.swift` | Discovery, display, input, and background state |
 | `Pad/PadPeerService.swift` | Direct/P2P selection and Multipeer browser |
@@ -395,12 +413,11 @@ The Mac executable includes:
 com.apple.security.app-sandbox = true
 com.apple.security.network.client = true
 com.apple.security.network.server = true
-com.apple.security.device.usb = true
 ```
 
 ### 12.3 Privacy manifest
 
-The iPad target contains `PrivacyInfo.xcprivacy`, declaring required-reason access for UserDefaults and system boot time. The app declares no tracking and no collected data in that manifest.
+Both targets contain `PrivacyInfo.xcprivacy`. The iPad target declares required-reason access for UserDefaults and system boot time. Both declare no tracking and no collected data.
 
 ### 12.4 Encryption export declaration
 
@@ -417,7 +434,7 @@ The app uses Curve25519, ChaChaPoly, and HKDF-SHA256 through Apple's CryptoKit. 
 
 The public in-app transport is built from ScreenCaptureKit, VideoToolbox, Network.framework, Multipeer Connectivity, CryptoKit, and documented UI/input facilities.
 
-The explicit System Sidecar launcher uses private `SidecarCore` selectors. Apple requires App Store apps to use public APIs. A production App Store build should compile out or remove the private launcher before review. Personal Xcode-signed builds may retain it at the developer's own risk.
+The System Sidecar button uses the public Displays settings URL. Build 31 contains no private `SidecarCore` path or selector.
 
 ## 13. Troubleshooting
 
@@ -454,6 +471,14 @@ Do not interpret the Mac's **READY** or **STANDBY** state as a failed connection
 - Reopen both apps to clear an old MCSession.
 - Check whether a pairing alert is waiting behind another Mac window.
 - Inspect logs for a real 12-second handshake timeout. Idle advertisements should no longer reset at that interval.
+
+### 13.2a The iPad discovers the Mac but pairing is rejected
+
+Both apps must be from the same current build. The direct wire protocol is versioned and fails closed when either endpoint is older; this prevents an accidental downgrade to the earlier packet layer. Build 31 uses the old `SidecarBridge-LAN-v1`/binding-v2 records, while current builds use the replay-protected `SidecarBridge-LAN-v3`/secure-packet-v3 records. Install the same current Mac and iPad build before troubleshooting permissions.
+
+Trusted-device credentials are stored in the protected Keychain. A credential made by an older build is migrated from the legacy Keychain on first read on both macOS and iOS/iPadOS. If the saved mobile credential is rejected, the iPad removes only that Mac entry and asks for the Mac's currently displayed one-time code; one successful proof replaces the credential. This recovery does not disable authentication and does not delete other authorized devices.
+
+The in-app stream has no raw USB transport. A cable may create a usable network route for Network.framework, but a cable by itself cannot bypass the LAN listener, pairing proof, or the Mac firewall. Native Apple Sidecar remains a separate, user-started system session.
 
 ### 13.3 Connection succeeds but the screen does not update
 
@@ -534,7 +559,7 @@ DEVELOPER_DIR=/Volumes/D/Xcode.app/Contents/Developer \
 
 - Native Sidecar cannot appear inside SidecarBridge on iPad.
 - The public fallback mirrors the main display rather than adding an extended display.
-- The private Sidecar launcher is not App Store-safe.
+- Apple does not provide a public API for automatically starting native Sidecar.
 - Peer-name persistence is weaker than certificate-backed device identity.
 - There is no public-Internet relay or cloud rendezvous service.
 - Guest Wi-Fi/client isolation can prevent direct same-LAN communication.
@@ -555,5 +580,5 @@ Before publishing a new build:
 8. Verify `ITSAppUsesNonExemptEncryption` is `false` in both final Info.plists.
 9. Test direct same-Wi-Fi discovery, nearby fallback, encrypted handshake, first video frame, click, drag, scroll, and keyboard input.
 10. Confirm the Mac advertisement stays stable past 12 seconds while idle.
-11. Remove or compile out private SidecarCore behavior for an App Store review build.
+11. Verify the release binary contains no private `SidecarCore` path or selector.
 12. Keep archives, exports, verification folders, and installed development copies on `/Volumes/D`.

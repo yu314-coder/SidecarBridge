@@ -23,6 +23,7 @@ final class PadConnectionModel: ObservableObject {
     @Published var connectionLatencyMS: Int?
     @Published var streamAspectRatio: CGFloat = 16.0 / 9.0
     @Published var remoteInputAuthorized = false
+    @Published var remoteInputUnavailable = false
     @Published var controlLatencyMS: Int?
     @Published var lastInputAccepted = true
     @Published var remotePointer: CGPoint?
@@ -54,7 +55,13 @@ final class PadConnectionModel: ObservableObject {
     @Published var pairingMacName = "Mac"
     @Published var pairingError: String?
     @Published var discoveredMacs: [String] = []
-    @Published var selectedMacName: String?
+    @Published var selectedMacName = UserDefaults.standard.string(
+        forKey: "selectedMacName"
+    )
+    @Published var localSystemInformation = SystemInformation.current()
+    @Published var remoteSystemInformation: SystemInformation?
+    @Published var diagnosticActionDetail = "System information is ready."
+    @Published var streamDimensions = "Waiting for video"
 
     let videoDisplay = VideoDisplayController()
 
@@ -79,6 +86,11 @@ final class PadConnectionModel: ObservableObject {
     private var frameWindowCount = 0
     private var discoveryStartedAt = ProcessInfo.processInfo.systemUptime
     private var discoveryClockTask: Task<Void, Never>?
+    private var connectionAttemptedMacName: String?
+    private var applicationIsBackgrounded = false
+    private var restoreStreamAfterBackground = false
+    private var isResumingFromBackground = false
+    private var foregroundResumeTask: Task<Void, Never>?
 
     var isDiscoveryTakingLonger: Bool {
         !isConnected && discoveryElapsedSeconds >= 8
@@ -139,16 +151,40 @@ final class PadConnectionModel: ObservableObject {
             self.pairingMacName = macName
             self.pairingError = error
             self.status = "Enter the Mac pairing code"
-            self.detail = "This one-time code creates a trusted-device credential for future local connections."
+            self.detail = "This short-lived 16-character code mutually authenticates both devices, then creates a Keychain credential."
         }
         peers.onDiscoveredMacsChanged = { [weak self] names in
-            self?.discoveredMacs = names
+            guard let self else { return }
+            self.discoveredMacs = names
+            guard !self.isConnected, !self.pairingRequired else { return }
+
+            let preferredMac: String?
+            if let selectedMacName = self.selectedMacName {
+                preferredMac = names.contains(selectedMacName)
+                    ? selectedMacName
+                    : nil
+            } else {
+                // The first launch still chooses automatically when there is
+                // only one Mac. Authentication remains protected by the
+                // one-time pairing code and Keychain credential.
+                preferredMac = names.count == 1 ? names[0] : nil
+            }
+
+            guard let preferredMac,
+                  self.connectionAttemptedMacName != preferredMac else { return }
+            self.connect(
+                to: preferredMac,
+                detail: self.selectedMacName == nil
+                    ? "One Mac found; establishing an encrypted local session."
+                    : "Reconnecting to your remembered trusted Mac."
+            )
         }
 
         peers.onConnectionChanged = { [weak self] connected, peerOrError in
             guard let self else { return }
             self.isConnected = connected
             if connected {
+                self.remoteInputUnavailable = false
                 self.pairingRequired = false
                 self.pairingCode = ""
                 self.pairingError = nil
@@ -159,6 +195,13 @@ final class PadConnectionModel: ObservableObject {
                 self.connectionTransport = isDirectLAN ? "Direct local link / AWDL" : "Nearby P2P fallback"
                 self.status = isDirectLAN ? "Mac found on same Wi-Fi" : "Mac found nearby"
                 self.sendDisplayCapabilities()
+                self.peers.send(ControlMessage(
+                    .status,
+                    detail: self.applicationIsBackgrounded
+                        ? "viewer-background"
+                        : "viewer-foreground"
+                ))
+                self.exchangeSystemInformation()
                 if self.preferTrackpadControl {
                     self.detail = isDirectLAN
                         ? "Direct encrypted local link; requesting the input-capable stream."
@@ -170,19 +213,35 @@ final class PadConnectionModel: ObservableObject {
                         : "Mac found. Tap Open System Sidecar only if you want to leave this app."
                 }
             } else {
+                if self.applicationIsBackgrounded || self.isResumingFromBackground {
+                    self.connectionHealthDetail = self.applicationIsBackgrounded
+                        ? "Session suspended — will restore when you return"
+                        : "Restoring remembered Mac session"
+                    self.connectionLatencyMS = nil
+                    self.connectedUsingDirectLAN = false
+                    return
+                }
                 self.connectionHealthDetail = "Recovering connection"
                 self.connectionLatencyMS = nil
                 self.connectedUsingDirectLAN = false
                 self.startDiscoveryClockIfNeeded()
                 self.isStreaming = false
                 self.remoteInputAuthorized = false
+                self.remoteInputUnavailable = false
                 self.remotePointer = nil
                 self.pointerIsPressed = false
+                self.remoteSystemInformation = nil
                 self.frame = nil
                 self.initialFrameRetryTask?.cancel()
                 self.videoDisplay.stopPictureInPicture()
                 self.videoDisplay.flush()
-                if let peerOrError, peerOrError.localizedCaseInsensitiveContains("NoAuth") {
+                let protocolMismatch = peerOrError?.localizedCaseInsensitiveContains("older insecure connection protocol") == true
+                    || peerOrError?.localizedCaseInsensitiveContains("update sidecarbridge") == true
+                if protocolMismatch {
+                    self.status = "Update SidecarBridge on both devices"
+                    self.detail = "The iPad and Mac builds are incompatible. Update the TestFlight iPad app and the Mac app to the same current build."
+                    self.lastDiscoveryIssue = self.detail
+                } else if let peerOrError, peerOrError.localizedCaseInsensitiveContains("NoAuth") {
                     self.localNetworkAccess = .denied
                     self.status = "Allow Local Network access"
                     self.detail = "iPadOS blocked same-Wi-Fi discovery. Open Settings and enable Local Network for SidecarBridge."
@@ -201,8 +260,10 @@ final class PadConnectionModel: ObservableObject {
         peers.onFilePacket = { [weak self] transfer in self?.fileTransfer.handle(transfer) }
         peers.onFrame = { [weak self] data in
             guard let self, let image = UIImage(data: data) else { return }
+            self.finishForegroundResume()
             self.frame = image
             self.streamAspectRatio = image.size.width / max(image.size.height, 1)
+            self.streamDimensions = "\(Int(image.size.width)) × \(Int(image.size.height)) JPEG"
             self.isStreaming = true
             self.status = "Mac screen"
             self.detail = "Using the SidecarBridge fallback stream."
@@ -210,8 +271,10 @@ final class PadConnectionModel: ObservableObject {
         }
         peers.onVideoFrame = { [weak self] frame in
             guard let self else { return }
+            self.finishForegroundResume()
             self.frame = nil
             self.streamAspectRatio = CGFloat(frame.width) / CGFloat(max(frame.height, 1))
+            self.streamDimensions = "\(frame.width) × \(frame.height) H.264"
             let displayed = self.videoDisplay.enqueue(frame)
             if displayed { self.recordVideoFrame() }
             self.isStreaming = true
@@ -228,12 +291,21 @@ final class PadConnectionModel: ObservableObject {
     var isFileTransferring: Bool { fileTransfer.isBusy }
 
     func selectMac(_ name: String) {
+        connect(
+            to: name,
+            detail: "Establishing an encrypted local session."
+        )
+    }
+
+    private func connect(to name: String, detail connectionDetail: String) {
         selectedMacName = name
+        connectionAttemptedMacName = name
+        UserDefaults.standard.set(name, forKey: "selectedMacName")
         pairingRequired = false
         pairingCode = ""
         pairingError = nil
         status = "Connecting to \(name)…"
-        detail = "Establishing an encrypted local session."
+        detail = connectionDetail
         peers.selectMac(named: name)
     }
 
@@ -247,14 +319,30 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func submitPairingCode() {
-        let normalized = pairingCode.filter(\.isNumber)
-        guard normalized.count == 8 else {
-            pairingError = "Enter all 8 digits shown in the Mac app."
+        let normalized = PairingCode.normalize(pairingCode)
+        guard normalized.count == PairingCode.characterCount else {
+            pairingError = "Enter all 16 characters shown in the Mac app."
             return
         }
         pairingError = nil
         detail = "Verifying the one-time code over the encrypted local link…"
         peers.submitPairingCode(normalized)
+    }
+
+    func forgetTrustedMacs() {
+        SecureCredentialStore.removeAll(accountPrefix: "pad.mac.")
+        UserDefaults.standard.removeObject(forKey: "selectedMacName")
+        UserDefaults.standard.removeObject(forKey: "lastDirectMacHost")
+        selectedMacName = nil
+        connectionAttemptedMacName = nil
+        pairingRequired = false
+        pairingCode = ""
+        pairingError = nil
+        isConnected = false
+        connectedUsingDirectLAN = false
+        status = "Trusted Macs forgotten"
+        detail = "Select a Mac and enter its current 16-character pairing code."
+        peers.restart()
     }
 
     private func configureFileTransfer() {
@@ -282,37 +370,145 @@ final class PadConnectionModel: ObservableObject {
         peers.restart()
     }
 
+    func refreshSystemInformation() {
+        localSystemInformation = SystemInformation.current()
+        diagnosticActionDetail = isConnected
+            ? "Refreshed this device and requested the connected Mac."
+            : "Refreshed this device. Connect a Mac to see both devices."
+        exchangeSystemInformation()
+    }
+
+    func copyDiagnosticReport() {
+        UIPasteboard.general.string = diagnosticReport
+        diagnosticActionDetail = "Privacy-safe diagnostic report copied."
+    }
+
+    var diagnosticReport: String {
+        DiagnosticReportBuilder.make(
+            local: localSystemInformation,
+            remote: remoteSystemInformation,
+            connection: [
+                DiagnosticField("Status", status),
+                DiagnosticField("Transport", connectionTransport),
+                DiagnosticField("Encrypted Mac", isConnected ? "Connected" : "Not connected"),
+                DiagnosticField("Streaming", isStreaming ? "Active" : "Inactive"),
+                DiagnosticField("Stream", streamDimensions),
+                DiagnosticField("Displayed frame rate", streamFPS > 0 ? "\(streamFPS) FPS" : "Not measured"),
+                DiagnosticField(
+                    "Connection latency",
+                    connectionLatencyMS.map { "\($0) ms" } ?? "Not measured"
+                ),
+                DiagnosticField(
+                    "Input latency",
+                    controlLatencyMS.map { "\($0) ms" } ?? "Not measured"
+                ),
+                DiagnosticField("Link health", connectionHealthDetail),
+                DiagnosticField(
+                    "Local Network permission",
+                    localNetworkAccess.isGranted ? "Passed" : localNetworkPermissionNeeded ? "Required" : "Checking"
+                ),
+                DiagnosticField(
+                    "Mac Accessibility permission",
+                    remoteInputAuthorized ? "Passed" : "Required or unknown"
+                ),
+                DiagnosticField(
+                    "Background viewer",
+                    isPictureInPictureActive ? "Active" : isPictureInPicturePossible ? "Available" : "Unavailable"
+                )
+            ]
+        )
+    }
+
+    private func exchangeSystemInformation() {
+        guard isConnected else { return }
+        if let message = ControlMessage.systemInformation(localSystemInformation) {
+            peers.send(message)
+        }
+        peers.send(.requestSystemInformation)
+    }
+
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            let shouldRestoreStream = restoreStreamAfterBackground
+            applicationIsBackgrounded = false
             backgroundRequested = false
             backgroundActivationTask?.cancel()
             backgroundActivationTask = nil
             if isPictureInPictureActive { videoDisplay.stopPictureInPicture() }
+            if shouldRestoreStream {
+                beginForegroundResumePresentation()
+            }
+            if started { peers.resumeAfterBackground() }
             if isConnected {
                 peers.send(ControlMessage(.status, detail: "viewer-foreground"))
             }
             endBackgroundTask()
-            if started { peers.resumeAfterBackground() }
         case .background:
+            prepareConnectionForBackgroundIfNeeded()
             guard isStreaming, keepRunningInBackground else { return }
             backgroundRequested = true
             if !isPictureInPictureActive {
                 beginBackgroundGracePeriod()
-                backgroundViewerDetail = "Starting background viewer…"
+                backgroundViewerDetail = "Completing background viewer start…"
                 _ = videoDisplay.startPictureInPicture()
                 verifyBackgroundActivation()
             } else {
                 endBackgroundTask()
             }
         case .inactive:
+            prepareConnectionForBackgroundIfNeeded()
             guard isStreaming, keepRunningInBackground else { return }
             backgroundRequested = true
             beginBackgroundGracePeriod()
-            backgroundViewerDetail = "Preparing Picture in Picture…"
+            // PiP needs to start while SidecarBridge is still transitioning out
+            // of the foreground. Waiting for `.background` is too late on some
+            // iPadOS releases and leaves only the short background grace task.
+            backgroundViewerDetail = "Starting Picture in Picture…"
+            _ = videoDisplay.startPictureInPicture()
+            verifyBackgroundActivation()
         @unknown default:
             break
         }
+    }
+
+    private func prepareConnectionForBackgroundIfNeeded() {
+        guard !applicationIsBackgrounded else { return }
+        applicationIsBackgrounded = true
+        restoreStreamAfterBackground = isStreaming
+        if isConnected {
+            peers.send(ControlMessage(.status, detail: "viewer-background"))
+        }
+        peers.prepareForBackground()
+    }
+
+    private func beginForegroundResumePresentation() {
+        isResumingFromBackground = true
+        status = "Resuming Mac screen…"
+        detail = "Restoring the remembered encrypted session."
+        connectionHealthDetail = "Fast resume in progress"
+        foregroundResumeTask?.cancel()
+        foregroundResumeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled,
+                  let self,
+                  self.isResumingFromBackground else { return }
+            self.isResumingFromBackground = false
+            self.restoreStreamAfterBackground = false
+            self.status = "Looking for your Mac…"
+            self.detail = "The saved session did not resume; discovery is continuing automatically."
+            self.startDiscoveryClockIfNeeded()
+        }
+    }
+
+    private func finishForegroundResume() {
+        guard !applicationIsBackgrounded,
+              isResumingFromBackground || restoreStreamAfterBackground else { return }
+        foregroundResumeTask?.cancel()
+        foregroundResumeTask = nil
+        isResumingFromBackground = false
+        restoreStreamAfterBackground = false
+        connectionHealthDetail = "Encrypted link resumed"
     }
 
     func openAppSettings() {
@@ -383,7 +579,7 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func sendInput(_ input: RemoteInputEvent) {
-        guard isStreaming else { return }
+        guard isStreaming, !remoteInputUnavailable else { return }
         updatePointerFeedback(for: input)
         inputSequence &+= 1
         var sequenced = input
@@ -523,12 +719,12 @@ final class PadConnectionModel: ObservableObject {
     private func verifyBackgroundActivation() {
         backgroundActivationTask?.cancel()
         backgroundActivationTask = Task { [weak self] in
-            for attempt in 1...3 {
+            for attempt in 1...5 {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled, let self, self.backgroundRequested else { return }
                 if self.isPictureInPictureActive { return }
                 if self.isPictureInPicturePossible {
-                    self.backgroundViewerDetail = "Background viewer retry \(attempt) of 3…"
+                    self.backgroundViewerDetail = "Background viewer retry \(attempt) of 5…"
                     _ = self.videoDisplay.startPictureInPicture()
                 }
             }
@@ -546,6 +742,19 @@ final class PadConnectionModel: ObservableObject {
     }
 
     private func handle(_ command: ControlMessage) {
+        if command.kind == .requestSystemInformation {
+            localSystemInformation = SystemInformation.current()
+            if let message = ControlMessage.systemInformation(localSystemInformation) {
+                peers.send(message)
+            }
+            return
+        }
+        if command.kind == .systemInformation {
+            guard let information = command.systemInformationPayload else { return }
+            remoteSystemInformation = information
+            diagnosticActionDetail = "Connected Mac information updated."
+            return
+        }
         guard command.kind == .status, let value = command.detail else { return }
         switch value {
         case "sidecar-wired":
@@ -564,15 +773,23 @@ final class PadConnectionModel: ObservableObject {
             status = "System Sidecar connected"
             detail = "iPadOS is switching to Apple's separate Sidecar display app."
         case "accessibility-required":
+            remoteInputUnavailable = false
             remoteInputAuthorized = false
             status = "Allow remote input on the Mac"
             detail = "Enable SidecarBridge under Privacy & Security → Accessibility. Video can continue meanwhile."
         case "accessibility-passed":
+            remoteInputUnavailable = false
             remoteInputAuthorized = true
             if isStreaming {
                 status = "Mac screen"
                 detail = "Hardware-decoded H.264 HiDPI stream with remote input."
             }
+        case "remote-input-unavailable-store-build":
+            remoteInputUnavailable = true
+            remoteInputAuthorized = false
+            lastInputAccepted = false
+            status = "Viewer-only Mac companion"
+            detail = "This Mac App Store edition does not provide remote keyboard or trackpad input. Install the direct companion build for full control."
         default:
             if value.hasPrefix("input-ack:") {
                 let parts = value.split(separator: ":")

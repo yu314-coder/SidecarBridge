@@ -202,7 +202,10 @@ final class VideoDisplayController: NSObject {
     private func armPictureInPictureStartWatchdog(for controller: AVPictureInPictureController) {
         pictureInPictureStartWatchdog?.cancel()
         pictureInPictureStartWatchdog = Task { [weak self, weak controller] in
-            try? await Task.sleep(for: .seconds(3))
+            // Starting while the scene transitions can legitimately take
+            // several seconds. A three-second watchdog cancelled successful
+            // starts on slower devices before iPadOS finished the handoff.
+            try? await Task.sleep(for: .seconds(8))
             guard !Task.isCancelled,
                   let self,
                   let controller,

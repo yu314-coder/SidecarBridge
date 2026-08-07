@@ -1,7 +1,13 @@
 import SwiftUI
 import GameController
+import OSLog
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
+
+private let remoteTextLog = Logger(
+    subsystem: "io.sidecarbridge.mac",
+    category: "RemoteText"
+)
 
 final class PointerPressGestureRecognizer: UIGestureRecognizer {
     private var trackedTouch: UITouch?
@@ -170,7 +176,169 @@ struct RemoteInputSurface: UIViewRepresentable {
     }
 }
 
-final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
+private final class RemoteTextInputView: UITextView {
+    static let compositionAnchor = String(repeating: "1", count: 64)
+
+    var showsSoftwareKeyboard = false {
+        didSet {
+            updateInputView()
+        }
+    }
+    // Start with UIKit's real input view. GCKeyboard.coalesced is not a
+    // reliable signal for the keyboard built into an iPad Magic Keyboard, and
+    // replacing inputView too early prevents the system-owned Globe key from
+    // publishing its UITextInputMode change.
+    var hasHardwareKeyboard = true {
+        didSet {
+            updateInputView()
+        }
+    }
+    var onDeleteAtAnchor: (() -> Void)?
+    var onHardwareKeyDown: ((UIKey) -> Bool)?
+    var onHardwareKeyUp: ((UIKey) -> Bool)?
+    var onControlArrow: ((String) -> Void)?
+    var onInputModeSwitch: (() -> Void)?
+    var onTextInputStateChanged: (() -> Void)?
+
+    private let suppressedSoftwareKeyboardView = UIView(frame: .zero)
+
+    private func updateInputView() {
+        // A zero-sized custom input view suppresses the on-screen keyboard, but
+        // it also disconnects the standard text-input system that tracks the
+        // Magic Keyboard's Globe/input-source key. Keep UIKit's real input view
+        // while hardware is attached; iPadOS already hides its software
+        // keyboard in that state.
+        let usesSystemInputView = showsSoftwareKeyboard || hasHardwareKeyboard
+        if usesSystemInputView {
+            guard inputView != nil else { return }
+            inputView = nil
+        } else {
+            guard inputView !== suppressedSoftwareKeyboardView else { return }
+            inputView = suppressedSoftwareKeyboardView
+        }
+        if isFirstResponder {
+            reloadInputViews()
+        }
+    }
+
+    override var keyCommands: [UIKeyCommand]? {
+        [
+            controlArrowCommand(UIKeyCommand.inputUpArrow, title: "Control–Up"),
+            controlArrowCommand(UIKeyCommand.inputDownArrow, title: "Control–Down"),
+            controlArrowCommand(UIKeyCommand.inputLeftArrow, title: "Control–Left"),
+            controlArrowCommand(UIKeyCommand.inputRightArrow, title: "Control–Right"),
+            inputModeSwitchCommand()
+        ]
+    }
+
+    override func deleteBackward() {
+        // While an IME has marked text, Backspace must edit the local
+        // composition (for example, the uncommitted pinyin). Keep a protected
+        // anchor in the backing document so UIKit always has surrounding text
+        // for multistage input; only forward deletion at that boundary.
+        if markedTextRange == nil,
+           selectedRange.length == 0,
+           selectedRange.location <= Self.compositionAnchor.utf16.count {
+            onDeleteAtAnchor?()
+            return
+        }
+        super.deleteBackward()
+    }
+
+    override func insertText(_ text: String) {
+        super.insertText(text)
+        // Candidate confirmation is not guaranteed to produce a separate
+        // UITextViewDelegate change after the marked range disappears.
+        onTextInputStateChanged?()
+    }
+
+    override func unmarkText() {
+        super.unmarkText()
+        // A hardware Chinese input method can commit by only ending its marked
+        // range. Observe that transition directly so the text is not held
+        // until the next English keystroke.
+        onTextInputStateChanged?()
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var unhandled = Set<UIPress>()
+        for press in presses {
+            guard let key = press.key, onHardwareKeyDown?(key) == true else {
+                unhandled.insert(press)
+                continue
+            }
+        }
+        if !unhandled.isEmpty {
+            super.pressesBegan(unhandled, with: event)
+        }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let unhandled = unhandledHardwareKeyReleases(presses)
+        if !unhandled.isEmpty {
+            super.pressesEnded(unhandled, with: event)
+        }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let unhandled = unhandledHardwareKeyReleases(presses)
+        if !unhandled.isEmpty {
+            super.pressesCancelled(unhandled, with: event)
+        }
+    }
+
+    private func unhandledHardwareKeyReleases(
+        _ presses: Set<UIPress>
+    ) -> Set<UIPress> {
+        var unhandled = Set<UIPress>()
+        for press in presses {
+            guard let key = press.key, onHardwareKeyUp?(key) == true else {
+                unhandled.insert(press)
+                continue
+            }
+        }
+        return unhandled
+    }
+
+    private func controlArrowCommand(_ input: String, title: String) -> UIKeyCommand {
+        let command = UIKeyCommand(
+            input: input,
+            modifierFlags: [.control],
+            action: #selector(handleControlArrow(_:))
+        )
+        command.discoverabilityTitle = title
+        return command
+    }
+
+    private func inputModeSwitchCommand() -> UIKeyCommand {
+        let command = UIKeyCommand(
+            input: " ",
+            modifierFlags: [.control],
+            action: #selector(handleInputModeSwitch(_:))
+        )
+        command.discoverabilityTitle = "Switch Mac Input Source"
+        command.wantsPriorityOverSystemBehavior = true
+        return command
+    }
+
+    @objc private func handleControlArrow(_ command: UIKeyCommand) {
+        let key: String
+        switch command.input {
+        case UIKeyCommand.inputUpArrow: key = "up"
+        case UIKeyCommand.inputDownArrow: key = "down"
+        case UIKeyCommand.inputLeftArrow: key = "left"
+        case UIKeyCommand.inputRightArrow: key = "right"
+        default: return
+        }
+        onControlArrow?(key)
+    }
+
+    @objc private func handleInputModeSwitch(_ command: UIKeyCommand) {
+        onInputModeSwitch?()
+    }
+}
+
+final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     var onInput: (RemoteInputEvent) -> Void
     var onPointerCalibration: (RemotePointerButtonMapping) -> Void
     var onZoom: (CGFloat, CGPoint) -> Void
@@ -183,14 +351,16 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     var showsSoftwareKeyboard: Bool {
         didSet {
             guard showsSoftwareKeyboard != oldValue else { return }
-            if isFirstResponder {
-                reloadInputViews()
+            textInputView.showsSoftwareKeyboard = showsSoftwareKeyboard
+            if showsSoftwareKeyboard {
+                didSuppressUnexpectedSoftwareKeyboard = false
             } else {
-                reclaimKeyboardFocus()
+                didSuppressUnexpectedSoftwareKeyboard = true
+                textInputView.hasHardwareKeyboard = false
             }
+            reclaimKeyboardFocus()
         }
     }
-    var hasText: Bool { true }
     private var lastPointerTime: TimeInterval = 0
     private var isPrimaryDragging = false
     private var activePrimaryClickCount = 1
@@ -209,7 +379,11 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private var directTouchStartedAt: TimeInterval = 0
     private var directTouchMovedBeyondClickSlop = false
     private var directTouchConsumedByHold = false
-    private let suppressedSoftwareKeyboardView = UIView(frame: .zero)
+    private let textInputView = RemoteTextInputView(frame: .zero)
+    private var lastCommittedInputBuffer = RemoteTextInputView.compositionAnchor
+    private var isUpdatingInputBuffer = false
+    private var pendingTextCommitGeneration = 0
+    private var pendingIMECommitGeneration = 0
     private let pointerEmissionInterval = 1.0 / 120.0
     private let pointerDoubleClickInterval: TimeInterval = 0.42
     private let pointerDoubleClickDistance = 44.0
@@ -217,6 +391,14 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private let directTouchClickSlop: CGFloat = 12
     private var gameControllerControlIsDown = false
     private var lastControlArrow: (key: String, time: TimeInterval)?
+    private var lastInputModeSwitchAt: TimeInterval = 0
+    private var lastForwardedInputLanguage: String?
+    private var inputLanguageState = RemoteInputLanguageState()
+    private var macOwnsInputMode = false
+    private var didSuppressUnexpectedSoftwareKeyboard = false
+    private var hardwareKeyRepeatTasks: [Int: Task<Void, Never>] = [:]
+    private let hardwareKeyRepeatDelay = Duration.milliseconds(420)
+    private let hardwareKeyRepeatInterval = Duration.milliseconds(45)
 
     init(
         contentAspectRatio: CGFloat,
@@ -253,6 +435,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             UIAccessibilityCustomAction(name: "Double-click", target: self, selector: #selector(accessibilityDoubleClick)),
             UIAccessibilityCustomAction(name: "Right click", target: self, selector: #selector(accessibilityRightClick))
         ]
+        configureTextInput()
         configureGestures()
         configureHardwareKeyboard()
         NotificationCenter.default.addObserver(
@@ -279,54 +462,32 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             name: .GCKeyboardDidConnect,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(hardwareKeyboardDidConnect(_:)),
+            name: .GCKeyboardDidDisconnect,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(inputModeDidChange(_:)),
+            name: UITextInputMode.currentInputModeDidChangeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(softwareKeyboardWillShow(_:)),
+            name: UIResponder.keyboardWillShowNotification,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) { nil }
 
     deinit {
+        hardwareKeyRepeatTasks.values.forEach { $0.cancel() }
         GCKeyboard.coalesced?.keyboardInput?.keyChangedHandler = nil
         NotificationCenter.default.removeObserver(self)
-    }
-
-    override var canBecomeFirstResponder: Bool { true }
-
-    // UIKit can route modified arrows through UIKeyCommand instead of
-    // pressesBegan(_:with:). Register these explicitly so a Magic Keyboard or
-    // other hardware keyboard always delivers the four control-navigation
-    // shortcuts to the Mac.
-    override var keyCommands: [UIKeyCommand]? {
-        [
-            controlArrowCommand(UIKeyCommand.inputUpArrow, title: "Control–Up"),
-            controlArrowCommand(UIKeyCommand.inputDownArrow, title: "Control–Down"),
-            controlArrowCommand(UIKeyCommand.inputLeftArrow, title: "Control–Left"),
-            controlArrowCommand(UIKeyCommand.inputRightArrow, title: "Control–Right")
-        ]
-    }
-
-    private func controlArrowCommand(_ input: String, title: String) -> UIKeyCommand {
-        let command = UIKeyCommand(
-            input: input,
-            modifierFlags: [.control],
-            action: #selector(handleControlArrow(_:))
-        )
-        command.discoverabilityTitle = title
-        return command
-    }
-
-    @objc private func handleControlArrow(_ command: UIKeyCommand) {
-        let key: String
-        switch command.input {
-        case UIKeyCommand.inputUpArrow: key = "up"
-        case UIKeyCommand.inputDownArrow: key = "down"
-        case UIKeyCommand.inputLeftArrow: key = "left"
-        case UIKeyCommand.inputRightArrow: key = "right"
-        default: return
-        }
-        sendControlArrow(key)
-    }
-
-    override var inputView: UIView? {
-        showsSoftwareKeyboard ? nil : suppressedSoftwareKeyboardView
     }
 
     override func accessibilityIncrement() {
@@ -363,13 +524,13 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     func reclaimKeyboardFocus() {
-        guard window != nil, !isFirstResponder else { return }
+        guard window != nil, !textInputView.isFirstResponder else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self,
                   self.window?.isKeyWindow == true,
                   UIApplication.shared.applicationState == .active,
-                  !self.isFirstResponder else { return }
-            self.becomeFirstResponder()
+                  !self.textInputView.isFirstResponder else { return }
+            self.textInputView.becomeFirstResponder()
         }
     }
 
@@ -383,44 +544,331 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     @objc private func hardwareKeyboardDidConnect(_ notification: Notification) {
         configureHardwareKeyboard()
+        synchronizeRemoteInputMode()
     }
 
-    func insertText(_ text: String) {
-        guard let event = RemoteKeyboardInput.event(text: text) else { return }
-        onInput(event)
+    @objc private func inputModeDidChange(_ notification: Notification) {
+        macOwnsInputMode = false
+        let announcedLanguage = (notification.object as? UITextInputMode)?
+            .primaryLanguage
+        // The Magic Keyboard Globe/Switch Keyboard key is consumed by
+        // iPadOS, so it doesn't have a public UIKeyCommand input. Apple does
+        // publish this notification for the resulting mode change. Cycle the
+        // Mac first even when the new mode has no language (for example,
+        // Emoji), then reconcile to the exact language when UIKit provides it.
+        if lastForwardedInputLanguage != nil {
+            forwardInputModeSwitch(source: "uikit-input-mode-notification")
+        }
+        synchronizeRemoteInputMode(
+            language: announcedLanguage,
+            force: true
+        )
     }
 
-    func deleteBackward() {
-        onInput(.key("delete"))
+    @objc private func softwareKeyboardWillShow(_ notification: Notification) {
+        guard !showsSoftwareKeyboard,
+              let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                as? CGRect,
+              frame.height > 100 else { return }
+        // Only suppress a real on-screen keyboard. A Magic Keyboard normally
+        // keeps this path untouched, preserving Globe/input-mode events.
+        didSuppressUnexpectedSoftwareKeyboard = true
+        textInputView.hasHardwareKeyboard = false
     }
 
-    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        var unhandled = Set<UIPress>()
-        for press in presses {
-            guard let hardwareKey = press.key,
-                  let remoteEvent = remoteEvent(for: hardwareKey) else {
-                unhandled.insert(press)
-                continue
+    private func configureTextInput() {
+        textInputView.delegate = self
+        textInputView.showsSoftwareKeyboard = showsSoftwareKeyboard
+        textInputView.backgroundColor = .clear
+        textInputView.textColor = .clear
+        textInputView.tintColor = .clear
+        textInputView.alpha = 0.01
+        textInputView.autocorrectionType = .no
+        textInputView.autocapitalizationType = .none
+        textInputView.smartDashesType = .no
+        textInputView.smartQuotesType = .no
+        textInputView.smartInsertDeleteType = .no
+        textInputView.isScrollEnabled = false
+        textInputView.isAccessibilityElement = false
+        textInputView.accessibilityElementsHidden = true
+        textInputView.text = RemoteTextInputView.compositionAnchor
+        textInputView.selectedRange = NSRange(
+            location: RemoteTextInputView.compositionAnchor.utf16.count,
+            length: 0
+        )
+        textInputView.onDeleteAtAnchor = { [weak self] in
+            self?.onInput(.key("delete"))
+        }
+        textInputView.onControlArrow = { [weak self] key in
+            self?.sendControlArrow(key)
+        }
+        textInputView.onInputModeSwitch = { [weak self] in
+            self?.forwardInputModeSwitch(source: "control-space")
+        }
+        textInputView.onHardwareKeyDown = { [weak self] key in
+            self?.handleHardwareKeyDown(key) ?? false
+        }
+        textInputView.onHardwareKeyUp = { [weak self] key in
+            self?.handleHardwareKeyUp(key) ?? false
+        }
+        textInputView.onTextInputStateChanged = { [weak self, weak textInputView] in
+            guard let self, let textInputView else { return }
+            self.scheduleIMECommitPoll(from: textInputView)
+        }
+        addSubview(textInputView)
+        synchronizeRemoteInputMode(force: true)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // The view must remain in the responder hierarchy for UITextInput, but
+        // it should never cover or intercept the remote screen's gestures.
+        textInputView.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+    }
+
+    func textViewDidChange(_ textView: UITextView) {
+        guard !isUpdatingInputBuffer else { return }
+        scheduleCommittedTextFlush(from: textView)
+    }
+
+    private func scheduleCommittedTextFlush(from textView: UITextView) {
+        guard !isUpdatingInputBuffer else { return }
+        pendingTextCommitGeneration += 1
+        let generation = pendingTextCommitGeneration
+
+        // UIKit can notify its delegate before an IME has finished updating
+        // markedTextRange. Wait one run-loop before deciding that text is
+        // committed so provisional pinyin is never cleared or sent remotely.
+        DispatchQueue.main.async { [weak self, weak textView] in
+            guard let self,
+                  let textView,
+                  generation == self.pendingTextCommitGeneration else { return }
+            self.flushCommittedText(from: textView)
+        }
+    }
+
+    private func scheduleIMECommitPoll(from textView: UITextView) {
+        guard !isUpdatingInputBuffer else { return }
+        pendingIMECommitGeneration += 1
+        let generation = pendingIMECommitGeneration
+        pollForIMECommit(from: textView, generation: generation, attempt: 0)
+    }
+
+    private func pollForIMECommit(
+        from textView: UITextView,
+        generation: Int,
+        attempt: Int
+    ) {
+        let delay = attempt == 0 ? 0.0 : 0.016
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak textView] in
+            guard let self,
+                  let textView,
+                  generation == self.pendingIMECommitGeneration else { return }
+            if self.flushCommittedText(from: textView) {
+                return
             }
-            if remoteEvent.kind == .key,
-               let key = remoteEvent.key,
-               remoteEvent.modifiers?.contains("control") == true,
-               ["up", "down", "left", "right"].contains(key) {
-                sendControlArrow(key)
-            } else {
-                onInput(remoteEvent)
+            guard attempt < 75 else {
+                remoteTextLog.error("IME commit timed out without a committed delta")
+                return
+            }
+            self.pollForIMECommit(
+                from: textView,
+                generation: generation,
+                attempt: attempt + 1
+            )
+        }
+    }
+
+    @discardableResult
+    private func flushCommittedText(from textView: UITextView) -> Bool {
+        guard textView.markedTextRange == nil else { return false }
+
+        let currentBuffer = textView.text ?? ""
+        let delta = RemoteTextDelta.between(lastCommittedInputBuffer, and: currentBuffer)
+        guard !delta.isEmpty else { return false }
+        lastCommittedInputBuffer = currentBuffer
+
+        for _ in 0..<delta.deleteCount {
+            onInput(.key("delete"))
+        }
+        if let event = RemoteKeyboardInput.event(text: delta.insertedText) {
+            onInput(event)
+        }
+        remoteTextLog.notice(
+            "Committed remote text insertedCharacters=\(delta.insertedText.count, privacy: .public) deletions=\(delta.deleteCount, privacy: .public)"
+        )
+
+        // Preserve surrounding text across ordinary commits so Chinese,
+        // Japanese, and Korean input methods keep a stable document context.
+        // Rebase only after substantial growth, and never during composition.
+        if currentBuffer.utf16.count > 4096 {
+            rebaseInputBuffer(textView)
+        }
+        return true
+    }
+
+    func textView(
+        _ textView: UITextView,
+        shouldChangeTextIn range: NSRange,
+        replacementText text: String
+    ) -> Bool {
+        guard text == "\n", textView.markedTextRange == nil else { return true }
+        onInput(.key("return"))
+        return false
+    }
+
+    func textViewDidChangeSelection(_ textView: UITextView) {
+        scheduleIMECommitPoll(from: textView)
+        guard !isUpdatingInputBuffer,
+              textView.markedTextRange == nil,
+              textView.selectedRange.location
+                < RemoteTextInputView.compositionAnchor.utf16.count else { return }
+        textView.selectedRange = NSRange(
+            location: RemoteTextInputView.compositionAnchor.utf16.count,
+            length: 0
+        )
+    }
+
+    private func rebaseInputBuffer(_ textView: UITextView) {
+        pendingTextCommitGeneration += 1
+        isUpdatingInputBuffer = true
+        textView.text = RemoteTextInputView.compositionAnchor
+        textView.selectedRange = NSRange(
+            location: RemoteTextInputView.compositionAnchor.utf16.count,
+            length: 0
+        )
+        lastCommittedInputBuffer = RemoteTextInputView.compositionAnchor
+        isUpdatingInputBuffer = false
+    }
+
+    private func handleHardwareKeyDown(_ hardwareKey: UIKey) -> Bool {
+        let hidUsage = hardwareKey.keyCode.rawValue
+        let modifiers = remoteModifiers(for: hardwareKey)
+        if RemoteKeyboardInput.isInputModeSwitchShortcut(
+            hidUsage: hidUsage,
+            modifiers: modifiers
+        ) {
+            forwardInputModeSwitch(source: "control-space")
+            return true
+        }
+        if RemoteKeyboardInput.isChineseEnglishToggleHIDUsage(hidUsage) {
+            forwardChineseEnglishInputModeSwitch(source: "hid-zh-en-\(hidUsage)")
+            // Consume 中/英 locally. Letting iPadOS also switch caused its
+            // hidden software keyboard to appear and made the iPad and Mac
+            // input modes fight on the next physical key.
+            return true
+        }
+        if RemoteKeyboardInput.isLanguageSwitchHIDUsage(hidUsage) {
+            forwardInputModeSwitch(source: "hid-lang-\(hidUsage)")
+            // UIKit must also receive the key so the iPad input mode changes.
+            // Its notification then reconciles the Mac to the exact language.
+            return false
+        }
+        guard let remoteEvent = remoteEvent(for: hardwareKey) else { return false }
+        guard hardwareKeyRepeatTasks[hidUsage] == nil else {
+            // UIKit may deliver repeat press notifications itself. SidecarBridge
+            // owns the repeat cadence so each held key has one predictable
+            // stream and never accelerates twice.
+            return true
+        }
+        forwardHardwareKeyEvent(remoteEvent)
+        hardwareKeyRepeatTasks[hidUsage] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: self.hardwareKeyRepeatDelay)
+            } catch {
+                return
+            }
+            while !Task.isCancelled,
+                  self.hardwareKeyRepeatTasks[hidUsage] != nil {
+                self.forwardHardwareKeyEvent(remoteEvent)
+                do {
+                    try await Task.sleep(for: self.hardwareKeyRepeatInterval)
+                } catch {
+                    return
+                }
             }
         }
-        if !unhandled.isEmpty {
-            super.pressesBegan(unhandled, with: event)
+        return true
+    }
+
+    private func handleHardwareKeyUp(_ hardwareKey: UIKey) -> Bool {
+        let hidUsage = hardwareKey.keyCode.rawValue
+        if RemoteKeyboardInput.isInputModeSwitchShortcut(
+            hidUsage: hidUsage,
+            modifiers: remoteModifiers(for: hardwareKey)
+        ) {
+            return true
         }
+        if RemoteKeyboardInput.isChineseEnglishToggleHIDUsage(hidUsage) {
+            return true
+        }
+        if RemoteKeyboardInput.isLanguageSwitchHIDUsage(hidUsage) {
+            return false
+        }
+        guard let task = hardwareKeyRepeatTasks.removeValue(forKey: hidUsage) else {
+            return false
+        }
+        task.cancel()
+        return true
+    }
+
+    private func forwardHardwareKeyEvent(_ remoteEvent: RemoteInputEvent) {
+        if !macOwnsInputMode {
+            synchronizeRemoteInputMode()
+        }
+        if remoteEvent.kind == .key,
+           let key = remoteEvent.key,
+           remoteEvent.modifiers?.contains("control") == true,
+           ["up", "down", "left", "right"].contains(key) {
+            sendControlArrow(key)
+        } else {
+            onInput(remoteEvent)
+        }
+    }
+
+    private func synchronizeRemoteInputMode(
+        language announcedLanguage: String? = nil,
+        force: Bool = false
+    ) {
+        guard let language = inputLanguageState.resolve(
+                announcedLanguage: announcedLanguage,
+                responderLanguage: textInputView.textInputMode?.primaryLanguage
+              ) else {
+            return
+        }
+        guard force || language != lastForwardedInputLanguage else { return }
+        lastForwardedInputLanguage = language
+        onInput(.inputMode(language: language))
+        remoteTextLog.notice(
+            "Forwarding physical keyboard input mode language=\(language, privacy: .public)"
+        )
     }
 
     private func configureHardwareKeyboard() {
-        guard let keyboardInput = GCKeyboard.coalesced?.keyboardInput else { return }
+        if GCKeyboard.coalesced != nil,
+           !didSuppressUnexpectedSoftwareKeyboard {
+            textInputView.hasHardwareKeyboard = true
+        }
+        guard let keyboardInput = GCKeyboard.coalesced?.keyboardInput else {
+            return
+        }
         keyboardInput.keyChangedHandler = { [weak self] keyboard, _, keyCode, pressed in
             DispatchQueue.main.async {
                 guard let self else { return }
+                let hidUsage = Int(keyCode.rawValue)
+                if pressed,
+                   RemoteKeyboardInput.isChineseEnglishToggleHIDUsage(hidUsage) {
+                    self.forwardChineseEnglishInputModeSwitch(
+                        source: "gc-zh-en-\(hidUsage)"
+                    )
+                    return
+                }
+                if pressed,
+                   RemoteKeyboardInput.isDedicatedLanguageSwitchHIDUsage(hidUsage) {
+                    self.forwardInputModeSwitch(source: "hid-lang-\(hidUsage)")
+                    return
+                }
                 if keyCode == .leftControl || keyCode == .rightControl {
                     self.gameControllerControlIsDown = pressed
                     return
@@ -440,6 +888,38 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
                 if let key { self.sendControlArrow(key) }
             }
         }
+        DispatchQueue.main.async { [weak self] in
+            self?.synchronizeRemoteInputMode(force: true)
+        }
+    }
+
+    private func forwardInputModeSwitch(source: String) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastInputModeSwitchAt >= 0.35 else { return }
+        lastInputModeSwitchAt = now
+        macOwnsInputMode = false
+        inputLanguageState.beginInputModeSwitch()
+        onInput(.cycleInputMode())
+        remoteTextLog.notice(
+            "Forwarding physical input-mode switch source=\(source, privacy: .public)"
+        )
+
+        // Some hardware reports the key before UITextInputMode posts its
+        // notification. Re-check after UIKit has processed the responder event.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.synchronizeRemoteInputMode()
+        }
+    }
+
+    private func forwardChineseEnglishInputModeSwitch(source: String) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastInputModeSwitchAt >= 0.35 else { return }
+        lastInputModeSwitchAt = now
+        macOwnsInputMode = true
+        onInput(.toggleChineseEnglishInputMode())
+        remoteTextLog.notice(
+            "Forwarding Mac-only 中/英 switch source=\(source, privacy: .public)"
+        )
     }
 
     private func sendControlArrow(_ key: String) {
@@ -454,42 +934,35 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     private func remoteEvent(for hardwareKey: UIKey) -> RemoteInputEvent? {
-        let input = hardwareKey.charactersIgnoringModifiers
-        let specialKey: String?
-        switch input {
-        case UIKeyCommand.inputUpArrow: specialKey = "up"
-        case UIKeyCommand.inputDownArrow: specialKey = "down"
-        case UIKeyCommand.inputLeftArrow: specialKey = "left"
-        case UIKeyCommand.inputRightArrow: specialKey = "right"
-        case UIKeyCommand.inputEscape: specialKey = "escape"
-        case "\r", "\n": specialKey = "return"
-        case "\t": specialKey = "tab"
-        case "\u{8}", "\u{7f}": specialKey = "delete"
-        default: specialKey = nil
+        let modifiers = remoteModifiers(for: hardwareKey)
+
+        // Send the physical USB key position instead of the character produced
+        // by the current iPad input method. For example, a Zhuyin layout can
+        // report "ㄅ" or an empty text value for the physical 1 key; forwarding
+        // that string made the Mac discard the key after correctly switching
+        // input sources. HID positions let the Mac's active IME create its own
+        // marked text and candidate window exactly like a local keyboard.
+        let hidUsage = hardwareKey.keyCode.rawValue
+        if RemoteKeyboardInput.supportsRemoteHIDUsage(hidUsage) {
+            return RemoteKeyboardInput.event(
+                hidUsage: hidUsage,
+                modifiers: modifiers
+            )
         }
 
+        // Leave unsupported keys such as the Globe/input-source key in UIKit's
+        // responder chain. iPadOS changes its input mode, and the notification
+        // handler above mirrors that language change to the Mac.
+        return nil
+    }
+
+    private func remoteModifiers(for hardwareKey: UIKey) -> [String] {
         var modifiers: [String] = []
         if hardwareKey.modifierFlags.contains(.command) { modifiers.append("command") }
         if hardwareKey.modifierFlags.contains(.alternate) { modifiers.append("option") }
         if hardwareKey.modifierFlags.contains(.control) { modifiers.append("control") }
         if hardwareKey.modifierFlags.contains(.shift) { modifiers.append("shift") }
-
-        if let specialKey {
-            return RemoteKeyboardInput.event(key: specialKey, modifiers: modifiers)
-        }
-
-        let hasShortcutModifier = hardwareKey.modifierFlags.intersection([.command, .alternate, .control]).isEmpty == false
-        if hasShortcutModifier {
-            return RemoteKeyboardInput.event(
-                key: input == " " ? "space" : input,
-                modifiers: modifiers
-            )
-        }
-
-        // `characters` already contains Shift/Caps Lock and the active keyboard
-        // layout. Sending it as text avoids accidentally carrying a modifier
-        // into the following keystroke.
-        return RemoteKeyboardInput.event(text: hardwareKey.characters)
+        return modifiers
     }
 
     private func configureGestures() {
@@ -650,7 +1123,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     private func sendDirectTouchClick(at location: CGPoint) {
-        becomeFirstResponder()
+        reclaimKeyboardFocus()
         let now = ProcessInfo.processInfo.systemUptime
         let count = directTouchClickTracker.nextCount(
             x: Double(location.x),
@@ -680,7 +1153,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
                 ? recognizer.buttonMask
                 : recognizer.reportedButtonMask
             guard let reportedButton = reportedButton(for: capturedMask) else { return }
-            becomeFirstResponder()
+            reclaimKeyboardFocus()
             if calibrateNextPointerClick {
                 pointerPressConsumedByCalibration = true
                 onPointerCalibration(.calibrated(reportedLeftButton: reportedButton))
@@ -826,7 +1299,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         switch recognizer.state {
         case .began:
             guard !isPrimaryDragging else { return }
-            becomeFirstResponder()
+            reclaimKeyboardFocus()
             if (recognizer as? RemoteHoldGestureRecognizer)?.consumesDirectTouch == true {
                 directTouchConsumedByHold = true
                 directTouchClickTracker.reset()
@@ -852,7 +1325,7 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         switch recognizer.state {
         case .began:
             guard let normalized = normalizedPoint(point) else { return }
-            becomeFirstResponder()
+            reclaimKeyboardFocus()
             isPrimaryDragging = true
             activePrimaryClickCount = 1
             lastPointerTime = 0
@@ -882,6 +1355,8 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     private func releaseRemoteButtons() {
+        hardwareKeyRepeatTasks.values.forEach { $0.cancel() }
+        hardwareKeyRepeatTasks.removeAll(keepingCapacity: true)
         finishPrimaryDrag(at: nil)
         onInput(.releaseButtons())
     }
@@ -904,13 +1379,13 @@ final class InputView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     @objc private func handlePrimaryClick(_ recognizer: UITapGestureRecognizer) {
-        becomeFirstResponder()
+        reclaimKeyboardFocus()
         guard let point = normalizedPoint(recognizer.location(in: self)) else { return }
         onInput(.click(x: point.x, y: point.y))
     }
 
     @objc private func handlePrimaryDoubleClick(_ recognizer: UITapGestureRecognizer) {
-        becomeFirstResponder()
+        reclaimKeyboardFocus()
         guard let point = normalizedPoint(recognizer.location(in: self)) else { return }
         onInput(.doubleClick(x: point.x, y: point.y))
     }

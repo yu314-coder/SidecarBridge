@@ -25,6 +25,7 @@ final class H264Encoder {
     private var height = 0
     private var frameRate = 30
     private var nextSequence: UInt64 = 0
+    private var forceNextKeyFrame = false
 
     func start(
         width: Int,
@@ -37,6 +38,7 @@ final class H264Encoder {
         self.height = height
         self.frameRate = frameRate
         nextSequence = 0
+        forceNextKeyFrame = false
 
         var session: VTCompressionSession?
         let attributes: [CFString: Any] = [
@@ -45,30 +47,54 @@ final class H264Encoder {
             kCVPixelBufferHeightKey: height,
             kCVPixelBufferMetalCompatibilityKey: true
         ]
-        let status = VTCompressionSessionCreate(
+        let encoderSpecification: [CFString: Any] = [
+            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
+            kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true
+        ]
+        var status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: Int32(width),
             height: Int32(height),
             codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
+            encoderSpecification: encoderSpecification as CFDictionary,
             imageBufferAttributes: attributes as CFDictionary,
             compressedDataAllocator: nil,
             outputCallback: nil,
             refcon: nil,
             compressionSessionOut: &session
         )
+        if status != noErr {
+            // Older Intel encoders may not expose the low-latency selector.
+            // Preserve hardware compatibility while retaining the real-time
+            // properties configured below.
+            status = VTCompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                width: Int32(width),
+                height: Int32(height),
+                codecType: kCMVideoCodecType_H264,
+                encoderSpecification: nil,
+                imageBufferAttributes: attributes as CFDictionary,
+                compressedDataAllocator: nil,
+                outputCallback: nil,
+                refcon: nil,
+                compressionSessionOut: &session
+            )
+        }
         guard status == noErr, let session else { throw EncoderError.createFailed(status) }
         self.session = session
 
         let bitrate = targetBitrate ?? min(16_000_000, max(8_000_000, width * height * 7 / 2))
-        let keyFrameInterval = max(6, frameRate / 4)
+        // One periodic keyframe per second preserves recovery without spending
+        // bandwidth on four large IDR frames every second. Transport queues
+        // explicitly request an immediate keyframe when they drop a chain.
+        let keyFrameInterval = max(15, frameRate)
         let settings: [(CFString, CFTypeRef)] = [
             (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue),
             (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse),
             (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel),
             (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: frameRate)),
             (kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: keyFrameInterval)),
-            (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 0.25)),
+            (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 1.0)),
             (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate)),
             (kVTCompressionPropertyKey_DataRateLimits, [NSNumber(value: bitrate * 3 / 16), NSNumber(value: 1)] as CFArray)
         ]
@@ -79,6 +105,13 @@ final class H264Encoder {
                 throw EncoderError.configureFailed(result)
             }
         }
+        // Keep the encoder from buffering frames internally. Some legacy
+        // encoders do not support this hint, so it is intentionally optional.
+        _ = VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_MaxFrameDelayCount,
+            value: NSNumber(value: 1)
+        )
 
         let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(session)
         guard prepareStatus == noErr else {
@@ -89,13 +122,22 @@ final class H264Encoder {
 
     func encode(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
         guard let session else { return }
+        let frameProperties: CFDictionary?
+        if forceNextKeyFrame {
+            forceNextKeyFrame = false
+            frameProperties = [
+                kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue as Any
+            ] as CFDictionary
+        } else {
+            frameProperties = nil
+        }
         var flags = VTEncodeInfoFlags()
         VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: presentationTime,
             duration: CMTime(value: 1, timescale: CMTimeScale(frameRate)),
-            frameProperties: nil,
+            frameProperties: frameProperties,
             infoFlagsOut: &flags
         ) { [weak self] status, infoFlags, sampleBuffer in
             guard status == noErr,
@@ -106,11 +148,16 @@ final class H264Encoder {
         }
     }
 
+    func requestKeyFrame() {
+        forceNextKeyFrame = true
+    }
+
     func stop() {
         guard let session else { return }
         VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
         VTCompressionSessionInvalidate(session)
         self.session = nil
+        forceNextKeyFrame = false
     }
 
     private func emit(_ sampleBuffer: CMSampleBuffer) {

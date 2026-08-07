@@ -32,6 +32,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
     private var activeFrameRate = 40
     private var foregroundFrameRate = 40
     private var viewerIsBackgrounded = false
+    private var waitingForViewerResume = false
 
     func setPreferredWidth(_ width: Int) {
         preferredWidth = min(max(width, 1440), 2880)
@@ -45,7 +46,21 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
         captureQueue.async { [weak self] in
             guard let self else { return }
             self.viewerIsBackgrounded = backgrounded
-            self.activeFrameRate = backgrounded ? min(self.foregroundFrameRate, 15) : self.foregroundFrameRate
+            self.updateActiveFrameRate()
+        }
+    }
+
+    func setWaitingForViewerResume(_ waiting: Bool) {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            self.waitingForViewerResume = waiting
+            self.updateActiveFrameRate()
+        }
+    }
+
+    func requestKeyFrame() {
+        captureQueue.async { [weak self] in
+            self?.encoder.requestKeyFrame()
         }
     }
 
@@ -66,7 +81,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
             ? min(preferredWidth, 1728)
             : preferredWidth
         foregroundFrameRate = transportProfile == .nearbyP2P ? 30 : 40
-        activeFrameRate = viewerIsBackgrounded ? min(foregroundFrameRate, 15) : foregroundFrameRate
+        updateActiveFrameRate()
         let targetBitrate = transportProfile == .nearbyP2P ? 5_000_000 : nil
         let scale = min(1.0, Double(targetWidth) / Double(display.width))
         configuration.width = max(960, Int(Double(display.width) * scale)) & ~1
@@ -98,6 +113,16 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
         guard let stream else { return }
         self.stream = nil
         Task { try? await stream.stopCapture() }
+    }
+
+    private func updateActiveFrameRate() {
+        if waitingForViewerResume {
+            activeFrameRate = 2
+        } else if viewerIsBackgrounded {
+            activeFrameRate = min(foregroundFrameRate, 15)
+        } else {
+            activeFrameRate = foregroundFrameRate
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {

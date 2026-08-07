@@ -17,6 +17,8 @@ final class MacConnectionModel: ObservableObject {
     @Published var remoteInputAuthorized = false
     @Published var screenRecordingAuthorized = false
     @Published var localNetworkAccess: LocalNetworkAccessState = .checking
+    @Published var incomingListenerReady = false
+    @Published var incomingListenerDetail = "Starting the encrypted local listener on TCP 45454…"
     @Published var connectionTransport = "Direct P2P preferred"
     @Published var connectionHealthDetail = "Waiting for encrypted link"
     @Published var connectionLatencyMS: Int?
@@ -24,8 +26,14 @@ final class MacConnectionModel: ObservableObject {
     @Published var fileTransferSnapshot: FileTransferSnapshot?
     @Published var lastReceivedFile: URL?
     @Published var fileTransferError: String?
-    @Published var pairingCode = MacPairingSecurity.shared.pairingCode
+    @Published var pairingCode = MacPairingSecurity.shared.currentDisplayCode()
     @Published var shortcutTestStatus = "Not tested in this Mac session"
+    @Published var localSystemInformation = SystemInformation.current()
+    @Published var remoteSystemInformation: SystemInformation?
+    @Published var diagnosticActionDetail = "System information is ready."
+    @Published var shutdownProtectionEnabled = true
+    @Published var shutdownProtectionActive = false
+    @Published var shutdownProtectionDetail = "Ready to preserve remote control during system shutdown."
 
     var localNetworkPermissionNeeded: Bool { localNetworkAccess.needsPermission }
 
@@ -42,10 +50,19 @@ final class MacConnectionModel: ObservableObject {
     private var started = false
     private var isStartingFallback = false
     private var attemptID = UUID()
+    #if !SIDECARBRIDGE_APP_STORE_SAFE
     private var accessibilityPollTask: Task<Void, Never>?
+    #endif
     private var screenRecordingPollTask: Task<Void, Never>?
+    private var streamResumeRetentionTask: Task<Void, Never>?
+    private var remoteViewerIsBackgrounded = false
+    private let shutdownProtectionDefaultsKey = "shutdownProtectionEnabled"
 
     init() {
+        if UserDefaults.standard.object(forKey: shutdownProtectionDefaultsKey) == nil {
+            UserDefaults.standard.set(true, forKey: shutdownProtectionDefaultsKey)
+        }
+        shutdownProtectionEnabled = UserDefaults.standard.bool(forKey: shutdownProtectionDefaultsKey)
         MacPairingSecurity.shared.onPairingCodeChanged = { [weak self] code in
             self?.pairingCode = code
         }
@@ -63,6 +80,11 @@ final class MacConnectionModel: ObservableObject {
             }
         }
 
+        peers.onListenerStateChanged = { [weak self] ready, detail in
+            self?.incomingListenerReady = ready
+            self?.incomingListenerDetail = detail
+        }
+
         peers.onP2PStateChanged = { [weak self] state in
             self?.p2pState = state
         }
@@ -76,16 +98,24 @@ final class MacConnectionModel: ObservableObject {
             guard let self else { return }
             self.hasPadPeer = connected
             if connected {
+                self.cancelStreamResumeRetention()
                 let isDirectLAN = peerOrError?.hasPrefix("LAN:") == true
                 self.streamer.setTransportProfile(isDirectLAN ? .direct : .nearbyP2P)
                 self.refreshPermissions()
                 self.connectionTransport = isDirectLAN ? "Direct local link / AWDL" : "Nearby P2P fallback"
                 self.status = isDirectLAN ? "iPad connected on same Wi-Fi" : "iPad app connected nearby"
+                #if SIDECARBRIDGE_APP_STORE_SAFE
+                self.detail = isDirectLAN
+                    ? "Waiting for the iPad's selected viewer mode."
+                    : "Waiting for the iPad's selected viewer mode."
+                #else
                 self.detail = isDirectLAN
                     ? "Waiting for the iPad's selected display mode. Apple Sidecar will not start automatically."
                     : "Waiting for the iPad's selected display mode."
+                #endif
                 self.pairedPeer = MacAuthorizedDeviceStore.shared.displaySummary
                 self.sendRemoteInputPermissionStatus()
+                self.exchangeSystemInformation()
             } else if let peerOrError {
                 self.connectionHealthDetail = "Recovering connection"
                 self.connectionLatencyMS = nil
@@ -100,7 +130,8 @@ final class MacConnectionModel: ObservableObject {
                 self.connectionTransport = "Searching direct P2P"
                 self.fileTransfer.cancelAll(reason: "Connection ended.")
                 self.remoteInput.releaseButtons()
-                self.stopFallback()
+                self.remoteSystemInformation = nil
+                self.retainStreamForViewerResumeIfNeeded()
             } else {
                 self.connectionHealthDetail = "Waiting for encrypted link"
                 self.connectionLatencyMS = nil
@@ -109,7 +140,8 @@ final class MacConnectionModel: ObservableObject {
                 self.detail = "Open SidecarBridge on the iPad."
                 self.remoteInput.releaseButtons()
                 self.fileTransfer.cancelAll(reason: "Connection ended.")
-                self.stopFallback()
+                self.remoteSystemInformation = nil
+                self.retainStreamForViewerResumeIfNeeded()
             }
         }
         let inputPipeline = remoteInput
@@ -131,6 +163,7 @@ final class MacConnectionModel: ObservableObject {
         peers.onCommand = { [weak self] command in self?.handle(command) }
         peers.onFilePacket = { [weak self] transfer in self?.fileTransfer.handle(transfer) }
         streamer.onFrame = { [weak peers] frame in peers?.sendVideoFrame(frame) }
+        peers.onKeyFrameNeeded = { [weak self] in self?.streamer.requestKeyFrame() }
         configureFileTransfer()
     }
 
@@ -200,7 +233,58 @@ final class MacConnectionModel: ObservableObject {
         peers.start()
         refreshDevices()
         status = "Waiting for iPad"
+        #if SIDECARBRIDGE_APP_STORE_SAFE
+        detail = "Open SidecarBridge on the iPad. Its selected mode decides whether to use the private viewer stream."
+        #else
         detail = "Open SidecarBridge on the iPad. Its selected mode decides whether to use the app stream or Apple Sidecar."
+        #endif
+    }
+
+    func setShutdownProtectionEnabled(_ enabled: Bool) {
+        shutdownProtectionEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: shutdownProtectionDefaultsKey)
+        shutdownProtectionDetail = enabled
+            ? "Ready to preserve remote control during system shutdown."
+            : "Off — SidecarBridge will quit when macOS asks it to."
+    }
+
+    func updateShutdownProtection(active: Bool, blockingApplications: [String]) {
+        shutdownProtectionActive = active
+        if blockingApplications.isEmpty {
+            shutdownProtectionDetail = "Other apps are closed. Finishing shutdown…"
+        } else {
+            let visibleNames = blockingApplications.prefix(3).joined(separator: ", ")
+            let remaining = max(0, blockingApplications.count - 3)
+            shutdownProtectionDetail = remaining == 0
+                ? "Remote control is staying online while \(visibleNames) closes."
+                : "Remote control is staying online while \(visibleNames) and \(remaining) more close."
+        }
+    }
+
+    func cancelShutdownProtection(reason: String) {
+        shutdownProtectionActive = false
+        shutdownProtectionDetail = reason
+        status = "Shutdown needs attention"
+        detail = reason
+    }
+
+    func prepareForTermination() {
+        #if !SIDECARBRIDGE_APP_STORE_SAFE
+        accessibilityPollTask?.cancel()
+        accessibilityPollTask = nil
+        #endif
+        screenRecordingPollTask?.cancel()
+        screenRecordingPollTask = nil
+        streamResumeRetentionTask?.cancel()
+        streamResumeRetentionTask = nil
+        attemptID = UUID()
+        fileTransfer.cancelAll(reason: "SidecarBridge is quitting.")
+        remoteInput.releaseButtons()
+        streamer.stop()
+        peers.stop()
+        isStreaming = false
+        isStartingFallback = false
+        started = false
     }
 
     var p2pDetail: String {
@@ -241,8 +325,7 @@ final class MacConnectionModel: ObservableObject {
     var p2pIsChecking: Bool { !p2pIsReady }
 
     func trySidecarNow() {
-        refreshDevices()
-        attemptNative(preferredName: nil, allowFallback: hasPadPeer)
+        attemptNative(preferredName: nil, allowFallback: false)
     }
 
     func startFallback() {
@@ -254,7 +337,20 @@ final class MacConnectionModel: ObservableObject {
             detail = "The private stream starts after the two apps find each other."
             return
         }
-        guard !isStreaming, !isStartingFallback else { return }
+        if isStreaming {
+            cancelStreamResumeRetention()
+            remoteViewerIsBackgrounded = false
+            streamer.setViewerBackgrounded(false)
+            streamer.setWaitingForViewerResume(false)
+            streamer.requestKeyFrame()
+            refreshPermissions()
+            sendRemoteInputPermissionStatus()
+            status = "Streaming to iPad"
+            detail = "Resumed the retained encrypted app stream."
+            peers.send(ControlMessage(.status, detail: "fallback-active"))
+            return
+        }
+        guard !isStartingFallback else { return }
 
         refreshPermissions()
         if !screenRecordingAuthorized {
@@ -268,7 +364,11 @@ final class MacConnectionModel: ObservableObject {
         }
         isStartingFallback = true
 
+        #if SIDECARBRIDGE_APP_STORE_SAFE
+        remoteInputAuthorized = false
+        #else
         remoteInputAuthorized = remoteInput.requestAccess()
+        #endif
         sendRemoteInputPermissionStatus()
 
         status = "Starting app stream…"
@@ -280,7 +380,11 @@ final class MacConnectionModel: ObservableObject {
                 isStreaming = true
                 screenRecordingAuthorized = true
                 status = "Streaming to iPad"
+                #if SIDECARBRIDGE_APP_STORE_SAFE
+                detail = "Using the encrypted viewer stream. Full iPad keyboard and trackpad control is available in the direct companion build."
+                #else
                 detail = "Using the encrypted app stream with iPad keyboard and trackpad input."
+                #endif
                 peers.send(ControlMessage(.status, detail: "fallback-active"))
             } catch {
                 isStartingFallback = false
@@ -292,10 +396,49 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func stopFallback() {
+        streamResumeRetentionTask?.cancel()
+        streamResumeRetentionTask = nil
+        remoteViewerIsBackgrounded = false
         remoteInput.releaseButtons()
+        streamer.setWaitingForViewerResume(false)
+        streamer.setViewerBackgrounded(false)
         streamer.stop()
         isStartingFallback = false
         isStreaming = false
+    }
+
+    private func retainStreamForViewerResumeIfNeeded() {
+        guard RemoteSessionLifecyclePolicy.shouldRetainStreamAfterDisconnect(
+            isStreaming: isStreaming
+        ) else {
+            stopFallback()
+            return
+        }
+
+        streamResumeRetentionTask?.cancel()
+        remoteViewerIsBackgrounded = true
+        streamer.setViewerBackgrounded(true)
+        streamer.setWaitingForViewerResume(true)
+        connectionHealthDetail = "Viewer suspended — stream retained for fast resume"
+        status = "Waiting for iPad to return"
+        detail = "Keeping a low-power capture session ready for five minutes."
+
+        streamResumeRetentionTask = Task { [weak self] in
+            try? await Task.sleep(
+                for: .seconds(RemoteSessionLifecyclePolicy.streamResumeRetentionInterval)
+            )
+            guard !Task.isCancelled, let self, !self.hasPadPeer else { return }
+            self.streamResumeRetentionTask = nil
+            self.stopFallback()
+            self.status = "Waiting for iPad"
+            self.detail = "The fast-resume window ended. Reconnecting will start a new stream."
+        }
+    }
+
+    private func cancelStreamResumeRetention() {
+        streamResumeRetentionTask?.cancel()
+        streamResumeRetentionTask = nil
+        streamer.setWaitingForViewerResume(false)
     }
 
     func openDisplaysSettings() {
@@ -345,6 +488,63 @@ final class MacConnectionModel: ObservableObject {
     func copyPairingCode() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(pairingCode, forType: .string)
+    }
+
+    func refreshSystemInformation() {
+        localSystemInformation = SystemInformation.current()
+        diagnosticActionDetail = hasPadPeer
+            ? "Refreshed this Mac and requested the connected device."
+            : "Refreshed this Mac. Connect an iPhone or iPad to see both devices."
+        exchangeSystemInformation()
+    }
+
+    func copyDiagnosticReport() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(diagnosticReport, forType: .string)
+        diagnosticActionDetail = "Privacy-safe diagnostic report copied."
+    }
+
+    var diagnosticReport: String {
+        var connectionFields = [
+            DiagnosticField("Status", status),
+            DiagnosticField("Transport", connectionTransport),
+            DiagnosticField("Encrypted peer", hasPadPeer ? "Connected" : "Not connected"),
+            DiagnosticField("Streaming", isStreaming ? "Active" : "Inactive"),
+            DiagnosticField(
+                "Round-trip latency",
+                connectionLatencyMS.map { "\($0) ms" } ?? "Not measured"
+            ),
+            DiagnosticField("Link health", connectionHealthDetail),
+            DiagnosticField(
+                "Local Network permission",
+                localNetworkAccess.isGranted ? "Passed" : localNetworkPermissionNeeded ? "Required" : "Checking"
+            ),
+            DiagnosticField(
+                "Screen Recording permission",
+                screenRecordingAuthorized ? "Passed" : "Required"
+            )
+        ]
+        #if !SIDECARBRIDGE_APP_STORE_SAFE
+        connectionFields.append(
+            DiagnosticField(
+                "Accessibility permission",
+                remoteInputAuthorized ? "Passed" : "Required"
+            )
+        )
+        #endif
+        return DiagnosticReportBuilder.make(
+            local: localSystemInformation,
+            remote: remoteSystemInformation,
+            connection: connectionFields
+        )
+    }
+
+    private func exchangeSystemInformation() {
+        guard hasPadPeer else { return }
+        if let message = ControlMessage.systemInformation(localSystemInformation) {
+            peers.send(message)
+        }
+        peers.send(.requestSystemInformation)
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
@@ -451,6 +651,12 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func enableRemoteInput() {
+        #if SIDECARBRIDGE_APP_STORE_SAFE
+        remoteInputAuthorized = false
+        status = "Viewer-only Mac companion"
+        detail = "Remote keyboard and trackpad control is available in the direct companion build."
+        sendRemoteInputPermissionStatus()
+        #else
         remoteInputAuthorized = remoteInput.requestAccess()
         if remoteInputAuthorized {
             status = "Remote input enabled"
@@ -462,17 +668,28 @@ final class MacConnectionModel: ObservableObject {
             remoteInput.openAccessibilitySettings()
             pollForAccessibilityAccess()
         }
+        #endif
     }
 
     func openAccessibilitySettings() {
+        #if SIDECARBRIDGE_APP_STORE_SAFE
+        status = "Viewer-only Mac companion"
+        detail = "The Mac App Store edition does not request Accessibility permission."
+        #else
         remoteInput.openAccessibilitySettings()
         pollForAccessibilityAccess()
+        #endif
     }
 
     func revealApplication() {
+        #if SIDECARBRIDGE_APP_STORE_SAFE
+        return
+        #else
         remoteInput.revealApplication()
+        #endif
     }
 
+    #if !SIDECARBRIDGE_APP_STORE_SAFE
     private func pollForAccessibilityAccess() {
         accessibilityPollTask?.cancel()
         accessibilityPollTask = Task { [weak self] in
@@ -490,6 +707,7 @@ final class MacConnectionModel: ObservableObject {
             }
         }
     }
+    #endif
 
     private func pollForScreenRecordingAccess() {
         screenRecordingPollTask?.cancel()
@@ -529,9 +747,17 @@ final class MacConnectionModel: ObservableObject {
                    let sequence = UInt64(detail.dropFirst("video-ack:".count)) {
                     peers.acknowledgeVideo(sequence: sequence)
                 } else if detail == "viewer-background" {
+                    remoteViewerIsBackgrounded = true
+                    peers.setRemoteViewerBackgrounded(true)
                     streamer.setViewerBackgrounded(true)
                 } else if detail == "viewer-foreground" {
+                    remoteViewerIsBackgrounded = false
+                    cancelStreamResumeRetention()
+                    peers.setRemoteViewerBackgrounded(false)
                     streamer.setViewerBackgrounded(false)
+                    if isStreaming {
+                        streamer.requestKeyFrame()
+                    }
                 }
             }
         case .input:
@@ -548,6 +774,15 @@ final class MacConnectionModel: ObservableObject {
                     self?.applyRemoteInputResult(accepted)
                 }
             }
+        case .requestSystemInformation:
+            localSystemInformation = SystemInformation.current()
+            if let message = ControlMessage.systemInformation(localSystemInformation) {
+                peers.send(message)
+            }
+        case .systemInformation:
+            guard let information = command.systemInformationPayload else { return }
+            remoteSystemInformation = information
+            diagnosticActionDetail = "Connected device information updated."
         }
     }
 
@@ -562,10 +797,17 @@ final class MacConnectionModel: ObservableObject {
     }
 
     private func sendRemoteInputPermissionStatus() {
+        #if SIDECARBRIDGE_APP_STORE_SAFE
+        peers.send(ControlMessage(
+            .status,
+            detail: "remote-input-unavailable-store-build"
+        ))
+        #else
         peers.send(ControlMessage(
             .status,
             detail: remoteInputAuthorized ? "accessibility-passed" : "accessibility-required"
         ))
+        #endif
     }
 
     private func refreshDevices() {
@@ -573,84 +815,10 @@ final class MacConnectionModel: ObservableObject {
     }
 
     private func attemptNative(preferredName: String?, allowFallback: Bool) {
-        stopFallback()
-        let id = UUID()
-        attemptID = id
-
-        guard !reachableSidecarDevices.isEmpty else {
-            status = "No native Sidecar iPad found"
-            detail = "Trying the app stream instead."
-            peers.send(ControlMessage(.status, detail: "sidecar-unavailable"))
-            if allowFallback { startFallback() }
-            return
-        }
-
-        let wired = CableDetector.isIPadConnected()
-        let firstTransport: SidecarConnector.Transport = wired ? .wired : .wireless
-        status = wired ? "Trying wired Sidecar…" : "Trying wireless Sidecar…"
-        detail = wired ? "An iPad is visible on USB." : "No iPad cable was detected."
-        peers.send(ControlMessage(.status, detail: wired ? "sidecar-wired" : "sidecar-wireless"))
-
-        connectOnce(id: id, name: preferredName, transport: firstTransport) { [weak self] result in
-            guard let self, self.attemptID == id else { return }
-            switch result {
-            case .success(let name):
-                self.status = "Native Sidecar connected"
-                self.detail = "Connected to \(name) using \(firstTransport.rawValue)."
-                self.peers.send(ControlMessage(.status, detail: "sidecar-connected"))
-            case .failure:
-                if firstTransport == .wired {
-                    self.status = "Wired failed; trying wireless…"
-                    self.connectOnce(id: id, name: preferredName, transport: .wireless) { [weak self] retry in
-                        self?.finishNativeAttempt(id: id, result: retry, transport: .wireless, allowFallback: allowFallback)
-                    }
-                } else {
-                    self.finishNativeAttempt(id: id, result: result, transport: .wireless, allowFallback: allowFallback)
-                }
-            }
-        }
-    }
-
-    private func connectOnce(
-        id: UUID,
-        name: String?,
-        transport: SidecarConnector.Transport,
-        completion: @escaping (Result<String, Error>) -> Void
-    ) {
-        var finished = false
-        sidecar.connect(preferredName: name, transport: transport) { result in
-            guard !finished else { return }
-            finished = true
-            completion(result)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-            guard self.attemptID == id, !finished else { return }
-            finished = true
-            completion(.failure(NSError(
-                domain: "SidecarBridge",
-                code: 408,
-                userInfo: [NSLocalizedDescriptionKey: "Sidecar connection timed out."]
-            )))
-        }
-    }
-
-    private func finishNativeAttempt(
-        id: UUID,
-        result: Result<String, Error>,
-        transport: SidecarConnector.Transport,
-        allowFallback: Bool
-    ) {
-        guard attemptID == id else { return }
-        switch result {
-        case .success(let name):
-            status = "Native Sidecar connected"
-            detail = "Connected to \(name) using \(transport.rawValue)."
-            peers.send(ControlMessage(.status, detail: "sidecar-connected"))
-        case .failure(let error):
-            status = "Native Sidecar failed"
-            detail = error.localizedDescription
-            peers.send(ControlMessage(.status, detail: "sidecar-failed"))
-            if allowFallback { startFallback() }
-        }
+        attemptID = UUID()
+        status = "Displays settings opened"
+        detail = "Choose your iPad in Displays. Apple does not provide a public API that lets SidecarBridge start native Sidecar."
+        peers.send(ControlMessage(.status, detail: "sidecar-settings-opened"))
+        openDisplaysSettings()
     }
 }

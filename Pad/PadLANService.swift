@@ -33,11 +33,13 @@ final class PadLANService {
     private var nextEndpointIndex = 0
     private let idleDiscoveryRefreshInterval: TimeInterval = 12
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
-    private var sessionKey: SymmetricKey?
+    private var secureSession: SecurePacketSession?
     private var pairingMacID: String?
     private var pairingMacName: String?
     private var pairingNonce: Data?
     private var pairingServerPublicKey: Data?
+    private var pairingSecret: Data?
+    private var pairingChannelBinding: Data?
     private var submittedPairingCode: String?
     private var usedSavedCredential = false
     private var receiveBuffer = Data()
@@ -66,6 +68,41 @@ final class PadLANService {
             self.endpoints.removeAll()
             self.nextEndpointIndex = 0
             self.startBrowser()
+        }
+    }
+
+    func resumeAfterBackground() {
+        queue.async { [weak self] in
+            guard let self, !self.isConnected else { return }
+            self.browserRestartWorkItem?.cancel()
+            self.browserRestartWorkItem = nil
+            self.idleDiscoveryRefreshWorkItem?.cancel()
+            self.idleDiscoveryRefreshWorkItem = nil
+            self.connectionAttemptWorkItem?.cancel()
+            self.connectionAttemptWorkItem = nil
+            self.cancelSubnetProbes()
+            self.connection?.cancel()
+            self.clearConnection(notify: false)
+            self.nextEndpointIndex = 0
+
+            let triedRememberedHost = self.tryCachedDirectHostForResume()
+            if !triedRememberedHost {
+                self.connectNextAvailable()
+            }
+            if self.browser == nil {
+                self.startBrowser()
+            }
+
+            // Give the remembered fixed-port address first chance. If it moved,
+            // fall back to the already-known Bonjour endpoint without waiting
+            // for a full discovery cycle.
+            self.queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+                guard let self, !self.isConnected, self.connection == nil else { return }
+                self.connectNextAvailable()
+                if self.connection == nil {
+                    self.scheduleSubnetProbe(after: 0.2)
+                }
+            }
         }
     }
 
@@ -118,7 +155,7 @@ final class PadLANService {
     func submitPairingCode(_ code: String) {
         queue.async { [weak self] in
             guard let self else { return }
-            self.submittedPairingCode = code.filter(\.isNumber)
+            self.submittedPairingCode = PairingCode.normalize(code)
             self.sendPairingResponseIfPossible()
         }
     }
@@ -145,12 +182,20 @@ final class PadLANService {
         let parameters = lowLatencyParameters()
         parameters.includePeerToPeer = true
         let browser = NWBrowser(
-            for: .bonjour(type: BridgeConstants.lanServiceType, domain: nil),
+            for: .bonjourWithTXTRecord(type: BridgeConstants.lanServiceType, domain: nil),
             using: parameters
         )
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self else { return }
             print("[SidecarBridge/LAN] Bonjour results: \(results.count)")
+            for result in results {
+                guard case let .service(name, _, _, _) = result.endpoint else { continue }
+                if case let .bonjour(txtRecord) = result.metadata {
+                    let protocolVersion = txtRecord[BridgeConstants.protocolTXTKey] ?? "unknown"
+                    let build = txtRecord[BridgeConstants.buildTXTKey] ?? "unknown"
+                    print("[SidecarBridge/LAN] \(name) advertises protocol \(protocolVersion), build \(build)")
+                }
+            }
             self.endpoints = results.map(\.endpoint)
             let names = self.endpoints.compactMap { endpoint -> String? in
                 guard case let .service(name, _, _, _) = endpoint else { return nil }
@@ -258,6 +303,7 @@ final class PadLANService {
         do {
             guard let privateKey else { return }
             let hello = LANHandshake(
+                protocolVersion: LANWire.securityProtocolVersion,
                 deviceName: PadDeviceIdentity.current.deviceName,
                 publicKey: privateKey.publicKey.rawRepresentation,
                 deviceID: PadDeviceIdentity.current.deviceID,
@@ -300,24 +346,20 @@ final class PadLANService {
     }
 
     private func handle(_ payload: Data) throws {
-        if sessionKey == nil {
+        if secureSession == nil {
             let response = try LANWire.decodeHandshake(payload, marker: LANWire.serverHello)
             guard let privateKey else { return }
             let clientPublicKey = privateKey.publicKey.rawRepresentation
-            sessionKey = try LANWire.sessionKey(
+            secureSession = try LANWire.secureSession(
                 privateKey: privateKey,
                 peerPublicKey: response.publicKey,
                 clientPublicKey: clientPublicKey,
-                serverPublicKey: response.publicKey
+                serverPublicKey: response.publicKey,
+                role: .client
             )
             guard let macID = response.macID,
                   let nonce = response.authNonce else {
-                // Compatibility with a Mac running the older encrypted
-                // handshake. Build 13 peers always use trusted-device proof.
-                isConnected = true
-                print("[SidecarBridge/LAN] Legacy encrypted handshake complete with \(response.deviceName)")
-                notify(connected: true, value: "LAN:\(response.deviceName)")
-                return
+                throw LANWire.LANError.authenticationFailed
             }
             pairingMacID = macID
             pairingMacName = response.deviceName
@@ -327,8 +369,8 @@ final class PadLANService {
             return
         }
 
-        guard let sessionKey else { return }
-        let packet = try PacketCodec.decode(LANWire.decrypt(payload, key: sessionKey))
+        guard let secureSession else { return }
+        let packet = try PacketCodec.decode(LANWire.decrypt(payload, session: secureSession))
         switch packet {
         case .authentication(let message):
             handleAuthentication(message)
@@ -340,7 +382,6 @@ final class PadLANService {
             DispatchQueue.main.async { self.onFrame?(frame) }
         case .video(let frame):
             guard isConnected else { return }
-            sendVideoReceipt(sequence: frame.sequence)
             DispatchQueue.main.async { self.onVideoFrame?(frame) }
         case .file(let transfer):
             guard isConnected else { return }
@@ -361,33 +402,68 @@ final class PadLANService {
         if let credential = SecureCredentialStore.data(account: account) {
             secret = credential
             usedSavedCredential = true
-        } else if let code = submittedPairingCode, code.count == 8 {
+        } else if let code = submittedPairingCode, code.count == PairingCode.characterCount {
             secret = Data(code.utf8)
             usedSavedCredential = false
         } else {
             DispatchQueue.main.async {
                 self.onPairingCodeRequired?(
                     self.pairingMacName ?? "Mac",
-                    self.submittedPairingCode == nil ? nil : "Enter the complete 8-digit code shown on the Mac."
+                    self.submittedPairingCode == nil
+                        ? nil
+                        : "Enter the complete 16-character code shown on the Mac."
                 )
             }
             return
         }
 
-        let proof = PairingProof.make(
-            secret: secret,
-            identity: identity,
-            macID: macID,
-            nonce: nonce,
+        let channelBinding = PairingProof.lanChannelBinding(
             clientPublicKey: clientPublicKey,
             serverPublicKey: serverPublicKey
         )
-        sendAuthentication(PairingMessage(kind: .response, proof: proof))
+        pairingSecret = secret
+        pairingChannelBinding = channelBinding
+        let proof = PairingProof.make(
+            secret: secret,
+            role: .client,
+            identity: identity,
+            macID: macID,
+            nonce: nonce,
+            channelBinding: channelBinding
+        )
+        sendAuthentication(PairingMessage(
+            kind: .response,
+            protocolVersion: LANWire.securityProtocolVersion,
+            identity: identity,
+            proof: proof
+        ))
     }
 
     private func handleAuthentication(_ message: PairingMessage) {
         switch message.kind {
         case .accepted:
+            guard message.protocolVersion == LANWire.securityProtocolVersion,
+                  let proof = message.proof,
+                  let secret = pairingSecret,
+                  let macID = pairingMacID,
+                  let nonce = pairingNonce,
+                  let channelBinding = pairingChannelBinding,
+                  PairingProof.verify(
+                    proof,
+                    secret: secret,
+                    role: .server,
+                    identity: PadDeviceIdentity.current,
+                    macID: macID,
+                    nonce: nonce,
+                    channelBinding: channelBinding
+                  ) else {
+                connection?.cancel()
+                clearConnection(
+                    notify: true,
+                    error: LANWire.LANError.authenticationFailed.localizedDescription
+                )
+                return
+            }
             if let credential = message.credential, let macID = pairingMacID {
                 guard SecureCredentialStore.set(credential, account: "pad.mac.\(macID)") else {
                     clearConnection(
@@ -399,31 +475,38 @@ final class PadLANService {
             }
             isConnected = true
             submittedPairingCode = nil
+            pairingSecret = nil
             print("[SidecarBridge/LAN] Trusted encrypted handshake complete with \(pairingMacName ?? "Mac")")
             notify(connected: true, value: "LAN:\(pairingMacName ?? "Mac")")
         case .rejected:
+            // The Mac has explicitly told us that the saved credential is
+            // stale. Remove only this Mac's entry so the next submission uses
+            // the displayed one-time code instead of retrying the same bad
+            // credential forever. The Mac will issue a replacement credential
+            // after that one successful repair proof.
             if usedSavedCredential, let macID = pairingMacID {
                 SecureCredentialStore.remove(account: "pad.mac.\(macID)")
                 usedSavedCredential = false
             }
             submittedPairingCode = nil
+            pairingSecret = nil
             DispatchQueue.main.async {
                 self.onPairingCodeRequired?(
                     self.pairingMacName ?? "Mac",
                     message.detail ?? "The one-time code was not accepted."
                 )
             }
-        case .response:
+        case .challenge, .response:
             break
         }
     }
 
     private func sendAuthentication(_ message: PairingMessage) {
         do {
-            guard let connection, let sessionKey else { return }
+            guard let connection, let secureSession else { return }
             let packet = try PacketCodec.encode(.authentication(message))
             connection.send(
-                content: try LANWire.encrypted(packet, key: sessionKey),
+                content: try LANWire.encrypted(packet, session: secureSession),
                 completion: .contentProcessed { [weak self] error in
                     if let error {
                         self?.clearConnection(notify: true, error: error.localizedDescription)
@@ -435,19 +518,15 @@ final class PadLANService {
         }
     }
 
-    private func sendVideoReceipt(sequence: UInt64) {
-        guard let packet = try? PacketCodec.encode(
-            .control(ControlMessage(.status, detail: "video-ack:\(sequence)"))
-        ) else { return }
-        sendPacket(packet)
-    }
-
     private func sendPacket(_ packet: Data) {
         queue.async { [weak self] in
-            guard let self, self.isConnected, let connection = self.connection, let key = self.sessionKey else { return }
+            guard let self,
+                  self.isConnected,
+                  let connection = self.connection,
+                  let secureSession = self.secureSession else { return }
             do {
                 connection.send(
-                    content: try LANWire.encrypted(packet, key: key),
+                    content: try LANWire.encrypted(packet, session: secureSession),
                     completion: .contentProcessed { [weak self] error in
                         if let error { self?.clearConnection(notify: true, error: error.localizedDescription) }
                     }
@@ -462,7 +541,7 @@ final class PadLANService {
         guard !inputSendInFlight,
               isConnected,
               let connection,
-              let key = sessionKey,
+              let secureSession,
               let input = pendingInput.popFirst() else { return }
         guard let message = ControlMessage.input(input),
               let packet = try? PacketCodec.encode(.control(message)) else {
@@ -473,7 +552,7 @@ final class PadLANService {
         do {
             inputSendInFlight = true
             connection.send(
-                content: try LANWire.encrypted(packet, key: key),
+                content: try LANWire.encrypted(packet, session: secureSession),
                 completion: .contentProcessed { [weak self, weak connection] error in
                     guard let self else { return }
                     self.queue.async {
@@ -585,6 +664,24 @@ final class PadLANService {
         let generation = subnetProbeGeneration
         print("[SidecarBridge/LAN] Trying last successful Mac address \(host)")
         probe(host: host, port: port, generation: generation)
+    }
+
+    @discardableResult
+    private func tryCachedDirectHostForResume() -> Bool {
+        guard selectedMacName != nil,
+              !isConnected,
+              connection == nil,
+              let host = UserDefaults.standard.string(forKey: "lastDirectMacHost"),
+              Self.isPrivateIPv4Address(host),
+              let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort) else {
+            return false
+        }
+        triedCachedHostForBrowser = true
+        subnetProbeGeneration &+= 1
+        let generation = subnetProbeGeneration
+        print("[SidecarBridge/LAN] Fast-resuming last Mac address \(host)")
+        probe(host: host, port: port, generation: generation)
+        return true
     }
 
     private func probe(host: String, port: NWEndpoint.Port, generation: Int) {
@@ -784,7 +881,7 @@ final class PadLANService {
         connectionAttemptWorkItem = nil
         connection = nil
         privateKey = nil
-        sessionKey = nil
+        secureSession = nil
         receiveBuffer.removeAll(keepingCapacity: true)
         pendingInput.removeAll()
         inputSendInFlight = false
@@ -792,6 +889,8 @@ final class PadLANService {
         pairingMacName = nil
         pairingNonce = nil
         pairingServerPublicKey = nil
+        pairingSecret = nil
+        pairingChannelBinding = nil
         submittedPairingCode = nil
         usedSavedCredential = false
         isConnected = false

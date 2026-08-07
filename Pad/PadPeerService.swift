@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MultipeerConnectivity
 import UIKit
@@ -21,6 +22,15 @@ final class PadPeerService: NSObject {
     private var mcConnected = false
     private var lanConnected = false
     private var mcPeerName: String?
+    private var pendingMCPeer: MCPeerID?
+    private var pendingMCMacID: String?
+    private var pendingMCNonce: Data?
+    private var pendingMCChannelBinding: Data?
+    private var pendingMCSecret: Data?
+    private var pendingMCPrivateKey: Curve25519.KeyAgreement.PrivateKey?
+    private var mcSecureSession: SecurePacketSession?
+    private var submittedMCPairingCode: String?
+    private var usedSavedMCCredential = false
     private var lanPeerName: String?
     private var started = false
     private var browserRunning = false
@@ -31,6 +41,7 @@ final class PadPeerService: NSObject {
     private var lastPeerActivity = ProcessInfo.processInfo.systemUptime
     private var validationWorkItem: DispatchWorkItem?
     private var peerSupportsHeartbeat = false
+    private var applicationIsBackgrounded = false
     private var pendingMultipeerInput = RemoteInputCoalescer()
     private var multipeerInputDrainScheduled = false
     private var lanDiscoveredMacs = Set<String>()
@@ -114,6 +125,14 @@ final class PadPeerService: NSObject {
         }
     }
 
+    func prepareForBackground() {
+        applicationIsBackgrounded = true
+        validationWorkItem?.cancel()
+        validationWorkItem = nil
+        heartbeatSentAt.removeAll(keepingCapacity: true)
+        onConnectionHealthChanged?("Session suspended — preserving encrypted link", nil)
+    }
+
     private func publishDiscoveredMacs() {
         let names = lanDiscoveredMacs.union(multipeerDiscoveredMacs.keys).sorted()
         onDiscoveredMacsChanged?(names)
@@ -123,15 +142,26 @@ final class PadPeerService: NSObject {
         guard !invitedPeers.contains(peerID.displayName),
               session.connectedPeers.isEmpty else { return }
         invitedPeers.insert(peerID.displayName)
-        let identity = try? JSONEncoder().encode(PadDeviceIdentity.current)
-        browser.invitePeer(peerID, to: session, withContext: identity, timeout: 30)
+        let privateKey = Curve25519.KeyAgreement.PrivateKey()
+        pendingMCPrivateKey = privateKey
+        mcSecureSession = nil
+        let context = MultipeerInvitationContext(
+            protocolVersion: LANWire.securityProtocolVersion,
+            identity: PadDeviceIdentity.current,
+            clientPublicKey: privateKey.publicKey.rawRepresentation
+        )
+        let encodedContext = try? JSONEncoder().encode(context)
+        browser.invitePeer(peerID, to: session, withContext: encodedContext, timeout: 30)
         armMultipeerConnectionWatchdog(for: peerID.displayName)
     }
 
     func resumeAfterBackground() {
+        applicationIsBackgrounded = false
+        lastPeerActivity = ProcessInfo.processInfo.systemUptime
         guard lanConnected || mcConnected else {
-            onConnectionHealthChanged?("Recovering discovery", nil)
-            restart()
+            onConnectionHealthChanged?("Restoring remembered Mac session", nil)
+            lan.resumeAfterBackground()
+            restartMultipeerBrowserAfterDisconnect()
             return
         }
         onConnectionHealthChanged?("Verifying after background", nil)
@@ -150,15 +180,16 @@ final class PadPeerService: NSObject {
             }
         }
         validationWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: workItem)
     }
 
     func send(_ message: ControlMessage) {
         if lanConnected {
             lan.send(message)
-        } else if !session.connectedPeers.isEmpty,
+        } else if mcConnected,
+                  !session.connectedPeers.isEmpty,
                   let data = try? PacketCodec.encode(.control(message)) {
-            try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
+            sendMultipeerPacket(data, to: session.connectedPeers, mode: .reliable)
         }
     }
 
@@ -167,7 +198,7 @@ final class PadPeerService: NSObject {
             lan.sendInput(input)
             return
         }
-        guard !session.connectedPeers.isEmpty else { return }
+        guard mcConnected, !session.connectedPeers.isEmpty else { return }
 
         pendingMultipeerInput.enqueue(input)
         if input.isCoalescibleInput {
@@ -180,14 +211,17 @@ final class PadPeerService: NSObject {
     func sendFilePacket(_ transfer: FileTransferPacket) {
         if lanConnected {
             lan.sendFilePacket(transfer)
-        } else if !session.connectedPeers.isEmpty,
+        } else if mcConnected,
+                  !session.connectedPeers.isEmpty,
                   let data = try? PacketCodec.encode(.file(transfer)) {
-            try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
+            sendMultipeerPacket(data, to: session.connectedPeers, mode: .reliable)
         }
     }
 
     func submitPairingCode(_ code: String) {
         lan.submitPairingCode(code)
+        submittedMCPairingCode = PairingCode.normalize(code)
+        sendMultipeerPairingResponseIfPossible()
     }
 
     private func reportConnection(error: String? = nil) {
@@ -211,7 +245,7 @@ final class PadPeerService: NSObject {
     private func drainMultipeerInput() {
         multipeerInputDrainScheduled = false
         let peers = session.connectedPeers
-        guard !peers.isEmpty else {
+        guard mcConnected, !peers.isEmpty else {
             pendingMultipeerInput.removeAll()
             return
         }
@@ -220,7 +254,7 @@ final class PadPeerService: NSObject {
             guard let message = ControlMessage.input(input),
                   let data = try? PacketCodec.encode(.control(message)) else { continue }
             let mode: MCSessionSendDataMode = input.isCoalescibleInput ? .unreliable : .reliable
-            try? session.send(data, toPeers: peers, with: mode)
+            sendMultipeerPacket(data, to: peers, mode: mode)
         }
     }
 
@@ -282,10 +316,15 @@ final class PadPeerService: NSObject {
             return
         }
         let now = ProcessInfo.processInfo.systemUptime
-        if peerSupportsHeartbeat, now - lastPeerActivity > 9 {
+        if RemoteSessionLifecyclePolicy.shouldRecoverStaleConnection(
+            isViewerBackgrounded: applicationIsBackgrounded,
+            peerSupportsHeartbeat: peerSupportsHeartbeat,
+            secondsSinceActivity: now - lastPeerActivity
+        ) {
             recoverStaleConnection(reason: "Encrypted link stopped responding.")
             return
         }
+        guard !applicationIsBackgrounded else { return }
         _ = sendHeartbeatPing()
         heartbeatSentAt = heartbeatSentAt.filter { now - $0.value < 16 }
     }
@@ -353,10 +392,14 @@ final class PadPeerService: NSObject {
         rebuildMultipeerSession()
         mcConnected = false
         mcPeerName = nil
+        clearPendingMultipeerAuthentication()
         invitedPeers.removeAll()
     }
 
-    private func armMultipeerConnectionWatchdog(for peerName: String) {
+    private func armMultipeerConnectionWatchdog(
+        for peerName: String,
+        timeout: TimeInterval = 20
+    ) {
         mcConnectionWatchdog?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, !self.lanConnected, !self.mcConnected else { return }
@@ -376,7 +419,7 @@ final class PadPeerService: NSObject {
         mcConnectionWatchdog = workItem
         // AWDL/Bluetooth discovery can take several seconds after iOS resumes
         // the app. Do not tear down a valid invitation while it is completing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: workItem)
     }
 
     private func rebuildMultipeerSession() {
@@ -388,6 +431,182 @@ final class PadPeerService: NSObject {
             encryptionPreference: .required
         )
         session.delegate = self
+    }
+
+    private func handleMultipeerAuthentication(_ message: PairingMessage, from remotePeer: MCPeerID) {
+        switch message.kind {
+        case .challenge:
+            guard message.protocolVersion == LANWire.securityProtocolVersion,
+                  let macID = message.macID,
+                  let nonce = message.nonce,
+                  let serverPublicKey = message.ephemeralPublicKey,
+                  let privateKey = pendingMCPrivateKey else {
+                session.disconnect()
+                clearPendingMultipeerAuthentication()
+                return
+            }
+            let clientPublicKey = privateKey.publicKey.rawRepresentation
+            do {
+                mcSecureSession = try SecurePacketSession.keyAgreement(
+                    privateKey: privateKey,
+                    peerPublicKey: serverPublicKey,
+                    clientPublicKey: clientPublicKey,
+                    serverPublicKey: serverPublicKey,
+                    role: .client,
+                    context: "SidecarBridge-Multipeer-v3"
+                )
+            } catch {
+                session.disconnect()
+                clearPendingMultipeerAuthentication()
+                onConnectionChanged?(false, error.localizedDescription)
+                return
+            }
+            pendingMCPeer = remotePeer
+            pendingMCMacID = macID
+            pendingMCNonce = nonce
+            pendingMCChannelBinding = PairingProof.multipeerChannelBinding(
+                clientPublicKey: clientPublicKey,
+                serverPublicKey: serverPublicKey
+            )
+            sendMultipeerPairingResponseIfPossible()
+
+        case .accepted:
+            guard message.protocolVersion == LANWire.securityProtocolVersion,
+                  let proof = message.proof,
+                  let secret = pendingMCSecret,
+                  let macID = pendingMCMacID,
+                  let nonce = pendingMCNonce,
+                  let channelBinding = pendingMCChannelBinding,
+                  PairingProof.verify(
+                    proof,
+                    secret: secret,
+                    role: .server,
+                    identity: PadDeviceIdentity.current,
+                    macID: macID,
+                    nonce: nonce,
+                    channelBinding: channelBinding
+                  ) else {
+                session.disconnect()
+                clearPendingMultipeerAuthentication()
+                onConnectionChanged?(false, "The nearby Mac could not be authenticated.")
+                return
+            }
+            if let credential = message.credential {
+                guard SecureCredentialStore.set(credential, account: "pad.mac.\(macID)") else {
+                    session.disconnect()
+                    clearPendingMultipeerAuthentication()
+                    onConnectionChanged?(false, "The trusted Mac credential could not be saved in Keychain.")
+                    return
+                }
+            }
+            mcConnectionWatchdog?.cancel()
+            mcConnectionWatchdog = nil
+            mcConnected = true
+            mcPeerName = remotePeer.displayName
+            clearPendingMultipeerAuthentication()
+            reportConnection()
+            updateHeartbeatState()
+
+        case .rejected:
+            // A saved credential can become stale when the pairing transcript
+            // changes between app versions. Remove only this Mac's entry so a
+            // code submission is actually used on the retry; otherwise the
+            // same rejected credential would be selected again forever.
+            if usedSavedMCCredential, let macID = pendingMCMacID {
+                SecureCredentialStore.remove(account: "pad.mac.\(macID)")
+                usedSavedMCCredential = false
+            }
+            submittedMCPairingCode = nil
+            pendingMCSecret = nil
+            onPairingCodeRequired?(
+                remotePeer.displayName,
+                message.detail ?? "The one-time code was not accepted."
+            )
+
+        case .response:
+            break
+        }
+    }
+
+    private func sendMultipeerPairingResponseIfPossible() {
+        guard !mcConnected,
+              let remotePeer = pendingMCPeer,
+              session.connectedPeers.contains(remotePeer),
+              let macID = pendingMCMacID,
+              let nonce = pendingMCNonce,
+              let channelBinding = pendingMCChannelBinding else { return }
+
+        let account = "pad.mac.\(macID)"
+        let secret: Data
+        if let credential = SecureCredentialStore.data(account: account) {
+            secret = credential
+            usedSavedMCCredential = true
+        } else if let code = submittedMCPairingCode,
+                  code.count == PairingCode.characterCount {
+            secret = Data(code.utf8)
+            usedSavedMCCredential = false
+        } else {
+            onPairingCodeRequired?(
+                remotePeer.displayName,
+                submittedMCPairingCode == nil
+                    ? nil
+                    : "Enter the complete 16-character code shown on the Mac."
+            )
+            return
+        }
+
+        pendingMCSecret = secret
+        let proof = PairingProof.make(
+            secret: secret,
+            role: .client,
+            identity: PadDeviceIdentity.current,
+            macID: macID,
+            nonce: nonce,
+            channelBinding: channelBinding
+        )
+        let response = PairingMessage(
+            kind: .response,
+            protocolVersion: LANWire.securityProtocolVersion,
+            identity: PadDeviceIdentity.current,
+            proof: proof
+        )
+        do {
+            let packet = try PacketCodec.encode(.authentication(response))
+            guard let mcSecureSession else { throw SecurePacketSession.SecurePacketError.invalidEnvelope }
+            try session.send(
+                mcSecureSession.seal(packet),
+                toPeers: [remotePeer],
+                with: .reliable
+            )
+        } catch {
+            session.disconnect()
+            clearPendingMultipeerAuthentication()
+            onConnectionChanged?(false, error.localizedDescription)
+        }
+    }
+
+    private func clearPendingMultipeerAuthentication() {
+        pendingMCPeer = nil
+        pendingMCMacID = nil
+        pendingMCNonce = nil
+        pendingMCChannelBinding = nil
+        pendingMCSecret = nil
+        pendingMCPrivateKey = nil
+        submittedMCPairingCode = nil
+        usedSavedMCCredential = false
+        if !mcConnected {
+            mcSecureSession = nil
+        }
+    }
+
+    private func sendMultipeerPacket(
+        _ packet: Data,
+        to peers: [MCPeerID],
+        mode: MCSessionSendDataMode
+    ) {
+        guard let mcSecureSession,
+              let encrypted = try? mcSecureSession.seal(packet) else { return }
+        try? session.send(encrypted, toPeers: peers, with: mode)
     }
 
     private func restartMultipeerBrowserAfterDisconnect() {
@@ -441,14 +660,17 @@ extension PadPeerService: MCSessionDelegate {
         DispatchQueue.main.async {
             guard session === self.session else { return }
             print("[SidecarBridge/P2P] Session with \(peerID.displayName): \(state.rawValue)")
-            self.mcConnected = !session.connectedPeers.isEmpty
-            self.mcPeerName = self.mcConnected ? (session.connectedPeers.first?.displayName ?? peerID.displayName) : nil
             if state == .connected {
-                self.mcConnectionWatchdog?.cancel()
-                self.mcConnectionWatchdog = nil
+                self.mcConnected = false
+                self.mcPeerName = nil
+                self.pendingMCPeer = peerID
+                self.armMultipeerConnectionWatchdog(for: peerID.displayName, timeout: 60)
             } else if state == .connecting {
                 self.armMultipeerConnectionWatchdog(for: peerID.displayName)
             } else {
+                self.mcConnected = false
+                self.mcPeerName = nil
+                self.clearPendingMultipeerAuthentication()
                 self.mcConnectionWatchdog?.cancel()
                 self.mcConnectionWatchdog = nil
                 self.pendingMultipeerInput.removeAll()
@@ -456,13 +678,50 @@ extension PadPeerService: MCSessionDelegate {
                 self.invitedPeers.remove(peerID.displayName)
                 self.restartMultipeerBrowserAfterDisconnect()
             }
-            self.reportConnection()
+            if state != .connected { self.reportConnection() }
             self.updateHeartbeatState()
         }
     }
 
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        guard let packet = try? PacketCodec.decode(data) else { return }
+        guard data.count <= LANWire.maximumPayloadSize + SecurePacketSession.envelopeOverhead else {
+            session.disconnect()
+            return
+        }
+        if !SecurePacketSession.isEnvelope(data) {
+            guard !mcConnected,
+                  let packet = try? PacketCodec.decode(data),
+                  case .authentication(let message) = packet,
+                  message.kind == .challenge else {
+                session.disconnect()
+                return
+            }
+            DispatchQueue.main.async {
+                self.handleMultipeerAuthentication(message, from: peerID)
+            }
+            return
+        }
+        guard let mcSecureSession else {
+            session.disconnect()
+            return
+        }
+        let packet: BridgePacket
+        do {
+            packet = try PacketCodec.decode(mcSecureSession.open(data))
+        } catch {
+            session.disconnect()
+            return
+        }
+        if case .authentication(let message) = packet {
+            DispatchQueue.main.async {
+                self.handleMultipeerAuthentication(message, from: peerID)
+            }
+            return
+        }
+        guard mcConnected else {
+            session.disconnect()
+            return
+        }
         switch packet {
         case .control(let command):
             DispatchQueue.main.async { self.route(command) }
@@ -475,7 +734,7 @@ extension PadPeerService: MCSessionDelegate {
             if let receipt = try? PacketCodec.encode(
                 .control(ControlMessage(.status, detail: "video-ack:\(frame.sequence)"))
             ) {
-                try? session.send(receipt, toPeers: [peerID], with: .reliable)
+                sendMultipeerPacket(receipt, to: [peerID], mode: .reliable)
             }
             DispatchQueue.main.async {
                 self.notePeerActivity()

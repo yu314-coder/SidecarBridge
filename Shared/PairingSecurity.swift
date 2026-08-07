@@ -3,6 +3,7 @@ import Foundation
 import Security
 
 enum PairingMessageKind: String, Codable, Equatable {
+    case challenge
     case response
     case accepted
     case rejected
@@ -10,28 +11,107 @@ enum PairingMessageKind: String, Codable, Equatable {
 
 struct PairingMessage: Codable, Equatable {
     let kind: PairingMessageKind
+    var protocolVersion: Int? = nil
+    var identity: BridgePeerIdentity? = nil
+    var macID: String? = nil
+    var nonce: Data? = nil
+    var ephemeralPublicKey: Data? = nil
+    var requiresPairingCode: Bool? = nil
     var proof: Data? = nil
     var credential: Data? = nil
     var detail: String? = nil
 }
 
+extension PairingMessage {
+    var isStructurallyValid: Bool {
+        guard protocolVersion == LANWire.securityProtocolVersion,
+              (detail?.utf8.count ?? 0) <= 512 else { return false }
+        switch kind {
+        case .challenge:
+            return identity == nil &&
+                (macID?.utf8.count ?? 0) > 0 &&
+                (macID?.utf8.count ?? 0) <= 128 &&
+                nonce?.count == 32 &&
+                ephemeralPublicKey?.count == 32 &&
+                proof == nil &&
+                credential == nil
+        case .response:
+            return identity?.isValidForAuthentication == true &&
+                proof?.count == 32 &&
+                macID == nil &&
+                nonce == nil &&
+                ephemeralPublicKey == nil &&
+                credential == nil
+        case .accepted:
+            return identity == nil &&
+                proof?.count == 32 &&
+                macID == nil &&
+                nonce == nil &&
+                ephemeralPublicKey == nil &&
+                (credential == nil || credential?.count == 32)
+        case .rejected:
+            return identity == nil &&
+                proof == nil &&
+                ephemeralPublicKey == nil &&
+                credential == nil
+        }
+    }
+}
+
+struct MultipeerInvitationContext: Codable, Equatable {
+    let protocolVersion: Int
+    let identity: BridgePeerIdentity
+    let clientPublicKey: Data
+}
+
+enum PairingProofRole: String {
+    case client
+    case server
+}
+
+enum PairingCode {
+    static let characterCount = 16
+    static let lifetime: TimeInterval = 5 * 60
+    private static let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+
+    static func generate() -> String {
+        let bytes = SecureCredentialStore.randomBytes(count: characterCount)
+        return String(bytes.map { alphabet[Int($0) % alphabet.count] })
+    }
+
+    static func normalize(_ value: String) -> String {
+        String(value.uppercased().filter { character in
+            character.isASCII && (character.isLetter || character.isNumber)
+        })
+    }
+
+    static func formatted(_ value: String) -> String {
+        let normalized = normalize(value)
+        return stride(from: 0, to: normalized.count, by: 4).map { offset in
+            let start = normalized.index(normalized.startIndex, offsetBy: offset)
+            let end = normalized.index(start, offsetBy: min(4, normalized.count - offset))
+            return String(normalized[start..<end])
+        }.joined(separator: "-")
+    }
+}
+
 enum PairingProof {
     static func make(
         secret: Data,
+        role: PairingProofRole,
         identity: BridgePeerIdentity,
         macID: String,
         nonce: Data,
-        clientPublicKey: Data,
-        serverPublicKey: Data
+        channelBinding: Data
     ) -> Data {
         let key = SymmetricKey(data: secret)
         return Data(HMAC<SHA256>.authenticationCode(
             for: transcript(
+                role: role,
                 identity: identity,
                 macID: macID,
                 nonce: nonce,
-                clientPublicKey: clientPublicKey,
-                serverPublicKey: serverPublicKey
+                channelBinding: channelBinding
             ),
             using: key
         ))
@@ -40,41 +120,59 @@ enum PairingProof {
     static func verify(
         _ proof: Data,
         secret: Data,
+        role: PairingProofRole,
         identity: BridgePeerIdentity,
         macID: String,
         nonce: Data,
-        clientPublicKey: Data,
-        serverPublicKey: Data
+        channelBinding: Data
     ) -> Bool {
         HMAC<SHA256>.isValidAuthenticationCode(
             proof,
             authenticating: transcript(
+                role: role,
                 identity: identity,
                 macID: macID,
                 nonce: nonce,
-                clientPublicKey: clientPublicKey,
-                serverPublicKey: serverPublicKey
+                channelBinding: channelBinding
             ),
             using: SymmetricKey(data: secret)
         )
     }
 
+    static func lanChannelBinding(clientPublicKey: Data, serverPublicKey: Data) -> Data {
+        var data = Data("SidecarBridge-LAN-binding-v2\u{0}".utf8)
+        appendLengthPrefixed(clientPublicKey, to: &data)
+        appendLengthPrefixed(serverPublicKey, to: &data)
+        return data
+    }
+
+    static func multipeerChannelBinding(clientPublicKey: Data, serverPublicKey: Data) -> Data {
+        var data = Data("SidecarBridge-Multipeer-binding-v3\u{0}".utf8)
+        appendLengthPrefixed(clientPublicKey, to: &data)
+        appendLengthPrefixed(serverPublicKey, to: &data)
+        return data
+    }
+
     private static func transcript(
+        role: PairingProofRole,
         identity: BridgePeerIdentity,
         macID: String,
         nonce: Data,
-        clientPublicKey: Data,
-        serverPublicKey: Data
+        channelBinding: Data
     ) -> Data {
-        var data = Data("SidecarBridge-Pairing-v1\u{0}".utf8)
-        for value in [identity.stableKey, identity.deviceName, identity.deviceKind, macID] {
-            data.append(Data(value.utf8))
-            data.append(0)
+        var data = Data("SidecarBridge-Pairing-v2\u{0}".utf8)
+        for value in [role.rawValue, identity.stableKey, identity.deviceName, identity.deviceKind, macID] {
+            appendLengthPrefixed(Data(value.utf8), to: &data)
         }
-        data.append(nonce)
-        data.append(clientPublicKey)
-        data.append(serverPublicKey)
+        appendLengthPrefixed(nonce, to: &data)
+        appendLengthPrefixed(channelBinding, to: &data)
         return data
+    }
+
+    private static func appendLengthPrefixed(_ value: Data, to data: inout Data) {
+        var length = UInt32(value.count).bigEndian
+        withUnsafeBytes(of: &length) { data.append(contentsOf: $0) }
+        data.append(value)
     }
 }
 
@@ -82,25 +180,60 @@ enum SecureCredentialStore {
     private static let service = "io.sidecarbridge.trusted-devices"
 
     static func data(account: String) -> Data? {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
+        var query = baseQuery(account: account, dataProtection: true)
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
-        return item as? Data
+        let protectedStatus = SecItemCopyMatching(query as CFDictionary, &item)
+        if protectedStatus == errSecSuccess {
+            return item as? Data
+        }
+
+        // Builds before the data-protection migration stored these entries in
+        // the login Keychain. On macOS, an update/relaunch can also make the
+        // protected query temporarily unavailable while the login session is
+        // being restored. Read the legacy item as a persistence fallback so a
+        // trusted device does not get downgraded to first-time pairing.
+        var legacyQuery = baseQuery(account: account, dataProtection: false)
+        legacyQuery[kSecReturnData] = true
+        legacyQuery[kSecMatchLimit] = kSecMatchLimitOne
+        var legacyItem: CFTypeRef?
+        guard SecItemCopyMatching(legacyQuery as CFDictionary, &legacyItem) == errSecSuccess,
+              let legacyData = legacyItem as? Data else { return nil }
+        // Best-effort migration; retain the legacy item until the protected
+        // copy is confirmed on a later read so a transient Keychain error
+        // cannot discard the only saved credential.
+        _ = setProtected(legacyData, account: account)
+        return legacyData
     }
 
     @discardableResult
     static func set(_ data: Data, account: String) -> Bool {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account
+        let protectedSaved = setProtected(data, account: account)
+        let legacySaved = setLegacy(data, account: account)
+        return protectedSaved || legacySaved
+    }
+
+    @discardableResult
+    private static func setProtected(_ data: Data, account: String) -> Bool {
+        let query = baseQuery(account: account, dataProtection: true)
+        let attributes: [CFString: Any] = [
+            kSecValueData: data,
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecSuccess {
+            return true
+        }
+        guard status == errSecItemNotFound else { return false }
+        var insert = query
+        attributes.forEach { insert[$0.key] = $0.value }
+        return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
+    }
+
+    @discardableResult
+    private static func setLegacy(_ data: Data, account: String) -> Bool {
+        let query = baseQuery(account: account, dataProtection: false)
         let attributes: [CFString: Any] = [
             kSecValueData: data,
             kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
@@ -114,29 +247,47 @@ enum SecureCredentialStore {
     }
 
     static func remove(account: String) {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account
-        ]
-        SecItemDelete(query as CFDictionary)
+        SecItemDelete(baseQuery(account: account, dataProtection: true) as CFDictionary)
+        SecItemDelete(baseQuery(account: account, dataProtection: false) as CFDictionary)
     }
 
     static func removeAll(accountPrefix: String) {
-        let query: [CFString: Any] = [
+        removeAll(accountPrefix: accountPrefix, dataProtection: true)
+        removeAll(accountPrefix: accountPrefix, dataProtection: false)
+    }
+
+    private static func removeAll(accountPrefix: String, dataProtection: Bool) {
+        var query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
             kSecReturnAttributes: true,
             kSecMatchLimit: kSecMatchLimitAll
         ]
+        if dataProtection {
+            query[kSecUseDataProtectionKeychain] = true
+        }
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let records = result as? [[CFString: Any]] else { return }
         for record in records {
             guard let account = record[kSecAttrAccount] as? String,
                   account.hasPrefix(accountPrefix) else { continue }
-            remove(account: account)
+            SecItemDelete(
+                baseQuery(account: account, dataProtection: dataProtection) as CFDictionary
+            )
         }
+    }
+
+    private static func baseQuery(account: String, dataProtection: Bool) -> [CFString: Any] {
+        var query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account
+        ]
+        if dataProtection {
+            query[kSecUseDataProtectionKeychain] = true
+        }
+        return query
     }
 
     static func randomBytes(count: Int) -> Data {

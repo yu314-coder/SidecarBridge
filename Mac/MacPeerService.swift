@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import MultipeerConnectivity
 
@@ -21,8 +22,10 @@ final class MacPeerService: NSObject {
     var onCommand: ((ControlMessage) -> Void)?
     var onInput: ((RemoteInputEvent) -> Void)?
     var onFilePacket: ((FileTransferPacket) -> Void)?
+    var onKeyFrameNeeded: (() -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
+    var onListenerStateChanged: ((Bool, String) -> Void)?
     var onP2PStateChanged: ((MacP2PState) -> Void)?
     var onConnectionHealthChanged: ((String, Int?) -> Void)?
 
@@ -33,6 +36,12 @@ final class MacPeerService: NSObject {
     private var mcConnected = false
     private var lanConnected = false
     private var mcPeerName: String?
+    private var pendingMCIdentity: BridgePeerIdentity?
+    private var pendingMCNonce: Data?
+    private var pendingMCChannelBinding: Data?
+    private var pendingMCPrivateKey: Curve25519.KeyAgreement.PrivateKey?
+    private var pendingMCClientPublicKey: Data?
+    private var mcSecureSession: SecurePacketSession?
     private var lanPeerName: String?
     private var started = false
     private var advertiserRunning = false
@@ -47,6 +56,7 @@ final class MacPeerService: NSObject {
     private var heartbeatSentAt: [String: TimeInterval] = [:]
     private var lastPeerActivity = ProcessInfo.processInfo.systemUptime
     private var peerSupportsHeartbeat = false
+    private var remoteViewerIsBackgrounded = false
 
     override init() {
         session = MCSession(
@@ -62,8 +72,12 @@ final class MacPeerService: NSObject {
             self?.notePeerActivity()
             self?.onFilePacket?(transfer)
         }
+        lan.onKeyFrameNeeded = { [weak self] in self?.onKeyFrameNeeded?() }
         lan.onLocalNetworkStateChanged = { [weak self] state in
             self?.onLocalNetworkStateChanged?(state)
+        }
+        lan.onListenerStateChanged = { [weak self] ready, detail in
+            self?.onListenerStateChanged?(ready, detail)
         }
         lan.onConnectionChanged = { [weak self] connected, value in
             guard let self else { return }
@@ -100,37 +114,52 @@ final class MacPeerService: NSObject {
 
     var hasConnectedPeer: Bool { lanConnected || mcConnected }
 
+    func setRemoteViewerBackgrounded(_ backgrounded: Bool) {
+        remoteViewerIsBackgrounded = backgrounded
+        heartbeatSentAt.removeAll(keepingCapacity: true)
+        if backgrounded {
+            onConnectionHealthChanged?("Viewer suspended — preserving encrypted session", nil)
+        } else {
+            lastPeerActivity = ProcessInfo.processInfo.systemUptime
+            onConnectionHealthChanged?("Viewer returned — verifying encrypted session", nil)
+        }
+    }
+
     func send(_ message: ControlMessage) {
         if lanConnected {
             lan.send(message)
-        } else if !session.connectedPeers.isEmpty,
+        } else if mcConnected,
+                  !session.connectedPeers.isEmpty,
                   let data = try? PacketCodec.encode(.control(message)) {
-            try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
+            sendMultipeerPacket(data, to: session.connectedPeers, mode: .reliable)
         }
     }
 
     func sendFrame(_ jpeg: Data) {
         if lanConnected {
             lan.sendFrame(jpeg)
-        } else if !session.connectedPeers.isEmpty,
+        } else if mcConnected,
+                  !session.connectedPeers.isEmpty,
                   let data = try? PacketCodec.encode(.jpeg(jpeg)) {
-            try? session.send(data, toPeers: session.connectedPeers, with: .unreliable)
+            sendMultipeerPacket(data, to: session.connectedPeers, mode: .unreliable)
         }
     }
 
     func sendFilePacket(_ transfer: FileTransferPacket) {
         if lanConnected {
             lan.sendFilePacket(transfer)
-        } else if !session.connectedPeers.isEmpty,
+        } else if mcConnected,
+                  !session.connectedPeers.isEmpty,
                   let data = try? PacketCodec.encode(.file(transfer)) {
-            try? session.send(data, toPeers: session.connectedPeers, with: .reliable)
+            sendMultipeerPacket(data, to: session.connectedPeers, mode: .reliable)
         }
     }
 
     func sendVideoFrame(_ frame: VideoFrame) {
         if lanConnected {
             lan.sendVideoFrame(frame)
-        } else if !session.connectedPeers.isEmpty,
+        } else if mcConnected,
+                  !session.connectedPeers.isEmpty,
                   let data = try? PacketCodec.encode(.video(frame)) {
             mcVideoQueue.async { [weak self] in
                 self?.enqueueMCVideo(PendingMCVideo(
@@ -154,7 +183,7 @@ final class MacPeerService: NSObject {
     }
 
     private func enqueueMCVideo(_ video: PendingMCVideo) {
-        guard !session.connectedPeers.isEmpty else { return }
+        guard mcConnected, !session.connectedPeers.isEmpty else { return }
         if mcWaitingForKeyFrame {
             guard video.isKeyFrame else { return }
             mcWaitingForKeyFrame = false
@@ -169,6 +198,7 @@ final class MacPeerService: NSObject {
         } else {
             pendingMCVideo.removeAll(keepingCapacity: true)
             mcWaitingForKeyFrame = true
+            onKeyFrameNeeded?()
             if video.isKeyFrame {
                 mcWaitingForKeyFrame = false
                 pendingMCVideo = [video]
@@ -177,22 +207,31 @@ final class MacPeerService: NSObject {
     }
 
     private func sendNextMCVideoIfPossible() {
-        guard !session.connectedPeers.isEmpty else { return }
+        guard mcConnected, !session.connectedPeers.isEmpty else { return }
         while mcVideoInFlight.count < mcVideoWindowSize, !pendingMCVideo.isEmpty {
             let video = pendingMCVideo.removeFirst()
             do {
-                try session.send(video.data, toPeers: session.connectedPeers, with: .reliable)
+                guard let mcSecureSession else {
+                    throw SecurePacketSession.SecurePacketError.invalidEnvelope
+                }
+                try session.send(
+                    mcSecureSession.seal(video.data),
+                    toPeers: session.connectedPeers,
+                    with: .reliable
+                )
                 mcVideoInFlight.insert(video.sequence)
                 mcVideoQueue.asyncAfter(deadline: .now() + 2) { [weak self] in
                     guard let self, self.mcVideoInFlight.contains(video.sequence) else { return }
                     self.mcVideoInFlight.removeAll(keepingCapacity: true)
                     self.pendingMCVideo.removeAll(keepingCapacity: true)
                     self.mcWaitingForKeyFrame = true
+                    self.onKeyFrameNeeded?()
                 }
             } catch {
                 mcVideoInFlight.removeAll(keepingCapacity: true)
                 pendingMCVideo.removeAll(keepingCapacity: true)
                 mcWaitingForKeyFrame = true
+                onKeyFrameNeeded?()
                 return
             }
         }
@@ -248,6 +287,7 @@ final class MacPeerService: NSObject {
         if lanConnected || mcConnected {
             startHeartbeat()
         } else {
+            remoteViewerIsBackgrounded = false
             stopHeartbeat()
         }
     }
@@ -277,10 +317,15 @@ final class MacPeerService: NSObject {
             return
         }
         let now = ProcessInfo.processInfo.systemUptime
-        if peerSupportsHeartbeat, now - lastPeerActivity > 9 {
+        if RemoteSessionLifecyclePolicy.shouldRecoverStaleConnection(
+            isViewerBackgrounded: remoteViewerIsBackgrounded,
+            peerSupportsHeartbeat: peerSupportsHeartbeat,
+            secondsSinceActivity: now - lastPeerActivity
+        ) {
             recoverStaleConnection(reason: "Encrypted link stopped responding.")
             return
         }
+        guard !remoteViewerIsBackgrounded else { return }
         let token = UUID().uuidString
         heartbeatSentAt[token] = now
         send(ControlMessage(.status, detail: "heartbeat-ping:\(token)"))
@@ -344,6 +389,7 @@ final class MacPeerService: NSObject {
         rebuildMultipeerSession()
         mcConnected = false
         mcPeerName = nil
+        clearPendingMultipeerAuthentication()
     }
 
     private func armMultipeerConnectionWatchdog() {
@@ -379,6 +425,152 @@ final class MacPeerService: NSObject {
         session.delegate = self
     }
 
+    @MainActor
+    private func beginMultipeerAuthentication(with remotePeer: MCPeerID) {
+        guard let identity = pendingMCIdentity else {
+            session.disconnect()
+            return
+        }
+        guard let privateKey = pendingMCPrivateKey,
+              let clientPublicKey = pendingMCClientPublicKey else {
+            session.disconnect()
+            return
+        }
+        let serverPublicKey = privateKey.publicKey.rawRepresentation
+        let challenge = MacPairingSecurity.shared.makeChallenge(
+            for: identity,
+            ephemeralPublicKey: serverPublicKey
+        )
+        guard challenge.isStructurallyValid, let nonce = challenge.nonce else {
+            session.disconnect()
+            clearPendingMultipeerAuthentication()
+            return
+        }
+        do {
+            mcSecureSession = try SecurePacketSession.keyAgreement(
+                privateKey: privateKey,
+                peerPublicKey: clientPublicKey,
+                clientPublicKey: clientPublicKey,
+                serverPublicKey: serverPublicKey,
+                role: .server,
+                context: "SidecarBridge-Multipeer-v3"
+            )
+        } catch {
+            session.disconnect()
+            clearPendingMultipeerAuthentication()
+            onConnectionChanged?(false, error.localizedDescription)
+            return
+        }
+        pendingMCNonce = nonce
+        pendingMCChannelBinding = PairingProof.multipeerChannelBinding(
+            clientPublicKey: clientPublicKey,
+            serverPublicKey: serverPublicKey
+        )
+        do {
+            let packet = try PacketCodec.encode(.authentication(challenge))
+            try session.send(packet, toPeers: [remotePeer], with: .reliable)
+            armMultipeerAuthenticationWatchdog()
+        } catch {
+            session.disconnect()
+            clearPendingMultipeerAuthentication()
+            onConnectionChanged?(false, error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func handleMultipeerAuthentication(_ message: PairingMessage, from remotePeer: MCPeerID) {
+        guard !mcConnected,
+              message.kind == .response,
+              message.protocolVersion == LANWire.securityProtocolVersion,
+              let proof = message.proof,
+              let identity = pendingMCIdentity,
+              message.identity == identity,
+              let nonce = pendingMCNonce,
+              let channelBinding = pendingMCChannelBinding else {
+            session.disconnect()
+            clearPendingMultipeerAuthentication()
+            return
+        }
+
+        let result = MacPairingSecurity.shared.verify(
+            identity: identity,
+            nonce: nonce,
+            proof: proof,
+            channelBinding: channelBinding
+        )
+        let response = PairingMessage(
+            kind: result.accepted ? .accepted : .rejected,
+            protocolVersion: LANWire.securityProtocolVersion,
+            proof: result.responseProof,
+            credential: result.issuedCredential,
+            detail: result.detail
+        )
+        do {
+            let packet = try PacketCodec.encode(.authentication(response))
+            guard let mcSecureSession else {
+                throw SecurePacketSession.SecurePacketError.invalidEnvelope
+            }
+            try session.send(
+                mcSecureSession.seal(packet),
+                toPeers: [remotePeer],
+                with: .reliable
+            )
+        } catch {
+            if result.issuedCredential != nil {
+                MacPairingSecurity.shared.revokeCredential(for: identity)
+            }
+            session.disconnect()
+            clearPendingMultipeerAuthentication()
+            onConnectionChanged?(false, error.localizedDescription)
+            return
+        }
+
+        guard result.accepted else { return }
+        mcConnectionWatchdog?.cancel()
+        mcConnectionWatchdog = nil
+        mcConnected = true
+        mcPeerName = remotePeer.displayName
+        clearPendingMultipeerAuthentication()
+        onP2PStateChanged?(.connected(remotePeer.displayName))
+        reportConnection()
+        updateHeartbeatState()
+    }
+
+    private func armMultipeerAuthenticationWatchdog() {
+        mcConnectionWatchdog?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, !self.lanConnected, !self.mcConnected else { return }
+            self.session.disconnect()
+            self.clearPendingMultipeerAuthentication()
+            let message = "Nearby P2P authentication timed out; advertising again."
+            self.onP2PStateChanged?(.recovering(message))
+            self.onConnectionChanged?(false, message)
+        }
+        mcConnectionWatchdog = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: workItem)
+    }
+
+    private func clearPendingMultipeerAuthentication() {
+        pendingMCIdentity = nil
+        pendingMCNonce = nil
+        pendingMCChannelBinding = nil
+        pendingMCPrivateKey = nil
+        pendingMCClientPublicKey = nil
+        if !mcConnected {
+            mcSecureSession = nil
+        }
+    }
+
+    private func sendMultipeerPacket(
+        _ packet: Data,
+        to peers: [MCPeerID],
+        mode: MCSessionSendDataMode
+    ) {
+        guard let mcSecureSession,
+              let encrypted = try? mcSecureSession.seal(packet) else { return }
+        try? session.send(encrypted, toPeers: peers, with: mode)
+    }
+
     private func restartMultipeerAdvertisingAfterDisconnect() {
         guard started, !lanConnected else { return }
         if advertiserRunning {
@@ -402,14 +594,22 @@ extension MacPeerService: MCNearbyServiceAdvertiserDelegate {
         invitationHandler: @escaping (Bool, MCSession?) -> Void
     ) {
         onP2PStateChanged?(.connecting(peerID.displayName))
-        let identity = context
-            .flatMap { try? JSONDecoder().decode(BridgePeerIdentity.self, from: $0) }
-            ?? BridgePeerIdentity(deviceID: "", deviceName: peerID.displayName, deviceKind: "iOS device")
-        DispatchQueue.main.async {
-            MacDeviceAuthorizer.shared.authorize(identity) { accepted in
-                invitationHandler(accepted, accepted ? self.session : nil)
-            }
+        guard !mcConnected,
+              session.connectedPeers.isEmpty,
+              pendingMCIdentity == nil,
+              let context,
+              let invitation = try? JSONDecoder().decode(MultipeerInvitationContext.self, from: context),
+              invitation.protocolVersion == LANWire.securityProtocolVersion,
+              invitation.clientPublicKey.count == 32,
+              !invitation.identity.deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            invitationHandler(false, nil)
+            return
         }
+        pendingMCIdentity = invitation.identity
+        pendingMCClientPublicKey = invitation.clientPublicKey
+        pendingMCPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        mcSecureSession = nil
+        invitationHandler(true, session)
     }
 
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
@@ -429,16 +629,18 @@ extension MacPeerService: MCSessionDelegate {
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
         DispatchQueue.main.async {
             guard session === self.session else { return }
-            self.mcConnected = !session.connectedPeers.isEmpty
-            self.mcPeerName = self.mcConnected ? (session.connectedPeers.first?.displayName ?? peerID.displayName) : nil
             if state == .connected {
-                self.onP2PStateChanged?(.connected(peerID.displayName))
-                self.mcConnectionWatchdog?.cancel()
-                self.mcConnectionWatchdog = nil
+                self.mcConnected = false
+                self.mcPeerName = nil
+                self.onP2PStateChanged?(.connecting(peerID.displayName))
+                self.beginMultipeerAuthentication(with: peerID)
             } else if state == .connecting {
                 self.onP2PStateChanged?(.connecting(peerID.displayName))
                 self.armMultipeerConnectionWatchdog()
             } else {
+                self.mcConnected = false
+                self.mcPeerName = nil
+                self.clearPendingMultipeerAuthentication()
                 self.onP2PStateChanged?(
                     self.lanConnected
                         ? .standbyDirect
@@ -448,14 +650,33 @@ extension MacPeerService: MCSessionDelegate {
                 self.mcConnectionWatchdog = nil
                 self.restartMultipeerAdvertisingAfterDisconnect()
             }
-            self.reportConnection()
+            if state != .connected { self.reportConnection() }
             if state != .connected { self.resetMCVideoQueue() }
             self.updateHeartbeatState()
         }
     }
 
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        guard let packet = try? PacketCodec.decode(data) else { return }
+        guard data.count <= LANWire.maximumPayloadSize + SecurePacketSession.envelopeOverhead,
+              SecurePacketSession.isEnvelope(data),
+              let mcSecureSession else {
+            session.disconnect()
+            return
+        }
+        let packet: BridgePacket
+        do {
+            packet = try PacketCodec.decode(mcSecureSession.open(data))
+        } catch {
+            session.disconnect()
+            return
+        }
+        if case .authentication(let message) = packet {
+            DispatchQueue.main.async {
+                self.handleMultipeerAuthentication(message, from: peerID)
+            }
+            return
+        }
+        guard mcConnected else { return }
         switch packet {
         case .control(let command):
             if let input = command.remoteInputEvent {

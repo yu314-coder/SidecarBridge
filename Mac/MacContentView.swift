@@ -25,9 +25,12 @@ struct MacContentView: View {
                     header
                     statusCard
                     modeCards
+                    #if !SIDECARBRIDGE_APP_STORE_SAFE
                     shortcutTestCard
+                    #endif
                     fileTransferCard
                     permissionCard
+                    systemInformationCard
                     startupCard
                     footer
                 }
@@ -41,6 +44,7 @@ struct MacContentView: View {
         }
     }
 
+    #if !SIDECARBRIDGE_APP_STORE_SAFE
     private var shortcutTestCard: some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 5) {
@@ -65,6 +69,7 @@ struct MacContentView: View {
     private func arrow(for key: String) -> String {
         ["left": "←", "right": "→", "down": "↓", "up": "↑"][key] ?? key
     }
+    #endif
 
     private var header: some View {
         HStack(spacing: 18) {
@@ -77,9 +82,15 @@ struct MacContentView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text("SidecarBridge")
                     .font(.system(size: 32, weight: .bold, design: .rounded))
+                #if SIDECARBRIDGE_APP_STORE_SAFE
+                Text("Your screen on iPad, with a private local connection.")
+                    .font(.headline)
+                    .foregroundStyle(.white.opacity(0.62))
+                #else
                 Text("Your Mac screen, with the iPad keyboard and trackpad.")
                     .font(.headline)
                     .foregroundStyle(.white.opacity(0.62))
+                #endif
             }
             Spacer()
             Text("MAC")
@@ -133,7 +144,7 @@ struct MacContentView: View {
                 icon: "cursorarrow.motionlines",
                 title: "In-App Display",
                 subtitle: "Recommended",
-                description: "Encrypted same-Wi-Fi screen stream with Magic Keyboard, trackpad, touch, and Pencil input.",
+                description: inAppDisplayDescription,
                 tint: .cyan,
                 buttonTitle: model.isStreaming ? "Streaming" : "Start App Stream",
                 isPrimary: true,
@@ -143,11 +154,11 @@ struct MacContentView: View {
 
             ModeCard(
                 icon: "rectangle.connected.to.line.below",
-                title: "System Sidecar",
-                subtitle: "Leaves this app",
-                description: "Uses Apple's native Sidecar display app. Apple does not allow that stream to be embedded here.",
+                title: systemDisplayTitle,
+                subtitle: "Public system UI",
+                description: systemDisplayDescription,
                 tint: .purple,
-                buttonTitle: "Open System Sidecar",
+                buttonTitle: "Open Displays Settings",
                 isPrimary: false,
                 isDisabled: false,
                 action: model.trySidecarNow
@@ -173,6 +184,17 @@ struct MacContentView: View {
                         .tint(.orange)
                 }
             }
+
+            Divider().overlay(.white.opacity(0.08))
+
+            PermissionRow(
+                icon: "arrow.down.left.and.arrow.up.right",
+                title: "Incoming encrypted connection",
+                detail: model.incomingListenerDetail,
+                isReady: model.incomingListenerReady,
+                isChecking: !model.incomingListenerReady,
+                stateLabel: model.incomingListenerReady ? "LISTENING" : "STARTING"
+            ) { EmptyView() }
 
             Divider().overlay(.white.opacity(0.08))
 
@@ -211,6 +233,7 @@ struct MacContentView: View {
                 }
             }
 
+            #if !SIDECARBRIDGE_APP_STORE_SAFE
             Divider().overlay(.white.opacity(0.08))
 
             PermissionRow(
@@ -224,13 +247,23 @@ struct MacContentView: View {
                     Button("Show App") { model.revealApplication() }
                 }
             }
+            #else
+            Divider().overlay(.white.opacity(0.08))
+            PermissionRow(
+                icon: "rectangle.on.rectangle",
+                title: "Mac App Store viewer edition",
+                detail: "Remote keyboard and trackpad control is provided by the direct companion build.",
+                isReady: true,
+                stateLabel: "VIEWER"
+            ) { EmptyView() }
+            #endif
 
             Divider().overlay(.white.opacity(0.08))
 
             PermissionRow(
                 icon: "lock.badge.clock",
-                title: "First-time pairing code",
-                detail: "\(model.pairingCode) • Enter once on a new iPhone or iPad; trusted credentials are then stored in Keychain.",
+                title: "First-time secure pairing code",
+                detail: "\(model.pairingCode) • 16 characters, expires after five minutes, and is replaced by a Keychain credential.",
                 isReady: true,
                 stateLabel: "ONE-TIME"
             ) {
@@ -246,6 +279,30 @@ struct MacContentView: View {
         }
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+    }
+
+    private var inAppDisplayDescription: String {
+        #if SIDECARBRIDGE_APP_STORE_SAFE
+        return "Encrypted same-Wi-Fi screen stream for private viewing on iPad."
+        #else
+        return "Encrypted same-Wi-Fi screen stream with Magic Keyboard, trackpad, touch, and Pencil input."
+        #endif
+    }
+
+    private var systemDisplayTitle: String {
+        #if SIDECARBRIDGE_APP_STORE_SAFE
+        return "System Display Settings"
+        #else
+        return "System Sidecar"
+        #endif
+    }
+
+    private var systemDisplayDescription: String {
+        #if SIDECARBRIDGE_APP_STORE_SAFE
+        return "Opens the system display settings. This companion uses only public APIs."
+        #else
+        return "Opens Displays settings so you can choose Apple Sidecar. The direct companion uses public APIs for this system action."
+        #endif
     }
 
     private var fileTransferCard: some View {
@@ -290,6 +347,68 @@ struct MacContentView: View {
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
     }
 
+    private var systemInformationCard: some View {
+        VStack(spacing: 0) {
+            panelTitle("System information & diagnostics", icon: "info.circle")
+            Divider().overlay(.white.opacity(0.08))
+
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 14) {
+                    SystemInformationPanel(
+                        title: "This Mac",
+                        subtitle: "Local system",
+                        information: model.localSystemInformation,
+                        tint: .cyan
+                    )
+                    SystemInformationPanel(
+                        title: "Connected device",
+                        subtitle: model.hasPadPeer ? "Encrypted peer snapshot" : "Connect to retrieve",
+                        information: model.remoteSystemInformation,
+                        tint: .purple
+                    )
+                }
+                VStack(spacing: 14) {
+                    SystemInformationPanel(
+                        title: "This Mac",
+                        subtitle: "Local system",
+                        information: model.localSystemInformation,
+                        tint: .cyan
+                    )
+                    SystemInformationPanel(
+                        title: "Connected device",
+                        subtitle: model.hasPadPeer ? "Encrypted peer snapshot" : "Connect to retrieve",
+                        information: model.remoteSystemInformation,
+                        tint: .purple
+                    )
+                }
+            }
+            .padding(16)
+
+            Divider().overlay(.white.opacity(0.08))
+            HStack(spacing: 12) {
+                Label(model.diagnosticActionDetail, systemImage: "checkmark.shield")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.62))
+                Spacer()
+                Button {
+                    model.refreshSystemInformation()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                Button {
+                    model.copyDiagnosticReport()
+                } label: {
+                    Label("Copy Report", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.cyan)
+            }
+            .padding(16)
+        }
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+    }
+
     private var connectionHealthText: String {
         guard let latency = model.connectionLatencyMS else { return model.connectionHealthDetail }
         return "\(model.connectionHealthDetail) • round trip \(latency) ms"
@@ -314,32 +433,67 @@ struct MacContentView: View {
     }
 
     private var startupCard: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.06))
-                Image(systemName: "power")
-                    .font(.title3.bold())
-                    .foregroundStyle(model.launchAtLogin ? .green : .white.opacity(0.55))
-            }
-            .frame(width: 44, height: 44)
+        VStack(spacing: 14) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.06))
+                    Image(systemName: "power")
+                        .font(.title3.bold())
+                        .foregroundStyle(model.launchAtLogin ? .green : .white.opacity(0.55))
+                }
+                .frame(width: 44, height: 44)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Automatic startup").font(.headline)
-                Text(model.launchAtLoginDetail)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.55))
-            }
-            Spacer()
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Automatic startup").font(.headline)
+                    Text(model.launchAtLoginDetail)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+                Spacer()
 
-            if model.launchAtLoginNeedsApproval {
-                Button("Open Login Items") { model.openLoginItemsSettings() }
-                    .buttonStyle(.borderedProminent)
-            } else if model.launchAtLogin {
-                Button("Repair") { model.repairLaunchAtLogin() }
-                Button("Turn Off") { model.setLaunchAtLogin(false) }
-            } else {
-                Button("Start Automatically") { model.setLaunchAtLogin(true) }
-                    .buttonStyle(.borderedProminent)
+                if model.launchAtLoginNeedsApproval {
+                    Button("Open Login Items") { model.openLoginItemsSettings() }
+                        .buttonStyle(.borderedProminent)
+                } else if model.launchAtLogin {
+                    Button("Repair") { model.repairLaunchAtLogin() }
+                    Button("Turn Off") { model.setLaunchAtLogin(false) }
+                } else {
+                    Button("Start Automatically") { model.setLaunchAtLogin(true) }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+
+            Divider().overlay(.white.opacity(0.08))
+
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.06))
+                    Image(systemName: model.shutdownProtectionActive
+                          ? "shield.lefthalf.filled.badge.checkmark"
+                          : "shield.checkered")
+                        .font(.title3.bold())
+                        .foregroundStyle(model.shutdownProtectionEnabled ? .cyan : .white.opacity(0.55))
+                }
+                .frame(width: 44, height: 44)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Shutdown handoff").font(.headline)
+                    Text(model.shutdownProtectionDetail)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.55))
+                    Text("Pre-login control is unavailable: macOS starts App Store login items only after authentication.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange.opacity(0.8))
+                }
+                Spacer()
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { model.shutdownProtectionEnabled },
+                        set: { model.setShutdownProtectionEnabled($0) }
+                    )
+                )
+                .labelsHidden()
             }
         }
         .padding(16)
@@ -353,9 +507,11 @@ struct MacContentView: View {
             Spacer()
             Button("Displays Settings") { model.openDisplaysSettings() }
                 .buttonStyle(.link)
+            #if !SIDECARBRIDGE_APP_STORE_SAFE
             if !model.reachableSidecarDevices.isEmpty {
                 Text("Apple Sidecar: \(model.reachableSidecarDevices.joined(separator: ", "))")
             }
+            #endif
         }
         .font(.caption)
         .foregroundStyle(.white.opacity(0.42))
@@ -421,6 +577,60 @@ private struct ModeCard: View {
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(tint.opacity(0.22)))
+    }
+}
+
+private struct SystemInformationPanel: View {
+    let title: String
+    let subtitle: String
+    let information: SystemInformation?
+    let tint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                Image(systemName: information == nil ? "questionmark.circle" : "desktopcomputer")
+                    .foregroundStyle(tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline)
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+                Spacer()
+                if let information {
+                    Text(information.platform.uppercased())
+                        .font(.caption2.bold())
+                        .foregroundStyle(tint)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(tint.opacity(0.12), in: Capsule())
+                }
+            }
+
+            if let information {
+                ForEach(Array(information.summaryRows.enumerated()), id: \.offset) { _, row in
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(row.name)
+                            .foregroundStyle(.white.opacity(0.52))
+                        Spacer()
+                        Text(row.value)
+                            .multilineTextAlignment(.trailing)
+                            .textSelection(.enabled)
+                    }
+                    .font(.caption)
+                }
+            } else {
+                Text("The connected iPhone or iPad will send this information after secure authentication.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .padding(14)
+        .background(.black.opacity(0.14), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(tint.opacity(0.15)))
     }
 }
 

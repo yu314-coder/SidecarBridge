@@ -30,8 +30,10 @@ struct PadContentView: View {
     }()
     @State private var isCalibratingPointerButtons = false
     @State private var showsSoftwareKeyboard = false
+    @State private var showingForgetConfirmation = false
+    @State private var showingSystemInformation = false
 
-    var body: some View {
+    private var content: some View {
         ZStack {
             LinearGradient(
                 colors: [Color(red: 0.018, green: 0.025, blue: 0.09), Color(red: 0.06, green: 0.035, blue: 0.2)],
@@ -63,17 +65,38 @@ struct PadContentView: View {
         .onChange(of: model.isStreaming) { _, streaming in
             if !streaming { resetViewerZoom() }
         }
+    }
+
+    var body: some View {
+        content
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [.item],
             allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first { model.sendFile(at: url) }
-            case .failure(let error):
-                model.fileTransferError = error.localizedDescription
+        ) { handleFileImport($0) }
+        .confirmationDialog(
+            "Forget every trusted Mac?",
+            isPresented: $showingForgetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Forget Trusted Macs", role: .destructive) {
+                model.forgetTrustedMacs()
             }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You will need the current 16-character code the next time you connect.")
+        }
+        .sheet(isPresented: $showingSystemInformation) {
+            PadSystemInformationSheet(model: model)
+        }
+    }
+
+    private func handleFileImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            if let url = urls.first { model.sendFile(at: url) }
+        case .failure(let error):
+            model.fileTransferError = error.localizedDescription
         }
     }
 
@@ -88,6 +111,7 @@ struct PadContentView: View {
                         discoveryCard
                     }
                     permissionStrip
+                    systemInformationCard
                     modeChooser
                     actionBar
                     fileTransferCard
@@ -296,15 +320,16 @@ struct PadContentView: View {
             Label("First-time secure pairing", systemImage: "lock.badge.clock")
                 .font(.headline)
                 .foregroundStyle(.cyan)
-            Text("Enter the 8-digit one-time code shown by SidecarBridge on \(model.pairingMacName). It is used once, then replaced by a device credential stored in Keychain.")
+            Text("Enter the 16-character code shown by SidecarBridge on \(model.pairingMacName). It expires after five minutes and is replaced by a Keychain credential.")
                 .font(.callout)
                 .foregroundStyle(.white.opacity(0.78))
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 10) {
-                SecureField("8-digit code", text: $model.pairingCode)
+                SecureField("XXXX-XXXX-XXXX-XXXX", text: $model.pairingCode)
                     .textContentType(.oneTimeCode)
-                    .keyboardType(.numberPad)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
                     .font(.system(.title3, design: .monospaced).weight(.semibold))
                     .padding(.horizontal, 13)
                     .padding(.vertical, 10)
@@ -468,6 +493,65 @@ struct PadContentView: View {
         }
     }
 
+    private var systemInformationCard: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                systemInformationIdentity
+                Spacer()
+                systemInformationActions
+            }
+            VStack(alignment: .leading, spacing: 14) {
+                systemInformationIdentity
+                systemInformationActions
+            }
+        }
+        .padding(16)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+    }
+
+    private var systemInformationIdentity: some View {
+        HStack(spacing: 13) {
+            Image(systemName: "info.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.cyan)
+                .frame(width: 46, height: 46)
+                .background(.cyan.opacity(0.13), in: RoundedRectangle(cornerRadius: 13))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("System information & diagnostics").font(.headline)
+                Text(
+                    model.remoteSystemInformation == nil
+                        ? "\(model.localSystemInformation.deviceModel) • connect to retrieve Mac details"
+                        : "\(model.localSystemInformation.deviceModel) • \(model.remoteSystemInformation?.deviceModel ?? "Mac")"
+                )
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.65))
+                .fixedSize(horizontal: false, vertical: true)
+                Text(model.diagnosticActionDetail)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+        }
+    }
+
+    private var systemInformationActions: some View {
+        HStack(spacing: 9) {
+            Button {
+                model.refreshSystemInformation()
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            Button {
+                showingSystemInformation = true
+            } label: {
+                Label("View Details", systemImage: "list.bullet.rectangle")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.cyan)
+        }
+    }
+
     @ViewBuilder
     private var permissionTiles: some View {
         PadPermissionTile(
@@ -574,6 +658,15 @@ struct PadContentView: View {
             .tint(.orange)
             .controlSize(.large)
         }
+
+        Button(role: .destructive) {
+            showingForgetConfirmation = true
+        } label: {
+            Label("Forget Trusted Macs", systemImage: "trash")
+                .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
     }
 
     private var requirementStrip: some View {
@@ -743,18 +836,22 @@ struct PadContentView: View {
                 Spacer()
 
                 if showBottomHint {
-                    Text(model.remoteInputAuthorized
-                         ? "One finger moves • tap clicks • hold then drag • two fingers scroll"
-                         : "On the Mac: SidecarBridge → Enable Remote Input → allow Accessibility")
+                    Text(model.remoteInputUnavailable
+                         ? "Viewer-only Mac companion • install the direct companion for keyboard and trackpad control"
+                         : model.remoteInputAuthorized
+                            ? "One finger moves • tap clicks • hold then drag • two fingers scroll"
+                            : "On the Mac: SidecarBridge → Enable Remote Input → allow Accessibility")
                         .font(.caption)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .background(.ultraThinMaterial, in: Capsule())
                         .padding(.bottom, 14)
                         .allowsHitTesting(false)
-                        .accessibilityLabel(model.remoteInputAuthorized
-                            ? "Remote input help: move one finger for the cursor, tap to click, hold then move to drag, or use two fingers to scroll."
-                            : "Remote input requires Accessibility permission on the Mac.")
+                        .accessibilityLabel(model.remoteInputUnavailable
+                            ? "Viewer-only Mac companion. Install the direct companion for keyboard and trackpad control."
+                            : model.remoteInputAuthorized
+                                ? "Remote input help: move one finger for the cursor, tap to click, hold then move to drag, or use two fingers to scroll."
+                                : "Remote input requires Accessibility permission on the Mac.")
                 }
             }
 
@@ -1048,6 +1145,14 @@ struct PadContentView: View {
 
                     Divider()
 
+                    Button {
+                        showingSystemInformation = true
+                    } label: {
+                        Label("System Info & Diagnostics", systemImage: "info.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
                     Label(inputStatusText, systemImage: inputStatusIcon)
                         .font(.caption.bold())
                         .foregroundStyle(model.remoteInputAuthorized ? .cyan : .orange)
@@ -1145,6 +1250,7 @@ struct PadContentView: View {
     }
 
     private var inputStatusText: String {
+        if model.remoteInputUnavailable { return "VIEWER ONLY" }
         guard model.remoteInputAuthorized, model.lastInputAccepted else { return "MAC PERMISSION REQUIRED" }
         guard let latency = model.controlLatencyMS else { return "TRACKPAD READY" }
         return "INPUT \(latency) MS"
@@ -1227,7 +1333,8 @@ struct PadContentView: View {
     }
 
     private var inputStatusIcon: String {
-        model.remoteInputAuthorized && model.lastInputAccepted
+        if model.remoteInputUnavailable { return "eye" }
+        return model.remoteInputAuthorized && model.lastInputAccepted
             ? "cursorarrow.motionlines"
             : "exclamationmark.triangle.fill"
     }
@@ -1446,6 +1553,148 @@ private struct RemoteCursorOverlay: View {
         }
         let height = size.width / contentAspectRatio
         return CGRect(x: 0, y: (size.height - height) / 2, width: size.width, height: height)
+    }
+}
+
+private struct PadSystemInformationSheet: View {
+    @ObservedObject var model: PadConnectionModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    informationSection(
+                        title: "This \(model.localSystemInformation.platform)",
+                        icon: "ipad.and.iphone",
+                        information: model.localSystemInformation,
+                        tint: .cyan
+                    )
+                    informationSection(
+                        title: "Connected Mac",
+                        icon: "desktopcomputer",
+                        information: model.remoteSystemInformation,
+                        tint: .purple
+                    )
+                    connectionSection
+
+                    Text("The copied report excludes pairing codes, credentials, device IDs, IP addresses, and file paths.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding()
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("System Information")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Refresh") { model.refreshSystemInformation() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    model.copyDiagnosticReport()
+                } label: {
+                    Label("Copy Diagnostic Report", systemImage: "doc.on.doc")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.cyan)
+                .controlSize(.large)
+                .padding()
+                .background(.ultraThinMaterial)
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func informationSection(
+        title: String,
+        icon: String,
+        information: SystemInformation?,
+        tint: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: icon)
+                .font(.headline)
+                .foregroundStyle(tint)
+            if let information {
+                ForEach(Array(information.summaryRows.enumerated()), id: \.offset) { _, row in
+                    HStack(alignment: .firstTextBaseline, spacing: 14) {
+                        Text(row.name).foregroundStyle(.secondary)
+                        Spacer()
+                        Text(row.value)
+                            .multilineTextAlignment(.trailing)
+                            .textSelection(.enabled)
+                    }
+                    .font(.callout)
+                    if row != information.summaryRows.last {
+                        Divider()
+                    }
+                }
+            } else {
+                ContentUnavailableView(
+                    "No Mac Snapshot",
+                    systemImage: "desktopcomputer.trianglebadge.exclamationmark",
+                    description: Text("Connect securely, then tap Refresh.")
+                )
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(16)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var connectionSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Live connection", systemImage: "waveform.path.ecg")
+                .font(.headline)
+                .foregroundStyle(.green)
+            diagnosticRow("Transport", model.connectionTransport)
+            Divider()
+            diagnosticRow("Link", model.connectionHealthDetail)
+            Divider()
+            diagnosticRow(
+                "Latency",
+                model.connectionLatencyMS.map { "\($0) ms" } ?? "Not measured"
+            )
+            Divider()
+            diagnosticRow("Stream", model.streamDimensions)
+            Divider()
+            diagnosticRow(
+                "Displayed frame rate",
+                model.streamFPS > 0 ? "\(model.streamFPS) FPS" : "Not measured"
+            )
+            Divider()
+            diagnosticRow(
+                "Input latency",
+                model.controlLatencyMS.map { "\($0) ms" } ?? "Not measured"
+            )
+            Divider()
+            diagnosticRow(
+                "Background viewer",
+                model.isPictureInPictureActive ? "Active" : model.isPictureInPicturePossible ? "Available" : "Unavailable"
+            )
+        }
+        .padding(16)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func diagnosticRow(_ name: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            Text(name).foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+        .font(.callout)
     }
 }
 

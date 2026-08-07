@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct FileTransferSnapshot: Equatable {
@@ -35,6 +36,7 @@ final class FileTransferEngine {
         let sourceURL: URL
         let handle: FileHandle
         let hasSecurityScope: Bool
+        var hasher: SHA256
         var offset: Int64
     }
 
@@ -42,8 +44,10 @@ final class FileTransferEngine {
         let id: UUID
         let name: String
         let size: Int64
-        let destinationURL: URL
+        let temporaryURL: URL
+        let destinationDirectory: URL
         let handle: FileHandle
+        var hasher: SHA256
         var offset: Int64
     }
 
@@ -80,6 +84,7 @@ final class FileTransferEngine {
                 sourceURL: url,
                 handle: handle,
                 hasSecurityScope: scoped,
+                hasher: SHA256(),
                 offset: 0
             )
             armTimeout(for: id)
@@ -153,17 +158,29 @@ final class FileTransferEngine {
         let name = Self.safeFileName(rawName)
         let directory = try receiveDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let destination = Self.uniqueURL(for: name, in: directory)
-        guard FileManager.default.createFile(atPath: destination.path, contents: nil) else {
+        let temporaryURL = directory.appendingPathComponent(
+            ".sidecarbridge-\(packet.transferID.uuidString).partial",
+            isDirectory: false
+        )
+        try? FileManager.default.removeItem(at: temporaryURL)
+        guard FileManager.default.createFile(atPath: temporaryURL.path, contents: nil) else {
             throw TransferError.cannotCreateFile
         }
-        let handle = try FileHandle(forWritingTo: destination)
+        #if os(iOS)
+        try (temporaryURL as NSURL).setResourceValue(
+            URLFileProtection.completeUnlessOpen,
+            forKey: .fileProtectionKey
+        )
+        #endif
+        let handle = try FileHandle(forWritingTo: temporaryURL)
         incoming = IncomingTransfer(
             id: packet.transferID,
             name: name,
             size: size,
-            destinationURL: destination,
+            temporaryURL: temporaryURL,
+            destinationDirectory: directory,
             handle: handle,
+            hasher: SHA256(),
             offset: 0
         )
         armTimeout(for: packet.transferID)
@@ -180,6 +197,7 @@ final class FileTransferEngine {
             throw TransferError.invalidPacket
         }
         try transfer.handle.write(contentsOf: payload)
+        transfer.hasher.update(data: payload)
         transfer.offset += Int64(payload.count)
         incoming = transfer
         armTimeout(for: transfer.id)
@@ -202,6 +220,7 @@ final class FileTransferEngine {
         if transfer.offset >= transfer.size {
             try transfer.handle.close()
             outgoing = transfer
+            let digest = Data(transfer.hasher.finalize())
             publish(
                 direction: .sending,
                 name: transfer.name,
@@ -216,7 +235,8 @@ final class FileTransferEngine {
                 totalSize: transfer.size,
                 offset: transfer.size,
                 payload: nil,
-                message: nil
+                message: nil,
+                sha256: digest
             ))
             return
         }
@@ -224,6 +244,7 @@ final class FileTransferEngine {
         let data = try transfer.handle.read(upToCount: Self.chunkSize) ?? Data()
         guard !data.isEmpty else { throw TransferError.unexpectedEnd }
         let chunkOffset = transfer.offset
+        transfer.hasher.update(data: data)
         transfer.offset += Int64(data.count)
         outgoing = transfer
         publish(
@@ -246,8 +267,18 @@ final class FileTransferEngine {
 
     private func handleCompletion(_ packet: FileTransferPacket) throws {
         if let transfer = incoming, transfer.id == packet.transferID {
-            guard transfer.offset == transfer.size else { throw TransferError.unexpectedEnd }
+            guard transfer.offset == transfer.size,
+                  let expectedDigest = packet.sha256,
+                  expectedDigest.count == SHA256.Digest.byteCount,
+                  Data(transfer.hasher.finalize()) == expectedDigest else {
+                throw TransferError.integrityCheckFailed
+            }
             try transfer.handle.close()
+            let destination = Self.uniqueURL(
+                for: transfer.name,
+                in: transfer.destinationDirectory
+            )
+            try FileManager.default.moveItem(at: transfer.temporaryURL, to: destination)
             incoming = nil
             timeoutTask?.cancel()
             timeoutTask = nil
@@ -258,7 +289,7 @@ final class FileTransferEngine {
                 total: transfer.size,
                 message: "Received"
             )
-            onReceived?(transfer.destinationURL)
+            onReceived?(destination)
             sendPacket?(FileTransferPacket(
                 kind: .complete,
                 transferID: transfer.id,
@@ -266,7 +297,8 @@ final class FileTransferEngine {
                 totalSize: transfer.size,
                 offset: transfer.size,
                 payload: nil,
-                message: "saved"
+                message: "saved",
+                sha256: expectedDigest
             ))
             return
         }
@@ -340,7 +372,7 @@ final class FileTransferEngine {
         }
         if let incoming {
             try? incoming.handle.close()
-            try? FileManager.default.removeItem(at: incoming.destinationURL)
+            try? FileManager.default.removeItem(at: incoming.temporaryURL)
         }
         outgoing = nil
         incoming = nil
@@ -389,6 +421,7 @@ final class FileTransferEngine {
         case invalidPacket
         case cannotCreateFile
         case unexpectedEnd
+        case integrityCheckFailed
 
         var errorDescription: String? {
             switch self {
@@ -398,6 +431,8 @@ final class FileTransferEngine {
             case .invalidPacket: return "The file transfer data was invalid."
             case .cannotCreateFile: return "The received file could not be created."
             case .unexpectedEnd: return "The source file ended before the transfer completed."
+            case .integrityCheckFailed:
+                return "The received file failed its integrity check and was deleted."
             }
         }
     }
