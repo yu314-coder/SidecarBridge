@@ -1,17 +1,26 @@
 # SidecarBridge
 
+<p align="center">
+  <img src="Mac/Assets.xcassets/BrandMark.imageset/BrandMark.png" width="160" alt="SidecarBridge icon">
+</p>
+
+<p align="center">A secure remote window into your Mac, with iPhone and iPad keyboard, trackpad, and touch input.</p>
+
+<p align="center">
+  <a href="https://apps.apple.com/app/sidecarbridge/id6792298083">
+    <img src="https://img.shields.io/badge/Mac%20App%20Store-Available-0A84FF?logo=apple&logoColor=white" alt="Mac App Store available">
+  </a>
+  <img src="https://img.shields.io/badge/iOS%2FiPadOS-Coming%20after%20review-lightgrey?logo=apple&logoColor=555555" alt="iOS and iPadOS coming after review">
+</p>
+
 For the full architecture, protocol, permission, distribution, testing, and troubleshooting reference, see [SIDECARBRIDGE_TECHNICAL_GUIDE.md](SIDECARBRIDGE_TECHNICAL_GUIDE.md). The current accessibility support matrix is in [ACCESSIBILITY.md](ACCESSIBILITY.md).
 
 SidecarBridge is a paired macOS + iOS/iPadOS app that turns an iPhone or iPad into an encrypted local Mac display and input surface.
 
 ## App Store
 
-SidecarBridge is distributed as one universal App Store record across iPhone, iPad, and Mac:
-
-- [SidecarBridge on the iOS/iPadOS App Store](https://apps.apple.com/app/id6792298083)
-- [SidecarBridge on the Mac App Store](https://apps.apple.com/app/id6792298083?mt=12)
-
-The Mac link uses Apple's Mac App Store media type (`mt=12`). Store availability and regional redirects are controlled by Apple's release processing.
+- **macOS:** [Download SidecarBridge from the Mac App Store](https://apps.apple.com/app/sidecarbridge/id6792298083)
+- **iOS/iPadOS:** _The App Store link will be added after iOS review approval._
 
 On macOS, optional **Shutdown Handoff** keeps an active remote-control session alive while other user apps close during logout, restart, or shutdown. If another app still needs attention, or the remote connection is lost, SidecarBridge cancels the termination request instead of disappearing and leaving the Mac uncontrollable. macOS limits graceful termination delays to under two minutes, so the hold is capped at 105 seconds.
 

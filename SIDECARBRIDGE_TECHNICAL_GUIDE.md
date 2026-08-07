@@ -4,12 +4,12 @@ This document is the implementation, operation, testing, and troubleshooting ref
 
 ## App Store links
 
-The macOS and iOS/iPadOS targets are published through the same universal App Store record:
+The macOS listing is approved and available through the SidecarBridge App Store record:
 
-- [iOS/iPadOS App Store listing](https://apps.apple.com/app/id6792298083)
-- [Mac App Store listing](https://apps.apple.com/app/id6792298083?mt=12)
+- [Mac App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
+- **iOS/iPadOS:** _Add the listing after iOS App Store review approval._
 
-The `mt=12` parameter selects Apple's Mac App Store media type. Apple controls the timing of listing propagation and regional redirects after approval.
+Apple controls regional redirects and listing propagation after approval.
 
 ## macOS session lifecycle
 
