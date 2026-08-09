@@ -82,6 +82,7 @@ final class RemoteInputController {
     // still receive their key events.
     private let keyboardEventSource: CGEventSource? = nil
     private var isPrimaryButtonDown = false
+    private var activePrimaryButtonFlags: CGEventFlags = []
     private var scrollRemainderX = 0.0
     private var scrollRemainderY = 0.0
     private let inputSourceController = RemoteInputSourceController()
@@ -116,24 +117,39 @@ final class RemoteInputController {
             guard let x = input.deltaX, let y = input.deltaY else { return false }
             movePointerBy(x: x, y: y)
         case .primaryDown:
-            primaryButtonDown(x: input.x, y: input.y, clickCount: input.clickCount ?? 1)
+            primaryButtonDown(
+                x: input.x,
+                y: input.y,
+                clickCount: input.clickCount ?? 1,
+                modifiers: input.modifiers ?? []
+            )
         case .primaryDrag:
             guard let x = input.x, let y = input.y else { return false }
-            primaryButtonDrag(x: x, y: y, clickCount: input.clickCount ?? 1)
+            primaryButtonDrag(
+                x: x,
+                y: y,
+                clickCount: input.clickCount ?? 1,
+                modifiers: input.modifiers ?? []
+            )
         case .primaryUp:
-            primaryButtonUp(x: input.x, y: input.y, clickCount: input.clickCount ?? 1)
+            primaryButtonUp(
+                x: input.x,
+                y: input.y,
+                clickCount: input.clickCount ?? 1,
+                modifiers: input.modifiers ?? []
+            )
         case .primaryClick:
             if let x = input.x, let y = input.y { movePointer(x: x, y: y) }
-            click(button: .left)
+            click(button: .left, modifiers: input.modifiers ?? [])
         case .primaryDoubleClick:
             if let x = input.x, let y = input.y { movePointer(x: x, y: y) }
-            click(button: .left, count: 2)
+            click(button: .left, count: 2, modifiers: input.modifiers ?? [])
         case .secondaryClick:
             if let x = input.x, let y = input.y { movePointer(x: x, y: y) }
-            click(button: .right)
+            click(button: .right, modifiers: input.modifiers ?? [])
         case .secondaryDoubleClick:
             if let x = input.x, let y = input.y { movePointer(x: x, y: y) }
-            click(button: .right, count: 2)
+            click(button: .right, count: 2, modifiers: input.modifiers ?? [])
         case .releaseButtons:
             releaseButtons()
         case .scroll:
@@ -192,6 +208,7 @@ final class RemoteInputController {
             mouseButton: .right
         )?.post(tap: .cghidEventTap)
         isPrimaryButtonDown = false
+        activePrimaryButtonFlags = []
     }
 
     private func movePointer(x: Double, y: Double) {
@@ -226,13 +243,18 @@ final class RemoteInputController {
         event?.post(tap: .cghidEventTap)
     }
 
-    private func click(button: CGMouseButton, count: Int = 1) {
+    private func click(
+        button: CGMouseButton,
+        count: Int = 1,
+        modifiers: [String] = []
+    ) {
         guard let location = CGEvent(source: nil)?.location else { return }
         if button == .right, isPrimaryButtonDown {
-            primaryButtonUp(x: nil, y: nil, clickCount: 1)
+            primaryButtonUp(x: nil, y: nil, clickCount: 1, modifiers: [])
         }
         let down: CGEventType = button == .right ? .rightMouseDown : .leftMouseDown
         let up: CGEventType = button == .right ? .rightMouseUp : .leftMouseUp
+        let eventFlags = flags(for: modifiers)
         for clickState in 1...max(count, 1) {
             let downEvent = CGEvent(
                 mouseEventSource: eventSource,
@@ -240,6 +262,7 @@ final class RemoteInputController {
                 mouseCursorPosition: location,
                 mouseButton: button
             )
+            downEvent?.flags = eventFlags
             downEvent?.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
             downEvent?.post(tap: .cghidEventTap)
 
@@ -249,12 +272,18 @@ final class RemoteInputController {
                 mouseCursorPosition: location,
                 mouseButton: button
             )
+            upEvent?.flags = eventFlags
             upEvent?.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
             upEvent?.post(tap: .cghidEventTap)
         }
     }
 
-    private func primaryButtonDown(x: Double?, y: Double?, clickCount: Int) {
+    private func primaryButtonDown(
+        x: Double?,
+        y: Double?,
+        clickCount: Int,
+        modifiers: [String]
+    ) {
         let point: CGPoint
         if let x, let y {
             point = displayPoint(x: x, y: y)
@@ -270,12 +299,19 @@ final class RemoteInputController {
             mouseCursorPosition: point,
             mouseButton: .left
         )
+        activePrimaryButtonFlags = flags(for: modifiers)
+        event?.flags = activePrimaryButtonFlags
         event?.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
         event?.post(tap: .cghidEventTap)
         isPrimaryButtonDown = true
     }
 
-    private func primaryButtonDrag(x: Double, y: Double, clickCount: Int) {
+    private func primaryButtonDrag(
+        x: Double,
+        y: Double,
+        clickCount: Int,
+        modifiers: [String]
+    ) {
         let point = displayPoint(x: x, y: y)
         let eventType: CGEventType = isPrimaryButtonDown ? .leftMouseDragged : .mouseMoved
         let event = CGEvent(
@@ -284,11 +320,18 @@ final class RemoteInputController {
             mouseCursorPosition: point,
             mouseButton: .left
         )
+        let currentFlags = flags(for: modifiers)
+        event?.flags = activePrimaryButtonFlags.union(currentFlags)
         event?.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
         event?.post(tap: .cghidEventTap)
     }
 
-    private func primaryButtonUp(x: Double?, y: Double?, clickCount: Int) {
+    private func primaryButtonUp(
+        x: Double?,
+        y: Double?,
+        clickCount: Int,
+        modifiers: [String]
+    ) {
         guard isPrimaryButtonDown else { return }
         let point: CGPoint
         if let x, let y {
@@ -302,9 +345,11 @@ final class RemoteInputController {
             mouseCursorPosition: point,
             mouseButton: .left
         )
+        event?.flags = activePrimaryButtonFlags.union(flags(for: modifiers))
         event?.setIntegerValueField(.mouseEventClickState, value: Int64(max(clickCount, 1)))
         event?.post(tap: .cghidEventTap)
         isPrimaryButtonDown = false
+        activePrimaryButtonFlags = []
     }
 
     private func displayPoint(x: Double, y: Double) -> CGPoint {

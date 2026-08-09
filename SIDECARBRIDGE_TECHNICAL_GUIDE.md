@@ -248,7 +248,7 @@ The iPad can forward:
 - typed text;
 - arrows, Return, Tab, Escape, Delete, and common Command shortcuts.
 
-The Mac converts the normalized coordinates to the captured display and posts CGEvents. This requires explicit Accessibility permission in macOS System Settings.
+The Mac converts the normalized coordinates to the captured display and posts CGEvents. This requires explicit Accessibility permission in macOS System Settings. Indirect pointer events carry UIKit's active modifier flags through the encrypted protocol. The direct Mac companion applies Option, Shift, and Option–Shift to the mouse down/drag/up sequence, enabling modifier-click workflows such as opening a link in a new tab or extending a selection. The Mac menu and direct-build shortcut card include local modifier-click checks.
 
 A mouse or trackpad primary press uses a custom continuous indirect-pointer recognizer rather than waiting for competing single- and double-tap recognizers. The recognizer stores UIKit's original event button mask and precise coalesced touch location, follows the began/changed/ended/cancelled state machine, and clears all state in `reset()`. Button-down is transmitted as soon as the physical press begins, stationary press-and-hold remains down, movement produces drag events at up to 120 Hz, and button-up is a reliable release barrier. Ambiguous primary-plus-secondary chords are ignored instead of guessed. Only short presses within an eight-point movement tolerance participate in the next double-click; a drag, long hold, or cancelled press resets that click history. Nearby valid clicks carry click-state values 1 and 2 so macOS still receives a true double-click without delaying the first press. Direct touch and Apple Pencil also provide a 0.22-second hold gesture. The viewer drawer retains separate **Left**, **Double**, and **Right** controls for users who prefer explicit buttons.
 
@@ -285,7 +285,7 @@ The iPad UI includes an AnyDesk-style right-edge control drawer for:
 
 ### 7.1 File transfer
 
-`FileTransferEngine` sends files in either direction over the active paired transport. Each 128 KB chunk is acknowledged before the next chunk is read, bounding memory and preventing a large transfer queue from starving video or input. Transfers are limited to 512 MB, validate offsets and sizes, sanitize destination names, and use the existing authenticated encryption layer. The Mac saves received files in `Downloads/SidecarBridge Transfers`; the iPad stores them in its Documents container and exposes the system share sheet.
+`FileTransferEngine` sends files in either direction over the active paired transport. Each 128 KB chunk is acknowledged before the next chunk is read, bounding memory and preventing a large transfer queue from starving video or input. Transfers are limited to 512 MB, validate offsets and sizes, sanitize destination names, and use the existing authenticated encryption layer. The Mac UI can queue multiple selected files, cancel the active transfer, open the transfer folder, and show live byte progress, rate, and ETA. An idle transfer has a 45-second recovery window. The Mac saves received files in `Downloads/SidecarBridge Transfers`; the iPad stores them in its Documents container and exposes the system share sheet.
 
 ## 8. Permission model
 
@@ -317,7 +317,7 @@ Changing the bundle ID creates a new Local Network permission identity. If disco
 
 ## 9. Background behavior
 
-On macOS, closing the main window does not terminate SidecarBridge. It remains available through its menu bar item so the iPad can reconnect. Automatic startup is opt-in and can be repaired if the app moves.
+On macOS, closing the main window does not terminate SidecarBridge. It remains available through its menu bar item so the iPad can reconnect. The menu provides stream start/stop, multi-file send, transfer-folder access, diagnostics, display settings, connection state, and direct-companion modifier-click tests. Automatic startup is opt-in and can be repaired if the app moves.
 
 On iPadOS:
 
@@ -350,7 +350,7 @@ On iPadOS:
 | `Pad/VideoDisplaySurface.swift` | Hardware video display and Picture in Picture |
 | `Pad/RemoteInputSurface.swift` | Touch, Pencil, pointer, keyboard, and gesture input |
 | `Shared/BridgeProtocol.swift` | Control messages, input events, packets, video metadata, and file chunks |
-| `Shared/FileTransferEngine.swift` | Bidirectional chunk flow control, validation, and received-file storage |
+| `Shared/FileTransferEngine.swift` | Bidirectional chunk flow control, queue-friendly progress reporting, validation, and received-file storage |
 | `Shared/LANProtocol.swift` | Encrypted handshake and TCP framing |
 | `Tests/PacketCodecTests.swift` | Protocol, file transfer, framing, encryption, permission, drag, and input tests |
 | `scripts/build.sh` | Reproducible local Mac/iPad builds and Mac tests |

@@ -26,6 +26,7 @@ final class MacConnectionModel: ObservableObject {
     @Published var fileTransferSnapshot: FileTransferSnapshot?
     @Published var lastReceivedFile: URL?
     @Published var fileTransferError: String?
+    @Published var queuedFileCount = 0
     @Published var pairingCode = MacPairingSecurity.shared.currentDisplayCode()
     @Published var shortcutTestStatus = "Not tested in this Mac session"
     @Published var localSystemInformation = SystemInformation.current()
@@ -36,6 +37,18 @@ final class MacConnectionModel: ObservableObject {
     @Published var shutdownProtectionDetail = "Ready to preserve remote control during system shutdown."
 
     var localNetworkPermissionNeeded: Bool { localNetworkAccess.needsPermission }
+
+    var menuBarStatusIcon: String {
+        if isStreaming { return "dot.radiowaves.left.and.right" }
+        if hasPadPeer { return "ipad.and.arrow.forward" }
+        return "ipad.and.arrow.forward"
+    }
+
+    var menuBarStatusText: String {
+        if isStreaming { return "Streaming to \(pairedPeer ?? "iPad")" }
+        if hasPadPeer { return "Connected — ready to stream" }
+        return status
+    }
 
     private let sidecar = SidecarConnector()
     private let peers = MacPeerService()
@@ -56,6 +69,7 @@ final class MacConnectionModel: ObservableObject {
     private var screenRecordingPollTask: Task<Void, Never>?
     private var streamResumeRetentionTask: Task<Void, Never>?
     private var remoteViewerIsBackgrounded = false
+    private var pendingFileURLs: [URL] = []
     private let shutdownProtectionDefaultsKey = "shutdownProtectionEnabled"
 
     init() {
@@ -128,6 +142,8 @@ final class MacConnectionModel: ObservableObject {
                     self.detail = peerOrError
                 }
                 self.connectionTransport = "Searching direct P2P"
+                self.pendingFileURLs.removeAll(keepingCapacity: false)
+                self.queuedFileCount = 0
                 self.fileTransfer.cancelAll(reason: "Connection ended.")
                 self.remoteInput.releaseButtons()
                 self.remoteSystemInformation = nil
@@ -139,6 +155,8 @@ final class MacConnectionModel: ObservableObject {
                 self.status = "Waiting for iPad"
                 self.detail = "Open SidecarBridge on the iPad."
                 self.remoteInput.releaseButtons()
+                self.pendingFileURLs.removeAll(keepingCapacity: false)
+                self.queuedFileCount = 0
                 self.fileTransfer.cancelAll(reason: "Connection ended.")
                 self.remoteSystemInformation = nil
                 self.retainStreamForViewerResumeIfNeeded()
@@ -179,6 +197,18 @@ final class MacConnectionModel: ObservableObject {
         }
     }
 
+    func testModifierClick(_ modifiers: [String]) {
+        let event = RemoteInputEvent.click(modifiers: modifiers)
+        remoteInput.submit(event) { [weak self] accepted in
+            DispatchQueue.main.async {
+                let names = modifiers.map { $0.capitalized }.joined(separator: "–")
+                self?.shortcutTestStatus = accepted
+                    ? "Mac test: \(names)–click injected at the current pointer"
+                    : "Mac test: \(names)–click rejected — check Accessibility"
+            }
+        }
+    }
+
     private func recordShortcutResult(
         _ event: RemoteInputEvent,
         accepted: Bool,
@@ -204,10 +234,34 @@ final class MacConnectionModel: ObservableObject {
         panel.prompt = "Send"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        pendingFileURLs.append(contentsOf: panel.urls)
+        queuedFileCount = pendingFileURLs.count
         fileTransferError = nil
-        fileTransfer.sendFile(at: url)
+        startNextQueuedFileIfNeeded()
+    }
+
+    func cancelFileTransfer() {
+        pendingFileURLs.removeAll(keepingCapacity: false)
+        queuedFileCount = 0
+        guard fileTransfer.isBusy else { return }
+        fileTransfer.cancelAll(reason: "Transfer canceled from the Mac.")
+        fileTransferError = "Transfer canceled."
+    }
+
+    func openTransferFolder() {
+        guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
+            fileTransferError = "The Downloads folder is unavailable."
+            return
+        }
+        let directory = downloads.appendingPathComponent("SidecarBridge Transfers", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(directory)
+        } catch {
+            fileTransferError = error.localizedDescription
+        }
     }
 
     func revealLastReceivedFile() {
@@ -217,12 +271,35 @@ final class MacConnectionModel: ObservableObject {
 
     private func configureFileTransfer() {
         fileTransfer.sendPacket = { [weak self] packet in self?.peers.sendFilePacket(packet) }
-        fileTransfer.onSnapshot = { [weak self] snapshot in self?.fileTransferSnapshot = snapshot }
+        fileTransfer.onSnapshot = { [weak self] snapshot in
+            guard let self else { return }
+            self.fileTransferSnapshot = snapshot
+            if snapshot?.direction == .sending, snapshot?.message == "Sent" {
+                Task { @MainActor [weak self] in
+                    self?.startNextQueuedFileIfNeeded()
+                }
+            }
+        }
         fileTransfer.onReceived = { [weak self] url in
             self?.lastReceivedFile = url
             self?.fileTransferError = nil
         }
-        fileTransfer.onError = { [weak self] message in self?.fileTransferError = message }
+        fileTransfer.onError = { [weak self] message in
+            self?.pendingFileURLs.removeAll(keepingCapacity: false)
+            self?.queuedFileCount = 0
+            self?.fileTransferError = message
+        }
+    }
+
+    private func startNextQueuedFileIfNeeded() {
+        guard hasPadPeer, !fileTransfer.isBusy, let next = pendingFileURLs.first else {
+            queuedFileCount = pendingFileURLs.count
+            return
+        }
+        pendingFileURLs.removeFirst()
+        queuedFileCount = pendingFileURLs.count
+        fileTransferError = nil
+        fileTransfer.sendFile(at: next)
     }
 
     func start() {
@@ -278,6 +355,8 @@ final class MacConnectionModel: ObservableObject {
         streamResumeRetentionTask?.cancel()
         streamResumeRetentionTask = nil
         attemptID = UUID()
+        pendingFileURLs.removeAll(keepingCapacity: false)
+        queuedFileCount = 0
         fileTransfer.cancelAll(reason: "SidecarBridge is quitting.")
         remoteInput.releaseButtons()
         streamer.stop()

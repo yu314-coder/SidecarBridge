@@ -24,6 +24,7 @@ struct MacContentView: View {
                 VStack(spacing: 18) {
                     header
                     statusCard
+                    quickActionsCard
                     modeCards
                     #if !SIDECARBRIDGE_APP_STORE_SAFE
                     shortcutTestCard
@@ -60,6 +61,15 @@ struct MacContentView: View {
                     .buttonStyle(.bordered)
                     .help("Inject Control-\(arrow(for: key)) locally")
             }
+            Button("⌥Click") { model.testModifierClick(["option"]) }
+                .buttonStyle(.bordered)
+                .help("Inject an Option-click at the current Mac pointer")
+            Button("⇧Click") { model.testModifierClick(["shift"]) }
+                .buttonStyle(.bordered)
+                .help("Inject a Shift-click at the current Mac pointer")
+            Button("⌥⇧Click") { model.testModifierClick(["option", "shift"]) }
+                .buttonStyle(.bordered)
+                .help("Inject an Option-Shift-click at the current Mac pointer")
         }
         .padding(16)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -136,6 +146,65 @@ struct MacContentView: View {
         .padding(18)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.08)))
+    }
+
+    private var quickActionsCard: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                quickActionButtons
+                Spacer(minLength: 0)
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                quickActionButtons
+            }
+        }
+        .padding(14)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+    }
+
+    @ViewBuilder
+    private var quickActionButtons: some View {
+        Button {
+            if model.isStreaming {
+                model.stopFallback()
+            } else {
+                model.startFallback()
+            }
+        } label: {
+            Label(
+                model.isStreaming ? "Stop Stream" : "Start Stream",
+                systemImage: model.isStreaming ? "stop.fill" : "play.fill"
+            )
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(model.isStreaming ? .orange : .cyan)
+        .disabled(!model.hasPadPeer && !model.isStreaming)
+        .keyboardShortcut("s", modifiers: [.command, .option])
+
+        Button {
+            model.chooseFileToSend()
+        } label: {
+            Label("Send Files…", systemImage: "paperplane.fill")
+        }
+        .buttonStyle(.bordered)
+        .disabled(!model.hasPadPeer)
+        .keyboardShortcut("f", modifiers: [.command, .shift])
+
+        Button {
+            model.openTransferFolder()
+        } label: {
+            Label("Transfers", systemImage: "folder")
+        }
+        .buttonStyle(.bordered)
+        .keyboardShortcut("f", modifiers: [.command, .option])
+
+        Button {
+            model.copyDiagnosticReport()
+        } label: {
+            Label("Copy Report", systemImage: "doc.on.doc")
+        }
+        .buttonStyle(.bordered)
     }
 
     private var modeCards: some View {
@@ -306,41 +375,67 @@ struct MacContentView: View {
     }
 
     private var fileTransferCard: some View {
-        HStack(spacing: 16) {
-            Image(systemName: "arrow.left.arrow.right.square.fill")
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(.cyan)
-                .frame(width: 52, height: 52)
-                .background(.cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 16) {
+                Image(systemName: "arrow.left.arrow.right.square.fill")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(.cyan)
+                    .frame(width: 52, height: 52)
+                    .background(.cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Encrypted file transfer").font(.headline)
-                if let transfer = model.fileTransferSnapshot {
-                    Text("\(transfer.message): \(transfer.fileName)")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.62))
-                    ProgressView(value: transfer.progress).tint(.cyan)
-                } else if let error = model.fileTransferError {
-                    Text(error).font(.caption).foregroundStyle(.orange)
-                } else {
-                    Text("Send to iPad, or receive into Downloads/SidecarBridge Transfers.")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.55))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Encrypted file transfer").font(.headline)
+                    if let transfer = model.fileTransferSnapshot {
+                        Text("\(transfer.message): \(transfer.fileName)")
+                            .font(.callout)
+                            .foregroundStyle(.white.opacity(0.78))
+                            .lineLimit(1)
+                        HStack(spacing: 10) {
+                            Text(transfer.byteProgressDescription)
+                            if let rate = transfer.transferRateDescription { Text(rate) }
+                            if let remaining = transfer.remainingTimeDescription { Text(remaining) }
+                            if model.queuedFileCount > 0 { Text("+\(model.queuedFileCount) queued") }
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.52))
+                        ProgressView(value: transfer.progress).tint(.cyan)
+                    } else if let error = model.fileTransferError {
+                        Text(error).font(.caption).foregroundStyle(.orange)
+                    } else {
+                        Text("Send one or more files to the iPad, or receive into Downloads/SidecarBridge Transfers.")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
                 }
             }
 
-            Spacer(minLength: 12)
-            if model.lastReceivedFile != nil {
-                Button("Show Received") { model.revealLastReceivedFile() }
+            HStack(spacing: 10) {
+                Button {
+                    model.chooseFileToSend()
+                } label: {
+                    Label("Send Files…", systemImage: "paperplane.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.cyan)
+                .disabled(!model.hasPadPeer)
+
+                Button {
+                    model.openTransferFolder()
+                } label: {
+                    Label("Open Transfers", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+
+                if model.lastReceivedFile != nil {
+                    Button("Show Received") { model.revealLastReceivedFile() }
+                        .buttonStyle(.bordered)
+                }
+
+                if model.isFileTransferring || model.queuedFileCount > 0 {
+                    Button("Cancel", role: .destructive) { model.cancelFileTransfer() }
+                        .buttonStyle(.bordered)
+                }
             }
-            Button {
-                model.chooseFileToSend()
-            } label: {
-                Label("Send File", systemImage: "paperplane.fill")
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.cyan)
-            .disabled(!model.hasPadPeer || model.isFileTransferring)
         }
         .padding(17)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))

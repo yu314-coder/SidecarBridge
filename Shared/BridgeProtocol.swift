@@ -131,33 +131,94 @@ struct RemoteInputEvent: Codable, Equatable {
         Self(kind: .pointerDelta, sequence: nil, deltaX: x, deltaY: y)
     }
 
-    static func click(secondary: Bool = false, x: Double? = nil, y: Double? = nil) -> Self {
-        Self(kind: secondary ? .secondaryClick : .primaryClick, sequence: nil, x: x, y: y)
+    static func click(
+        secondary: Bool = false,
+        x: Double? = nil,
+        y: Double? = nil,
+        modifiers: [String] = []
+    ) -> Self {
+        Self(
+            kind: secondary ? .secondaryClick : .primaryClick,
+            sequence: nil,
+            x: x,
+            y: y,
+            modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers)
+        )
     }
 
-    static func doubleClick(secondary: Bool = false, x: Double? = nil, y: Double? = nil) -> Self {
+    static func doubleClick(
+        secondary: Bool = false,
+        x: Double? = nil,
+        y: Double? = nil,
+        modifiers: [String] = []
+    ) -> Self {
         Self(
             kind: secondary ? .secondaryDoubleClick : .primaryDoubleClick,
             sequence: nil,
             x: x,
-            y: y
+            y: y,
+            modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers)
         )
     }
 
-    static func primaryDown(x: Double, y: Double, clickCount: Int = 1) -> Self {
-        Self(kind: .primaryDown, sequence: nil, x: x, y: y, clickCount: max(clickCount, 1))
+    static func primaryDown(
+        x: Double,
+        y: Double,
+        clickCount: Int = 1,
+        modifiers: [String] = []
+    ) -> Self {
+        Self(
+            kind: .primaryDown,
+            sequence: nil,
+            x: x,
+            y: y,
+            modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers),
+            clickCount: max(clickCount, 1)
+        )
     }
 
-    static func primaryDownAtCurrentPointer(clickCount: Int = 1) -> Self {
-        Self(kind: .primaryDown, sequence: nil, clickCount: max(clickCount, 1))
+    static func primaryDownAtCurrentPointer(
+        clickCount: Int = 1,
+        modifiers: [String] = []
+    ) -> Self {
+        Self(
+            kind: .primaryDown,
+            sequence: nil,
+            modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers),
+            clickCount: max(clickCount, 1)
+        )
     }
 
-    static func primaryDrag(x: Double, y: Double, clickCount: Int = 1) -> Self {
-        Self(kind: .primaryDrag, sequence: nil, x: x, y: y, clickCount: max(clickCount, 1))
+    static func primaryDrag(
+        x: Double,
+        y: Double,
+        clickCount: Int = 1,
+        modifiers: [String] = []
+    ) -> Self {
+        Self(
+            kind: .primaryDrag,
+            sequence: nil,
+            x: x,
+            y: y,
+            modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers),
+            clickCount: max(clickCount, 1)
+        )
     }
 
-    static func primaryUp(x: Double? = nil, y: Double? = nil, clickCount: Int = 1) -> Self {
-        Self(kind: .primaryUp, sequence: nil, x: x, y: y, clickCount: max(clickCount, 1))
+    static func primaryUp(
+        x: Double? = nil,
+        y: Double? = nil,
+        clickCount: Int = 1,
+        modifiers: [String] = []
+    ) -> Self {
+        Self(
+            kind: .primaryUp,
+            sequence: nil,
+            x: x,
+            y: y,
+            modifiers: RemoteKeyboardInput.normalizedModifiers(modifiers),
+            clickCount: max(clickCount, 1)
+        )
     }
 
     static func releaseButtons() -> Self {

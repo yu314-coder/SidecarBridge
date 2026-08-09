@@ -369,6 +369,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     private var activePointerStartLocation = CGPoint.zero
     private var activePointerStartedAt: TimeInterval = 0
     private var activePointerExceededClickSlop = false
+    private var activePointerModifiers: [String] = []
     private var pointerPressConsumedByCalibration = false
     private var primaryClickTracker = RemoteClickSequenceTracker()
     private var secondaryClickTracker = RemoteClickSequenceTracker()
@@ -957,11 +958,15 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     }
 
     private func remoteModifiers(for hardwareKey: UIKey) -> [String] {
+        remoteModifiers(for: hardwareKey.modifierFlags)
+    }
+
+    private func remoteModifiers(for flags: UIKeyModifierFlags) -> [String] {
         var modifiers: [String] = []
-        if hardwareKey.modifierFlags.contains(.command) { modifiers.append("command") }
-        if hardwareKey.modifierFlags.contains(.alternate) { modifiers.append("option") }
-        if hardwareKey.modifierFlags.contains(.control) { modifiers.append("control") }
-        if hardwareKey.modifierFlags.contains(.shift) { modifiers.append("shift") }
+        if flags.contains(.command) { modifiers.append("command") }
+        if flags.contains(.alternate) { modifiers.append("option") }
+        if flags.contains(.control) { modifiers.append("control") }
+        if flags.contains(.shift) { modifiers.append("shift") }
         return modifiers
     }
 
@@ -1147,6 +1152,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
 
     @objc private func handlePointerPress(_ recognizer: PointerPressGestureRecognizer) {
         let location = recognizer.preciseLocation
+        let pointerModifiers = remoteModifiers(for: recognizer.modifierFlags)
         switch recognizer.state {
         case .began:
             let capturedMask = recognizer.reportedButtonMask.isEmpty
@@ -1167,6 +1173,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
             activePointerStartLocation = location
             activePointerStartedAt = ProcessInfo.processInfo.systemUptime
             activePointerExceededClickSlop = false
+            activePointerModifiers = pointerModifiers
             activePrimaryClickCount = nextPointerClickCount(for: resolvedButton, at: location)
             lastPointerTime = 0
             if resolvedButton == .primary {
@@ -1174,7 +1181,8 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
                 onInput(.primaryDown(
                     x: point.x,
                     y: point.y,
-                    clickCount: activePrimaryClickCount
+                    clickCount: activePrimaryClickCount,
+                    modifiers: activePointerModifiers
                 ))
             }
         case .changed:
@@ -1195,31 +1203,44 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
             onInput(.primaryDrag(
                 x: point.x,
                 y: point.y,
-                clickCount: activePrimaryClickCount
+                clickCount: activePrimaryClickCount,
+                modifiers: activePointerModifiers
             ))
         case .ended:
             if pointerPressConsumedByCalibration {
                 pointerPressConsumedByCalibration = false
                 activePointerButton = nil
                 activePointerLastPoint = nil
+                activePointerModifiers.removeAll(keepingCapacity: true)
                 return
             }
             let point = normalizedPoint(location) ?? activePointerLastPoint
             if activePointerButton == .primary {
                 completePointerPress(for: .primary, at: location)
-                finishPrimaryDrag(at: point)
+                finishPrimaryDrag(at: point, modifiers: pointerModifiers)
             } else if activePointerButton == .secondary,
                       !activePointerExceededClickSlop,
                       let point {
                 completePointerPress(for: .secondary, at: location)
                 if activePrimaryClickCount >= 2 {
-                    onInput(.doubleClick(secondary: true, x: point.x, y: point.y))
+                    onInput(.doubleClick(
+                        secondary: true,
+                        x: point.x,
+                        y: point.y,
+                        modifiers: pointerModifiers
+                    ))
                 } else {
-                    onInput(.click(secondary: true, x: point.x, y: point.y))
+                    onInput(.click(
+                        secondary: true,
+                        x: point.x,
+                        y: point.y,
+                        modifiers: pointerModifiers
+                    ))
                 }
             }
             activePointerButton = nil
             activePointerLastPoint = nil
+            activePointerModifiers.removeAll(keepingCapacity: true)
             activePrimaryClickCount = 1
             activePointerExceededClickSlop = false
         case .cancelled, .failed:
@@ -1227,11 +1248,12 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
                 resetClickHistory(for: activePointerButton)
             }
             if activePointerButton == .primary {
-                finishPrimaryDrag(at: activePointerLastPoint)
+                finishPrimaryDrag(at: activePointerLastPoint, modifiers: activePointerModifiers)
             }
             pointerPressConsumedByCalibration = false
             activePointerButton = nil
             activePointerLastPoint = nil
+            activePointerModifiers.removeAll(keepingCapacity: true)
             activePrimaryClickCount = 1
             activePointerExceededClickSlop = false
         default:
@@ -1343,14 +1365,17 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
         }
     }
 
-    private func finishPrimaryDrag(at point: CGPoint?) {
+    private func finishPrimaryDrag(at point: CGPoint?, modifiers: [String] = []) {
         guard isPrimaryDragging else { return }
         isPrimaryDragging = false
+        let effectiveModifiers = modifiers.isEmpty ? activePointerModifiers : modifiers
         onInput(.primaryUp(
             x: point.map { Double($0.x) },
             y: point.map { Double($0.y) },
-            clickCount: activePrimaryClickCount
+            clickCount: activePrimaryClickCount,
+            modifiers: effectiveModifiers
         ))
+        activePointerModifiers.removeAll(keepingCapacity: true)
         activePrimaryClickCount = 1
     }
 
@@ -1381,13 +1406,21 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     @objc private func handlePrimaryClick(_ recognizer: UITapGestureRecognizer) {
         reclaimKeyboardFocus()
         guard let point = normalizedPoint(recognizer.location(in: self)) else { return }
-        onInput(.click(x: point.x, y: point.y))
+        onInput(.click(
+            x: point.x,
+            y: point.y,
+            modifiers: remoteModifiers(for: recognizer.modifierFlags)
+        ))
     }
 
     @objc private func handlePrimaryDoubleClick(_ recognizer: UITapGestureRecognizer) {
         reclaimKeyboardFocus()
         guard let point = normalizedPoint(recognizer.location(in: self)) else { return }
-        onInput(.doubleClick(x: point.x, y: point.y))
+        onInput(.doubleClick(
+            x: point.x,
+            y: point.y,
+            modifiers: remoteModifiers(for: recognizer.modifierFlags)
+        ))
     }
 
     @objc private func handleScroll(_ recognizer: UIPanGestureRecognizer) {

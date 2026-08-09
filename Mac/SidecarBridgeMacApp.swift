@@ -36,19 +36,62 @@ struct SidecarBridgeMacApp: App {
         }
         .windowResizability(.contentMinSize)
 
-        MenuBarExtra("SidecarBridge", systemImage: "ipad.and.arrow.forward") {
-            Button("Use In-App Display") { model.startFallback() }
-            #if SIDECARBRIDGE_APP_STORE_SAFE
-            Button("Open Display Settings") { model.openDisplaysSettings() }
-            #else
-            Button("Open System Sidecar") { model.trySidecarNow() }
-            #endif
+        MenuBarExtra {
+            Text("SidecarBridge")
+                .font(.headline)
+            Label(model.menuBarStatusText, systemImage: model.menuBarStatusIcon)
+                .font(.caption)
+            if model.hasPadPeer, let latency = model.connectionLatencyMS {
+                Text("Encrypted link • \(latency) ms")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             Divider()
-            Text(model.status)
+
+            Button(model.isStreaming ? "Stop In-App Display" : "Start In-App Display") {
+                if model.isStreaming {
+                    model.stopFallback()
+                } else {
+                    model.startFallback()
+                }
+            }
+            .keyboardShortcut("s", modifiers: [.command, .option])
+
+            Button("Send Files…") { model.chooseFileToSend() }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(!model.hasPadPeer)
+            Button("Open Transfers Folder") { model.openTransferFolder() }
+                .keyboardShortcut("f", modifiers: [.command, .option])
+
+            Menu("Input shortcuts") {
+                #if SIDECARBRIDGE_APP_STORE_SAFE
+                Text("Available in the direct companion build")
+                #else
+                Button("Control–↑") { model.testControlShortcut("up") }
+                Button("Control–↓") { model.testControlShortcut("down") }
+                Button("Control–←") { model.testControlShortcut("left") }
+                Button("Control–→") { model.testControlShortcut("right") }
+                Divider()
+                Button("Option–click") { model.testModifierClick(["option"]) }
+                Button("Shift–click") { model.testModifierClick(["shift"]) }
+                Button("Option–Shift–click") { model.testModifierClick(["option", "shift"]) }
+                #endif
+            }
+
+            Divider()
+
             Button("Open SidecarBridge") {
                 NSApplication.shared.activate(ignoringOtherApps: true)
             }
+            .keyboardShortcut("o", modifiers: [.command])
+            Button("Open Displays Settings") { model.openDisplaysSettings() }
+            Button("Copy Diagnostic Report") { model.copyDiagnosticReport() }
             Button("Quit") { NSApplication.shared.terminate(nil) }
+                .keyboardShortcut("q", modifiers: [.command])
+        } label: {
+            Label("SidecarBridge", systemImage: model.menuBarStatusIcon)
         }
+        .menuBarExtraStyle(.menu)
     }
 }

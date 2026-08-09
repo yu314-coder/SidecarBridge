@@ -12,10 +12,38 @@ struct FileTransferSnapshot: Equatable {
     let completedBytes: Int64
     let totalBytes: Int64
     let message: String
+    let bytesPerSecond: Double?
+    let estimatedSecondsRemaining: TimeInterval?
 
     var progress: Double {
         guard totalBytes > 0 else { return 0 }
         return min(max(Double(completedBytes) / Double(totalBytes), 0), 1)
+    }
+
+    var byteProgressDescription: String {
+        "\(Self.formatBytes(completedBytes)) of \(Self.formatBytes(totalBytes))"
+    }
+
+    var transferRateDescription: String? {
+        guard let bytesPerSecond, bytesPerSecond > 0 else { return nil }
+        return "\(Self.formatBytes(Int64(bytesPerSecond)))/s"
+    }
+
+    var remainingTimeDescription: String? {
+        guard let estimatedSecondsRemaining, estimatedSecondsRemaining.isFinite else { return nil }
+        let seconds = max(0, Int(estimatedSecondsRemaining.rounded()))
+        if seconds < 60 { return "\(seconds)s left" }
+        let minutes = seconds / 60
+        let remainder = seconds % 60
+        return remainder == 0 ? "\(minutes)m left" : "\(minutes)m \(remainder)s left"
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let value = Double(max(bytes, 0))
+        if value < 1_024 { return "\(Int(value)) B" }
+        if value < 1_048_576 { return String(format: "%.1f KB", value / 1_024) }
+        if value < 1_073_741_824 { return String(format: "%.1f MB", value / 1_048_576) }
+        return String(format: "%.2f GB", value / 1_073_741_824)
     }
 }
 
@@ -23,6 +51,7 @@ struct FileTransferSnapshot: Equatable {
 final class FileTransferEngine {
     static let maximumFileSize: Int64 = 512 * 1024 * 1024
     static let chunkSize = 128 * 1024
+    private static let idleTimeout: Duration = .seconds(45)
 
     var sendPacket: ((FileTransferPacket) -> Void)?
     var onSnapshot: ((FileTransferSnapshot?) -> Void)?
@@ -55,6 +84,7 @@ final class FileTransferEngine {
     private var outgoing: OutgoingTransfer?
     private var incoming: IncomingTransfer?
     private var timeoutTask: Task<Void, Never>?
+    private var transferStartedAt: Date?
 
     init(receiveDirectory: @escaping () throws -> URL) {
         self.receiveDirectory = receiveDirectory
@@ -87,6 +117,7 @@ final class FileTransferEngine {
                 hasher: SHA256(),
                 offset: 0
             )
+            transferStartedAt = Date()
             armTimeout(for: id)
             publish(direction: .sending, name: name, completed: 0, total: size, message: "Waiting for receiver…")
             sendPacket?(FileTransferPacket(
@@ -183,6 +214,7 @@ final class FileTransferEngine {
             hasher: SHA256(),
             offset: 0
         )
+        transferStartedAt = Date()
         armTimeout(for: packet.transferID)
         publish(direction: .receiving, name: name, completed: 0, total: size, message: "Receiving securely…")
         acknowledge(packet.transferID, offset: 0)
@@ -300,6 +332,7 @@ final class FileTransferEngine {
                 message: "saved",
                 sha256: expectedDigest
             ))
+            transferStartedAt = nil
             return
         }
 
@@ -327,6 +360,7 @@ final class FileTransferEngine {
             total: transfer.size,
             message: "Sent"
         )
+        transferStartedAt = nil
     }
 
     private func acknowledge(_ id: UUID, offset: Int64) {
@@ -353,7 +387,9 @@ final class FileTransferEngine {
             fileName: name,
             completedBytes: completed,
             totalBytes: total,
-            message: message
+            message: message,
+            bytesPerSecond: transferRate(completed: completed),
+            estimatedSecondsRemaining: transferETA(completed: completed, total: total)
         ))
     }
 
@@ -376,18 +412,33 @@ final class FileTransferEngine {
         }
         outgoing = nil
         incoming = nil
+        transferStartedAt = nil
     }
 
     private func armTimeout(for transferID: UUID) {
         timeoutTask?.cancel()
         timeoutTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(15))
+            try? await Task.sleep(for: Self.idleTimeout)
             guard !Task.isCancelled, let self else { return }
             let isCurrent = self.outgoing?.id == transferID || self.incoming?.id == transferID
             guard isCurrent else { return }
             self.cancelAll(reason: "File transfer timed out; try again.")
-            self.onError?("File transfer timed out; try again.")
+            self.onError?("File transfer timed out after 45 seconds without progress; try again.")
         }
+    }
+
+    private func transferRate(completed: Int64) -> Double? {
+        guard let transferStartedAt else { return nil }
+        let elapsed = max(Date().timeIntervalSince(transferStartedAt), 0.001)
+        guard completed > 0 else { return nil }
+        return Double(completed) / elapsed
+    }
+
+    private func transferETA(completed: Int64, total: Int64) -> TimeInterval? {
+        guard let bytesPerSecond = transferRate(completed: completed),
+              bytesPerSecond > 0,
+              total > completed else { return nil }
+        return Double(total - completed) / bytesPerSecond
     }
 
     private static func safeFileName(_ rawName: String) -> String {
