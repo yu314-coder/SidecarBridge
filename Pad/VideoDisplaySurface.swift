@@ -356,7 +356,9 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureSampleBuffer
     func pictureInPictureControllerShouldProhibitBackgroundAudioPlayback(
         _ pictureInPictureController: AVPictureInPictureController
     ) -> Bool {
-        false
+        // SidecarBridge is a silent screen viewer. It does not provide
+        // persistent audio playback while its video is in Picture in Picture.
+        true
     }
 }
 

@@ -112,8 +112,6 @@ targets:
           - _sb-screen._tcp
           - _sb-direct._tcp
         NSLocalNetworkUsageDescription: SidecarBridge finds your Mac and receives its screen over your local network.
-        UIBackgroundModes:
-          - audio
         UIApplicationSupportsIndirectInputEvents: true
         UILaunchScreen: {}
         UIRequiresFullScreen: true
@@ -131,6 +129,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
         PRODUCT_NAME: SidecarBridge
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "40"
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO

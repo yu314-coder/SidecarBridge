@@ -311,7 +311,7 @@ The app cannot add itself to Screen Recording or Accessibility. The user must ap
 | --- | --- |
 | Local Network | Browse and connect to the Mac on Bonjour/AWDL |
 | Bonjour declarations | Advertised service types `_sb-direct._tcp` and `_sb-screen._tcp` |
-| Background audio mode | Supports the app's background media/Picture in Picture behavior |
+| Picture in Picture | Presents the silent live screen stream in the system Picture in Picture viewer when supported; no persistent audio is provided |
 
 Changing the bundle ID creates a new Local Network permission identity. If discovery worked before a bundle-ID change and then stops, open **Settings → Apps → SidecarBridge → Local Network** and enable it again.
 
@@ -321,8 +321,9 @@ On macOS, closing the main window does not terminate SidecarBridge. It remains a
 
 On iPadOS:
 
-- automatic Picture in Picture is enabled by default for the live viewer and starts when the user switches apps;
-- the app activates its playback audio session, invalidates PiP playback state, and reports ready, starting, active, suspended, and failed states in the control drawer;
+- Picture in Picture is available for the live viewer when supported by iPadOS;
+- the app is a silent screen viewer and does not request the audio background mode or provide persistent background audio;
+- the app invalidates PiP playback state and reports ready, starting, active, suspended, and failed states in the control drawer;
 - a short system background task protects the connection while PiP is starting;
 - a three-second PiP start watchdog clears a stuck start, and the model retries up to three times;
 - the encrypted connection is validated when the app becomes active, with discovery rebuilt only if the route is stale;
