@@ -1,6 +1,7 @@
 import AVFoundation
 import AVKit
 import CoreMedia
+import CoreVideo
 import SwiftUI
 import UIKit
 
@@ -18,6 +19,8 @@ final class VideoDisplayController: NSObject {
     private var pictureInPicturePossibleObservation: NSKeyValueObservation?
     private var automaticBackgroundStartEnabled = true
     private var isStartingPictureInPicture = false
+    private var pendingPictureInPictureStart = false
+    private var hasReceivedSampleBuffer = false
     private var pictureInPictureStartWatchdog: Task<Void, Never>?
     private var pendingSamples: [CMSampleBuffer] = []
     private var displayDrainTask: Task<Void, Never>?
@@ -27,13 +30,29 @@ final class VideoDisplayController: NSObject {
         pictureInPictureController?.isPictureInPictureActive == true
     }
 
+    var isPictureInPictureSupported: Bool {
+        AVPictureInPictureController.isPictureInPictureSupported()
+    }
+
+    var hasPictureInPictureContent: Bool {
+        hasReceivedSampleBuffer
+    }
+
     var isPictureInPicturePossible: Bool {
         pictureInPictureController?.isPictureInPicturePossible == true
     }
 
     func attach(_ view: VideoDisplayView) {
+        let hadPendingSamples = !pendingSamples.isEmpty
         self.view = view
         configurePictureInPicture(for: view.displayLayer)
+        if hadPendingSamples {
+            hasReceivedSampleBuffer = true
+        }
+        pictureInPictureController?.canStartPictureInPictureAutomaticallyFromInline =
+            automaticBackgroundStartEnabled && hasReceivedSampleBuffer
+        drainDisplayQueue()
+        attemptPendingPictureInPictureStart()
     }
 
     @discardableResult
@@ -42,6 +61,7 @@ final class VideoDisplayController: NSObject {
             parameterSets = frame.parameterSets
             formatDescription = makeFormatDescription(parameterSets: frame.parameterSets)
             needsKeyFrame = formatDescription == nil
+            hasReceivedSampleBuffer = false
             resetDisplayQueue()
         }
         guard let formatDescription, !needsKeyFrame || frame.isKeyFrame else { return false }
@@ -70,12 +90,37 @@ final class VideoDisplayController: NSObject {
         }
         needsKeyFrame = false
         pendingSamples.append(sampleBuffer)
+        hasReceivedSampleBuffer = true
+        pictureInPictureController?.canStartPictureInPictureAutomaticallyFromInline = automaticBackgroundStartEnabled
         drainDisplayQueue()
+        attemptPendingPictureInPictureStart()
+        return true
+    }
+
+    /// Feeds the JPEG fallback into the same sample-buffer layer used by the
+    /// H.264 path. The foreground viewer can remain a sharp UIImage while the
+    /// layer supplies a real PiP content source when the Mac is on the older
+    /// or lower-bandwidth transport.
+    @discardableResult
+    func enqueueJPEG(_ image: UIImage) -> Bool {
+        guard let sampleBuffer = makeImageSampleBuffer(image) else { return false }
+        if pendingSamples.count >= maximumPendingSamples {
+            // JPEG frames are independent, so discard stale fallback frames
+            // instead of allowing a suspended PiP layer to grow the queue.
+            pendingSamples.removeAll(keepingCapacity: true)
+            view?.flush()
+        }
+        hasReceivedSampleBuffer = true
+        pendingSamples.append(sampleBuffer)
+        pictureInPictureController?.canStartPictureInPictureAutomaticallyFromInline = automaticBackgroundStartEnabled
+        drainDisplayQueue()
+        attemptPendingPictureInPictureStart()
         return true
     }
 
     func flush() {
         needsKeyFrame = true
+        hasReceivedSampleBuffer = false
         resetDisplayQueue()
     }
 
@@ -97,6 +142,7 @@ final class VideoDisplayController: NSObject {
         displayDrainTask?.cancel()
         displayDrainTask = nil
         pendingSamples.removeAll(keepingCapacity: true)
+        hasReceivedSampleBuffer = false
         view?.flush()
     }
 
@@ -108,22 +154,30 @@ final class VideoDisplayController: NSObject {
         }
         if pictureInPictureController.isPictureInPictureActive { return true }
         if isStartingPictureInPicture { return true }
+        // The controller can report that PiP is unavailable until its content
+        // source has received a real sample. Keep an explicit request alive so
+        // a fast app switch does not suspend the viewer before the first key
+        // frame arrives.
+        pendingPictureInPictureStart = true
+        guard hasReceivedSampleBuffer else {
+            publishPictureInPictureState()
+            return true
+        }
+        // Refresh the sample-buffer playback delegate before reading
+        // isPictureInPicturePossible. The first frame can arrive in the same
+        // render pass that attaches the display layer, so the old state may
+        // still say unavailable for a moment.
+        pictureInPictureController.invalidatePlaybackState()
         guard pictureInPictureController.isPictureInPicturePossible else {
             publishPictureInPictureState()
-            onPictureInPictureError?("Picture in Picture is not ready yet. Wait for the live video, then try again.")
-            return false
-        }
-        do {
-            try activateBackgroundAudioSession()
-            pictureInPictureController.invalidatePlaybackState()
-            isStartingPictureInPicture = true
-            pictureInPictureController.startPictureInPicture()
-            armPictureInPictureStartWatchdog(for: pictureInPictureController)
             return true
-        } catch {
-            onPictureInPictureError?("Could not prepare background playback: \(error.localizedDescription)")
-            return false
         }
+        pendingPictureInPictureStart = false
+        pictureInPictureController.invalidatePlaybackState()
+        isStartingPictureInPicture = true
+        pictureInPictureController.startPictureInPicture()
+        armPictureInPictureStartWatchdog(for: pictureInPictureController)
+        return true
     }
 
     func togglePictureInPicture() {
@@ -142,12 +196,13 @@ final class VideoDisplayController: NSObject {
         pictureInPictureStartWatchdog?.cancel()
         pictureInPictureStartWatchdog = nil
         isStartingPictureInPicture = false
+        pendingPictureInPictureStart = false
         pictureInPictureController?.stopPictureInPicture()
     }
 
     func setAutomaticBackgroundStart(_ enabled: Bool) {
         automaticBackgroundStartEnabled = enabled
-        pictureInPictureController?.canStartPictureInPictureAutomaticallyFromInline = enabled
+        pictureInPictureController?.canStartPictureInPictureAutomaticallyFromInline = enabled && hasReceivedSampleBuffer
     }
 
     private func configurePictureInPicture(for displayLayer: AVSampleBufferDisplayLayer) {
@@ -160,11 +215,14 @@ final class VideoDisplayController: NSObject {
             return
         }
 
+        let contentIsReady = hasReceivedSampleBuffer || !pendingSamples.isEmpty
         pictureInPicturePossibleObservation = nil
         pictureInPictureController?.stopPictureInPicture()
         pictureInPictureStartWatchdog?.cancel()
         pictureInPictureStartWatchdog = nil
         isStartingPictureInPicture = false
+        pendingPictureInPictureStart = false
+        hasReceivedSampleBuffer = false
         let contentSource = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: displayLayer,
             playbackDelegate: self
@@ -172,7 +230,11 @@ final class VideoDisplayController: NSObject {
         let controller = AVPictureInPictureController(contentSource: contentSource)
         controller.delegate = self
         controller.requiresLinearPlayback = true
-        controller.canStartPictureInPictureAutomaticallyFromInline = automaticBackgroundStartEnabled
+        // Allow automatic PiP as soon as a real sample is already queued. If
+        // the first frame arrived before SwiftUI mounted this view, leaving
+        // this disabled would make the app suspend on the very first swipe.
+        controller.canStartPictureInPictureAutomaticallyFromInline =
+            automaticBackgroundStartEnabled && contentIsReady
         pictureInPictureDisplayLayer = displayLayer
         pictureInPictureController = controller
         pictureInPicturePossibleObservation = controller.observe(
@@ -180,7 +242,9 @@ final class VideoDisplayController: NSObject {
             options: [.initial, .new]
         ) { [weak self] _, _ in
             Task { @MainActor [weak self] in
-                self?.publishPictureInPictureState()
+                guard let self else { return }
+                self.publishPictureInPictureState()
+                self.attemptPendingPictureInPictureStart()
             }
         }
     }
@@ -193,10 +257,15 @@ final class VideoDisplayController: NSObject {
         )
     }
 
-    private func activateBackgroundAudioSession() throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
-        try session.setActive(true)
+    private func attemptPendingPictureInPictureStart() {
+        guard pendingPictureInPictureStart,
+              hasReceivedSampleBuffer,
+              let controller = pictureInPictureController,
+              !controller.isPictureInPictureActive,
+              !isStartingPictureInPicture,
+              controller.isPictureInPicturePossible else { return }
+        pendingPictureInPictureStart = false
+        _ = startPictureInPicture()
     }
 
     private func armPictureInPictureStartWatchdog(for controller: AVPictureInPictureController) {
@@ -216,6 +285,72 @@ final class VideoDisplayController: NSObject {
             self.publishPictureInPictureState()
             self.onPictureInPictureError?("Picture in Picture start timed out; SidecarBridge will retry automatically.")
         }
+    }
+
+    private func makeImageSampleBuffer(_ image: UIImage) -> CMSampleBuffer? {
+        guard let cgImage = image.cgImage,
+              cgImage.width > 0,
+              cgImage.height > 0 else { return nil }
+
+        let width = cgImage.width
+        let height = cgImage.height
+        let attributes: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            kCVPixelBufferIOSurfacePropertiesKey: [:]
+        ]
+        var pixelBuffer: CVPixelBuffer?
+        let createStatus = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32BGRA,
+            attributes as CFDictionary,
+            &pixelBuffer
+        )
+        guard createStatus == kCVReturnSuccess,
+              let pixelBuffer else { return nil }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer),
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: baseAddress,
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                      | CGBitmapInfo.byteOrder32Little.rawValue
+              ) else { return nil }
+
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var formatDescription: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            formatDescriptionOut: &formatDescription
+        ) == noErr,
+        let formatDescription else { return nil }
+
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: 30),
+            presentationTimeStamp: CMTime(seconds: CACurrentMediaTime(), preferredTimescale: 600),
+            decodeTimeStamp: .invalid
+        )
+        var sampleBuffer: CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            formatDescription: formatDescription,
+            sampleTiming: &timing,
+            sampleBufferOut: &sampleBuffer
+        ) == noErr else { return nil }
+        return sampleBuffer
     }
 
     private func makeFormatDescription(parameterSets: [Data]) -> CMVideoFormatDescription? {
@@ -366,13 +501,6 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
     func pictureInPictureControllerWillStartPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
-        do {
-            try activateBackgroundAudioSession()
-        } catch {
-            publishPictureInPictureState()
-            onPictureInPictureError?("Background audio session failed: \(error.localizedDescription)")
-            return
-        }
         publishPictureInPictureState()
     }
 
@@ -391,7 +519,6 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
         pictureInPictureStartWatchdog?.cancel()
         pictureInPictureStartWatchdog = nil
         isStartingPictureInPicture = false
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         publishPictureInPictureState()
     }
 
@@ -402,7 +529,6 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
         pictureInPictureStartWatchdog?.cancel()
         pictureInPictureStartWatchdog = nil
         isStartingPictureInPicture = false
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         publishPictureInPictureState()
         onPictureInPictureError?("Picture in Picture failed: \(error.localizedDescription)")
     }

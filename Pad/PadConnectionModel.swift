@@ -7,6 +7,7 @@ final class PadConnectionModel: ObservableObject {
     @Published var detail = "Keep SidecarBridge open on the Mac."
     @Published var frame: UIImage?
     @Published var isConnected = false
+    @Published private(set) var isConnecting = false
     @Published var isStreaming = false
     @Published var preferTrackpadControl: Bool = {
         let defaults = UserDefaults.standard
@@ -42,7 +43,7 @@ final class PadConnectionModel: ObservableObject {
         }
         return defaults.bool(forKey: key)
     }()
-    @Published var backgroundViewerDetail = "Automatic background viewer is ready."
+    @Published var backgroundViewerDetail = "Connect and start In-App Display to prepare the background viewer."
     @Published private(set) var discoveryElapsedSeconds = 0
     @Published private(set) var discoveryAttempt = 1
     @Published private(set) var lastDiscoveryIssue: String?
@@ -50,6 +51,7 @@ final class PadConnectionModel: ObservableObject {
     @Published var fileTransferSnapshot: FileTransferSnapshot?
     @Published var lastReceivedFile: URL?
     @Published var fileTransferError: String?
+    @Published var clipboardTransferStatus = "Clipboard transfer ready."
     @Published var pairingCode = ""
     @Published var pairingRequired = false
     @Published var pairingMacName = "Mac"
@@ -87,10 +89,14 @@ final class PadConnectionModel: ObservableObject {
     private var discoveryStartedAt = ProcessInfo.processInfo.systemUptime
     private var discoveryClockTask: Task<Void, Never>?
     private var connectionAttemptedMacName: String?
+    // Discovery is passive. This becomes true only after the user taps a Mac
+    // row, which keeps the home screen predictable like DeskIn's device list.
+    private var userRequestedConnection = false
     private var applicationIsBackgrounded = false
     private var restoreStreamAfterBackground = false
     private var isResumingFromBackground = false
     private var foregroundResumeTask: Task<Void, Never>?
+    private var connectionTimeoutTask: Task<Void, Never>?
 
     var isDiscoveryTakingLonger: Bool {
         !isConnected && discoveryElapsedSeconds >= 8
@@ -100,6 +106,18 @@ final class PadConnectionModel: ObservableObject {
         !isConnected && discoveryElapsedSeconds >= 2 && !localNetworkPermissionNeeded
     }
 
+    var pictureInPictureSupported: Bool {
+        videoDisplay.isPictureInPictureSupported
+    }
+
+    var backgroundViewerStatus: String {
+        if isPictureInPictureActive { return "Active" }
+        if !pictureInPictureSupported { return "Not supported on this iPad" }
+        if !isStreaming { return "Ready after live video" }
+        if isPictureInPicturePossible { return "Available" }
+        return "Waiting for system availability"
+    }
+
     init() {
         videoDisplay.onPictureInPictureStateChanged = { [weak self] possible, active, suspended in
             guard let self else { return }
@@ -107,15 +125,21 @@ final class PadConnectionModel: ObservableObject {
             self.isPictureInPictureActive = active
             self.isPictureInPictureSuspended = suspended
             if active {
-                self.backgroundViewerDetail = "Active — the stream can continue behind other apps."
+                self.backgroundViewerDetail = "Active — the Mac screen can remain visible. Return here to send keyboard and trackpad input."
                 self.peers.send(ControlMessage(.status, detail: "viewer-background"))
                 self.endBackgroundTask()
             } else if suspended {
                 self.backgroundViewerDetail = "Picture in Picture is temporarily suspended by iPadOS."
             } else if possible {
                 self.backgroundViewerDetail = self.keepRunningInBackground
-                    ? "Ready — switching apps starts Picture in Picture automatically."
+                    ? "Ready — PiP can keep the screen visible; return here for keyboard and trackpad control."
                     : "Ready for manual Picture in Picture."
+            } else {
+                self.backgroundViewerDetail = self.videoDisplay.isPictureInPictureSupported
+                    ? self.isStreaming
+                        ? "Waiting for iPadOS to make the live viewer available; fast resume remains enabled."
+                        : "Ready after the first live video frame."
+                    : "Picture in Picture is not supported on this iPad."
             }
             if !active,
                self.isConnected,
@@ -141,49 +165,62 @@ final class PadConnectionModel: ObservableObject {
         }
 
         peers.onConnectionHealthChanged = { [weak self] detail, latency in
-            self?.connectionHealthDetail = detail
-            self?.connectionLatencyMS = latency
+            guard let self else { return }
+            self.connectionHealthDetail = detail
+            self.connectionLatencyMS = latency
+            // A foreground return is complete as soon as the encrypted
+            // control path answers. Waiting for a video frame here can make a
+            // healthy session look like a failed reconnect when the Mac is
+            // temporarily between keyframes or the viewer was paused.
+            if detail == "Encrypted link healthy",
+               self.isConnected,
+               self.isResumingFromBackground {
+                self.finishForegroundResume()
+            }
         }
 
         peers.onPairingCodeRequired = { [weak self] macName, error in
             guard let self else { return }
+            self.isConnecting = false
+            self.connectionTimeoutTask?.cancel()
+            self.connectionTimeoutTask = nil
             self.pairingRequired = true
             self.pairingMacName = macName
             self.pairingError = error
             self.status = "Enter the Mac pairing code"
-            self.detail = "This short-lived 16-character code mutually authenticates both devices, then creates a Keychain credential."
+            self.detail = "This short-lived 16-digit code mutually authenticates both devices, then creates a Keychain credential."
         }
         peers.onDiscoveredMacsChanged = { [weak self] names in
             guard let self else { return }
-            self.discoveredMacs = names
-            guard !self.isConnected, !self.pairingRequired else { return }
-
-            let preferredMac: String?
-            if let selectedMacName = self.selectedMacName {
-                preferredMac = names.contains(selectedMacName)
-                    ? selectedMacName
-                    : nil
-            } else {
-                // The first launch still chooses automatically when there is
-                // only one Mac. Authentication remains protected by the
-                // one-time pairing code and Keychain credential.
-                preferredMac = names.count == 1 ? names[0] : nil
+            // Keep a remembered Mac visible while Bonjour/AWDL refreshes. A
+            // browser can legitimately publish an empty result set for a few
+            // seconds after iPadOS resumes or when the access point filters
+            // multicast, but the user should still have a concrete device
+            // card to tap and retry.
+            var visibleNames = names
+            if let remembered = self.selectedMacName,
+               !visibleNames.contains(remembered) {
+                visibleNames.insert(remembered, at: 0)
             }
-
-            guard let preferredMac,
-                  self.connectionAttemptedMacName != preferredMac else { return }
-            self.connect(
-                to: preferredMac,
-                detail: self.selectedMacName == nil
-                    ? "One Mac found; establishing an encrypted local session."
-                    : "Reconnecting to your remembered trusted Mac."
-            )
+            self.discoveredMacs = visibleNames
+            guard !self.isConnected, !self.pairingRequired else { return }
+            // Finding a Mac is not consent to connect. The device remains
+            // visible in the list and the user chooses when to establish the
+            // encrypted session.
+            if !names.isEmpty, !self.userRequestedConnection {
+                self.status = "Mac ready to connect"
+                self.detail = "Select a Mac below, then tap Connect to start the encrypted session."
+                self.connectionHealthDetail = "Waiting for your connection choice"
+            }
         }
 
         peers.onConnectionChanged = { [weak self] connected, peerOrError in
             guard let self else { return }
             self.isConnected = connected
             if connected {
+                self.isConnecting = false
+                self.connectionTimeoutTask?.cancel()
+                self.connectionTimeoutTask = nil
                 self.remoteInputUnavailable = false
                 self.pairingRequired = false
                 self.pairingCode = ""
@@ -213,6 +250,15 @@ final class PadConnectionModel: ObservableObject {
                         : "Mac found. Tap Open System Sidecar only if you want to leave this app."
                 }
             } else {
+                // Network/browser failures can be reported while the selected
+                // connection is still being retried. Keep the UI in the
+                // explicit Connecting state until the handshake succeeds,
+                // pairing is requested, or the user chooses another action.
+                if !self.userRequestedConnection {
+                    self.isConnecting = false
+                    self.connectionTimeoutTask?.cancel()
+                    self.connectionTimeoutTask = nil
+                }
                 if self.applicationIsBackgrounded || self.isResumingFromBackground {
                     self.connectionHealthDetail = self.applicationIsBackgrounded
                         ? "Session suspended — will restore when you return"
@@ -261,26 +307,27 @@ final class PadConnectionModel: ObservableObject {
         peers.onFrame = { [weak self] data in
             guard let self, let image = UIImage(data: data) else { return }
             self.finishForegroundResume()
+            self.updateStreamPresentation(
+                width: Int(image.size.width),
+                height: Int(image.size.height),
+                format: "JPEG",
+                detail: "Using the SidecarBridge fallback stream."
+            )
+            _ = self.videoDisplay.enqueueJPEG(image)
             self.frame = image
-            self.streamAspectRatio = image.size.width / max(image.size.height, 1)
-            self.streamDimensions = "\(Int(image.size.width)) × \(Int(image.size.height)) JPEG"
-            self.isStreaming = true
-            self.status = "Mac screen"
-            self.detail = "Using the SidecarBridge fallback stream."
-            UIApplication.shared.isIdleTimerDisabled = true
         }
         peers.onVideoFrame = { [weak self] frame in
             guard let self else { return }
             self.finishForegroundResume()
-            self.frame = nil
-            self.streamAspectRatio = CGFloat(frame.width) / CGFloat(max(frame.height, 1))
-            self.streamDimensions = "\(frame.width) × \(frame.height) H.264"
+            if self.frame != nil { self.frame = nil }
+            self.updateStreamPresentation(
+                width: frame.width,
+                height: frame.height,
+                format: "H.264",
+                detail: "Hardware-decoded H.264 HiDPI stream."
+            )
             let displayed = self.videoDisplay.enqueue(frame)
             if displayed { self.recordVideoFrame() }
-            self.isStreaming = true
-            self.status = "Mac screen"
-            self.detail = "Hardware-decoded H.264 HiDPI stream."
-            UIApplication.shared.isIdleTimerDisabled = true
             if !displayed, frame.isKeyFrame {
                 self.retryInitialKeyFrameAfterDisplayAppears(frame)
             }
@@ -290,11 +337,50 @@ final class PadConnectionModel: ObservableObject {
 
     var isFileTransferring: Bool { fileTransfer.isBusy }
 
-    func selectMac(_ name: String) {
+    /// Selects a discovered Mac without opening a connection. The UI uses
+    /// this as the device-list step; connecting is a separate explicit action.
+    func chooseMac(_ name: String) {
+        // Cancel any stale dial from an earlier session before showing this
+        // device as selected. Choosing a card must remain a presentation-only
+        // action; Connect is the only method that may set the dial gate.
+        if !isConnected {
+            connectionTimeoutTask?.cancel()
+            connectionTimeoutTask = nil
+            isConnecting = false
+            peers.clearMacSelection()
+        }
+        selectedMacName = name
+        UserDefaults.standard.set(name, forKey: "selectedMacName")
+        userRequestedConnection = false
+        pairingRequired = false
+        pairingCode = ""
+        pairingError = nil
+        status = "Ready to connect"
+        detail = "Tap Connect to start the encrypted session with \(name)."
+        connectionHealthDetail = "Waiting for your connection choice"
+    }
+
+    func connectSelectedMac() {
+        guard let selectedMacName else {
+            status = "Choose a Mac first"
+            detail = "Select a device card before connecting."
+            return
+        }
+        userRequestedConnection = true
+        isConnecting = true
+        armConnectionTimeout()
         connect(
-            to: name,
+            to: selectedMacName,
             detail: "Establishing an encrypted local session."
         )
+    }
+
+    /// Compatibility entry point for older callers: selecting a Mac from a
+    /// direct-connect action still means the user explicitly requested a
+    /// connection.
+    func selectMac(_ name: String) {
+        chooseMac(name)
+        connectSelectedMac()
     }
 
     private func connect(to name: String, detail connectionDetail: String) {
@@ -309,6 +395,24 @@ final class PadConnectionModel: ObservableObject {
         peers.selectMac(named: name)
     }
 
+    private func armConnectionTimeout() {
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled, let self, self.isConnecting, !self.isConnected else { return }
+            self.isConnecting = false
+            self.status = "Ready to retry connection"
+            self.detail = "The selected Mac is still visible. Tap Connect to try the direct and nearby paths again."
+            self.connectionHealthDetail = "Waiting for another connection attempt"
+            // Clear the stale dial underneath the visible device card. The
+            // next explicit Connect action starts a fresh LAN/P2P attempt;
+            // this prevents an endless loading state when a route is blocked.
+            self.userRequestedConnection = false
+            self.peers.clearMacSelection()
+            self.connectionTimeoutTask = nil
+        }
+    }
+
     func sendFile(at url: URL) {
         guard isConnected else {
             fileTransferError = "Connect the Mac before sending a file."
@@ -321,7 +425,7 @@ final class PadConnectionModel: ObservableObject {
     func submitPairingCode() {
         let normalized = PairingCode.normalize(pairingCode)
         guard normalized.count == PairingCode.characterCount else {
-            pairingError = "Enter all 16 characters shown in the Mac app."
+            pairingError = "Enter all 16 digits shown in the Mac app."
             return
         }
         pairingError = nil
@@ -330,18 +434,22 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func forgetTrustedMacs() {
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = nil
+        isConnecting = false
         SecureCredentialStore.removeAll(accountPrefix: "pad.mac.")
         UserDefaults.standard.removeObject(forKey: "selectedMacName")
         UserDefaults.standard.removeObject(forKey: "lastDirectMacHost")
         selectedMacName = nil
         connectionAttemptedMacName = nil
+        userRequestedConnection = false
         pairingRequired = false
         pairingCode = ""
         pairingError = nil
         isConnected = false
         connectedUsingDirectLAN = false
         status = "Trusted Macs forgotten"
-        detail = "Select a Mac and enter its current 16-character pairing code."
+        detail = "Select a Mac and enter its current 16-digit pairing code."
         peers.restart()
     }
 
@@ -360,12 +468,27 @@ final class PadConnectionModel: ObservableObject {
         started = true
         beginDiscoveryClock(incrementAttempt: false)
         peers.start()
+        if let rememberedMac = selectedMacName {
+            if !discoveredMacs.contains(rememberedMac) {
+                discoveredMacs = [rememberedMac]
+            }
+            status = "Choose a Mac to connect"
+            detail = "Remembered Mac: \(rememberedMac). Tap Connect when you are ready."
+        }
     }
 
     func retry() {
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = nil
+        isConnecting = false
         status = "Looking for your Mac…"
         detail = "Restarting direct local-network, AWDL, and nearby discovery."
         lastDiscoveryIssue = nil
+        if !isConnected {
+            userRequestedConnection = false
+            connectionAttemptedMacName = nil
+            peers.clearMacSelection()
+        }
         beginDiscoveryClock(incrementAttempt: true)
         peers.restart()
     }
@@ -413,7 +536,7 @@ final class PadConnectionModel: ObservableObject {
                 ),
                 DiagnosticField(
                     "Background viewer",
-                    isPictureInPictureActive ? "Active" : isPictureInPicturePossible ? "Available" : "Unavailable"
+                    backgroundViewerStatus
                 )
             ]
         )
@@ -432,44 +555,69 @@ final class PadConnectionModel: ObservableObject {
         case .active:
             let shouldRestoreStream = restoreStreamAfterBackground
             applicationIsBackgrounded = false
+            // A foreground transition owns the sample-buffer layer again, so
+            // cancel any pending PiP retry before stopping PiP. The separate
+            // restore flags below keep the encrypted session alive until the
+            // first fresh frame arrives.
             backgroundRequested = false
             backgroundActivationTask?.cancel()
             backgroundActivationTask = nil
+            backgroundViewerDetail = shouldRestoreStream
+                ? "Returning to SidecarBridge — restoring the encrypted session…"
+                : "Ready — PiP can keep the screen visible; return here for keyboard and trackpad control."
             if isPictureInPictureActive { videoDisplay.stopPictureInPicture() }
             if shouldRestoreStream {
                 beginForegroundResumePresentation()
             }
-            if started { peers.resumeAfterBackground() }
+            // Returning to the foreground may restore a session the user
+            // already started, but the initial active transition must never
+            // dial a remembered Mac just because the Remote Control tab is
+            // visible. Discovery publishes cards; Connect is explicit.
+            if started, userRequestedConnection || restoreStreamAfterBackground || isStreaming {
+                if userRequestedConnection, !isConnected { isConnecting = true }
+                peers.resumeAfterBackground()
+            }
             if isConnected {
                 peers.send(ControlMessage(.status, detail: "viewer-foreground"))
             }
             endBackgroundTask()
         case .background:
-            prepareConnectionForBackgroundIfNeeded()
-            guard isStreaming, keepRunningInBackground else { return }
-            backgroundRequested = true
-            if !isPictureInPictureActive {
-                beginBackgroundGracePeriod()
-                backgroundViewerDetail = "Completing background viewer start…"
-                _ = videoDisplay.startPictureInPicture()
-                verifyBackgroundActivation()
-            } else {
-                endBackgroundTask()
-            }
+            beginBackgroundTransition()
         case .inactive:
-            prepareConnectionForBackgroundIfNeeded()
-            guard isStreaming, keepRunningInBackground else { return }
-            backgroundRequested = true
-            beginBackgroundGracePeriod()
-            // PiP needs to start while SidecarBridge is still transitioning out
-            // of the foreground. Waiting for `.background` is too late on some
-            // iPadOS releases and leaves only the short background grace task.
-            backgroundViewerDetail = "Starting Picture in Picture…"
-            _ = videoDisplay.startPictureInPicture()
-            verifyBackgroundActivation()
+            beginBackgroundTransition()
         @unknown default:
             break
         }
+    }
+
+    /// Called by UIApplication.willResignActiveNotification as an early
+    /// lifecycle hook. SwiftUI's `.inactive` phase can be delivered only after
+    /// iPadOS has started the suspension transition, which is too late for a
+    /// reliable automatic PiP handoff on some iPadOS versions.
+    func appWillResignActive() {
+        beginBackgroundTransition()
+    }
+
+    private func beginBackgroundTransition() {
+        prepareConnectionForBackgroundIfNeeded()
+        guard isStreaming, keepRunningInBackground else {
+            backgroundViewerDetail = isStreaming
+                ? "Automatic background viewing is off. Return here to keep controlling the Mac."
+                : "Connect to a Mac first; the background viewer will be ready after the first frame."
+            return
+        }
+
+        // The notification and scene-phase callbacks can both arrive for one
+        // app switch. Keep one PiP request and one short background grace task;
+        // repeating them makes AVKit race its own transition.
+        guard !backgroundRequested else { return }
+        backgroundRequested = true
+        beginBackgroundGracePeriod()
+        backgroundViewerDetail = isPictureInPicturePossible
+            ? "Starting Picture in Picture…"
+            : "Preparing the background viewer; preserving the session for fast resume."
+        _ = videoDisplay.startPictureInPicture()
+        verifyBackgroundActivation()
     }
 
     private func prepareConnectionForBackgroundIfNeeded() {
@@ -489,12 +637,17 @@ final class PadConnectionModel: ObservableObject {
         connectionHealthDetail = "Fast resume in progress"
         foregroundResumeTask?.cancel()
         foregroundResumeTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(10))
+            // A Wi-Fi-to-AWDL transition can outlast the scene animation.
+            // Keep the selected session in the resume state long enough for
+            // both peer watchdogs to finish their coordinated grace period.
+            try? await Task.sleep(for: .seconds(18))
             guard !Task.isCancelled,
                   let self,
                   self.isResumingFromBackground else { return }
             self.isResumingFromBackground = false
             self.restoreStreamAfterBackground = false
+            self.backgroundRequested = false
+            self.backgroundViewerDetail = "The saved session did not resume; discovery is continuing automatically."
             self.status = "Looking for your Mac…"
             self.detail = "The saved session did not resume; discovery is continuing automatically."
             self.startDiscoveryClockIfNeeded()
@@ -508,6 +661,10 @@ final class PadConnectionModel: ObservableObject {
         foregroundResumeTask = nil
         isResumingFromBackground = false
         restoreStreamAfterBackground = false
+        backgroundRequested = false
+        backgroundViewerDetail = keepRunningInBackground
+            ? "Ready — PiP can keep the screen visible; return here for keyboard and trackpad control."
+            : "Automatic background viewing is off."
         connectionHealthDetail = "Encrypted link resumed"
     }
 
@@ -568,9 +725,15 @@ final class PadConnectionModel: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "keepRunningInBackground")
         videoDisplay.setAutomaticBackgroundStart(enabled)
         if enabled {
-            backgroundViewerDetail = isPictureInPicturePossible
-                ? "Ready — switching apps starts Picture in Picture automatically."
-                : "Waiting for the live video before background viewing is available."
+            if !pictureInPictureSupported {
+                backgroundViewerDetail = "Picture in Picture is not supported on this iPad."
+            } else if isStreaming && isPictureInPicturePossible {
+                backgroundViewerDetail = "Ready — PiP can keep the screen visible; return here for keyboard and trackpad control."
+            } else if isStreaming {
+                backgroundViewerDetail = "Waiting for iPadOS to make the live viewer available; fast resume is enabled meanwhile."
+            } else {
+                backgroundViewerDetail = "Ready after the first live video frame."
+            }
         } else {
             backgroundRequested = false
             backgroundViewerDetail = "Automatic background viewing is off."
@@ -603,6 +766,31 @@ final class PadConnectionModel: ObservableObject {
 
     func sendRightClick() {
         sendInput(.click(secondary: true))
+    }
+
+    func requestMacClipboard() {
+        guard isConnected else {
+            clipboardTransferStatus = "Connect to the Mac before requesting its clipboard."
+            return
+        }
+        clipboardTransferStatus = "Requesting the Mac clipboard…"
+        peers.send(ControlMessage(.requestClipboard))
+    }
+
+    func sendClipboardToMac() {
+        guard isConnected else {
+            clipboardTransferStatus = "Connect to the Mac before sending clipboard text."
+            return
+        }
+        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+            clipboardTransferStatus = "The iPad clipboard has no text to send."
+            return
+        }
+        let prepared = ClipboardTransfer.prepare(text)
+        peers.send(.clipboardText(prepared))
+        clipboardTransferStatus = prepared == text
+            ? "iPad clipboard sent to Mac."
+            : "iPad clipboard sent (truncated to 48 KB)."
     }
 
     private func updatePointerFeedback(for input: RemoteInputEvent) {
@@ -647,6 +835,33 @@ final class PadConnectionModel: ObservableObject {
         streamFPS = Int((Double(frameWindowCount) / duration).rounded())
         frameWindowCount = 0
         frameWindowStart = now
+    }
+
+    /// Publishes stream metadata only when it changes. H.264 frames arrive on
+    /// the main actor because AVSampleBufferDisplayLayer is main-thread bound;
+    /// re-publishing the same status, dimensions, and idle-timer state for
+    /// every frame made SwiftUI do needless work at 30–40 FPS.
+    private func updateStreamPresentation(
+        width: Int,
+        height: Int,
+        format: String,
+        detail streamDetail: String
+    ) {
+        let safeWidth = max(width, 1)
+        let safeHeight = max(height, 1)
+        let ratio = CGFloat(safeWidth) / CGFloat(safeHeight)
+        if abs(streamAspectRatio - ratio) > 0.0001 {
+            streamAspectRatio = ratio
+        }
+        let dimensions = "\(safeWidth) × \(safeHeight) \(format)"
+        if streamDimensions != dimensions {
+            streamDimensions = dimensions
+        }
+        guard !isStreaming else { return }
+        isStreaming = true
+        status = "Mac screen"
+        detail = streamDetail
+        UIApplication.shared.isIdleTimerDisabled = true
     }
 
     private func retryInitialKeyFrameAfterDisplayAppears(_ frame: VideoFrame) {
@@ -755,6 +970,27 @@ final class PadConnectionModel: ObservableObject {
             diagnosticActionDetail = "Connected Mac information updated."
             return
         }
+        if command.kind == .requestClipboard {
+            guard let text = UIPasteboard.general.string, !text.isEmpty else {
+                peers.send(ControlMessage(.clipboardError, detail: "The iPad clipboard has no text."))
+                return
+            }
+            peers.send(.clipboardText(text))
+            return
+        }
+        if command.kind == .clipboardText {
+            guard let text = command.clipboardTextPayload else {
+                clipboardTransferStatus = "The received clipboard text was invalid or too large."
+                return
+            }
+            UIPasteboard.general.string = text
+            clipboardTransferStatus = "Copied Mac clipboard to the iPad."
+            return
+        }
+        if command.kind == .clipboardError {
+            clipboardTransferStatus = command.detail ?? "Clipboard transfer failed."
+            return
+        }
         guard command.kind == .status, let value = command.detail else { return }
         switch value {
         case "sidecar-wired":
@@ -788,17 +1024,35 @@ final class PadConnectionModel: ObservableObject {
             remoteInputUnavailable = true
             remoteInputAuthorized = false
             lastInputAccepted = false
-            status = "Viewer-only Mac companion"
-            detail = "This Mac App Store edition does not provide remote keyboard or trackpad input. Install the direct companion build for full control."
+            status = "Remote input unavailable"
+            detail = "Enable SidecarBridge under macOS Privacy & Security → Accessibility, then reconnect."
         default:
-            if value.hasPrefix("input-ack:") {
+            if value.hasPrefix("pointer-position:") {
                 let parts = value.split(separator: ":")
-                guard parts.count == 3, let sequence = UInt64(parts[1]) else { return }
+                if parts.count >= 3,
+                   let x = Double(parts[1]),
+                   let y = Double(parts[2]) {
+                    remotePointer = CGPoint(
+                        x: min(max(x, 0), 1),
+                        y: min(max(y, 0), 1)
+                    )
+                }
+            } else if value.hasPrefix("input-ack:") {
+                let parts = value.split(separator: ":")
+                guard parts.count >= 3, let sequence = UInt64(parts[1]) else { return }
                 if let sentAt = inputSentAt.removeValue(forKey: sequence) {
                     controlLatencyMS = max(0, Int((ProcessInfo.processInfo.systemUptime - sentAt) * 1_000))
                 }
                 lastInputAccepted = parts[2] == "1"
                 remoteInputAuthorized = lastInputAccepted
+                if parts.count >= 5,
+                   let x = Double(parts[3]),
+                   let y = Double(parts[4]) {
+                    remotePointer = CGPoint(
+                        x: min(max(x, 0), 1),
+                        y: min(max(y, 0), 1)
+                    )
+                }
             } else if value.hasPrefix("fallback-error:") {
                 status = "Mac permission required"
                 detail = String(value.dropFirst("fallback-error:".count))

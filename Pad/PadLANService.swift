@@ -20,7 +20,13 @@ final class PadLANService {
     )
     private var browser: NWBrowser?
     private var endpoints: [NWEndpoint] = []
+    private var bonjourHostsByMac: [String: [String]] = [:]
+    private var multipeerHostsByMac: [String: [String]] = [:]
     private var selectedMacName: String?
+    // Discovery is always passive. This gate is set only by selectMac(named:)
+    // after the user taps Connect, so a Bonjour/AWDL result can never dial the
+    // Mac merely because it was found.
+    private var userRequestedConnection = false
     private var connection: NWConnection?
     private var browserRestartWorkItem: DispatchWorkItem?
     private var idleDiscoveryRefreshWorkItem: DispatchWorkItem?
@@ -54,6 +60,8 @@ final class PadLANService {
     func restart() {
         queue.async { [weak self] in
             guard let self else { return }
+            self.userRequestedConnection = false
+            self.selectedMacName = nil
             self.browserRestartWorkItem?.cancel()
             self.browserRestartWorkItem = nil
             self.idleDiscoveryRefreshWorkItem?.cancel()
@@ -73,7 +81,7 @@ final class PadLANService {
 
     func resumeAfterBackground() {
         queue.async { [weak self] in
-            guard let self, !self.isConnected else { return }
+            guard let self, !self.isConnected, self.userRequestedConnection else { return }
             self.browserRestartWorkItem?.cancel()
             self.browserRestartWorkItem = nil
             self.idleDiscoveryRefreshWorkItem?.cancel()
@@ -163,15 +171,49 @@ final class PadLANService {
     func selectMac(named name: String) {
         queue.async { [weak self] in
             guard let self else { return }
+            self.userRequestedConnection = true
             self.selectedMacName = name
             self.connection?.cancel()
             self.clearConnection(notify: false)
             self.nextEndpointIndex = 0
             self.connectNextAvailable()
-            if self.connection == nil {
-                self.triedCachedHostForBrowser = false
-                self.tryCachedDirectHost()
-                self.scheduleSubnetProbe(after: 0.6)
+            self.triedCachedHostForBrowser = false
+            // Do not make a stale Bonjour result block the fixed-port path. A
+            // remembered host is a direct candidate even when the browser has
+            // an unrelated or unresolved service endpoint in its result set.
+            self.tryCachedDirectHost()
+            self.scheduleSubnetProbe(after: 0.6)
+        }
+    }
+
+    /// Leaves Bonjour/AWDL discovery running while removing the active dial
+    /// target. This is used by the explicit-connect flow so discovering a Mac
+    /// never silently opens a session.
+    func clearSelectedMac() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.userRequestedConnection = false
+            self.selectedMacName = nil
+            self.connectionAttemptWorkItem?.cancel()
+            self.connectionAttemptWorkItem = nil
+            self.cancelSubnetProbes()
+            self.connection?.cancel()
+            self.clearConnection(notify: false)
+            self.nextEndpointIndex = 0
+        }
+    }
+
+    /// Keeps direct candidates learned through the nearby Multipeer
+    /// advertisement. This is useful when an access point filters Bonjour
+    /// multicast but still permits a unicast TCP connection.
+    func setMultipeerAdvertisedHosts(_ hosts: [String], forMacName name: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.multipeerHostsByMac[name] = hosts
+            if self.selectedMacName == name,
+               !self.isConnected,
+               self.connection == nil {
+                self.connectNextAvailable()
             }
         }
     }
@@ -197,14 +239,24 @@ final class PadLANService {
                 }
             }
             self.endpoints = results.map(\.endpoint)
+            var bonjourHosts: [String: [String]] = [:]
             let names = self.endpoints.compactMap { endpoint -> String? in
                 guard case let .service(name, _, _, _) = endpoint else { return nil }
                 return name
             }
+            for result in results {
+                guard case let .service(name, _, _, _) = result.endpoint else { continue }
+                if case let .bonjour(txtRecord) = result.metadata {
+                    bonjourHosts[name] = BridgeNetworkMetadata.decodePrivateIPv4Addresses(
+                        txtRecord[BridgeConstants.hostsTXTKey]
+                    )
+                }
+            }
+            self.bonjourHostsByMac = bonjourHosts
             DispatchQueue.main.async {
                 self.onDiscoveredMacsChanged?(Array(Set(names)).sorted())
             }
-            if !self.endpoints.isEmpty {
+            if self.hasSelectableDirectCandidate {
                 self.cancelSubnetProbes()
                 self.idleDiscoveryRefreshWorkItem?.cancel()
                 self.idleDiscoveryRefreshWorkItem = nil
@@ -212,6 +264,7 @@ final class PadLANService {
                 self.browserRestartWorkItem = nil
             } else {
                 self.scheduleIdleDiscoveryRefresh()
+                self.tryCachedDirectHost()
                 self.scheduleSubnetProbe(after: 1.5)
             }
             self.connectNextAvailable()
@@ -224,7 +277,7 @@ final class PadLANService {
                 self.browserRestartWorkItem?.cancel()
                 self.browserRestartWorkItem = nil
                 self.notifyLocalNetwork(.granted)
-                if self.endpoints.isEmpty {
+                if !self.hasSelectableDirectCandidate {
                     self.tryCachedDirectHost()
                     self.scheduleIdleDiscoveryRefresh()
                     self.scheduleSubnetProbe(after: 1.5)
@@ -258,10 +311,25 @@ final class PadLANService {
     }
 
     private func connectNextAvailable() {
-        guard connection == nil, let selectedMacName else { return }
-        let selectableEndpoints = endpoints.filter {
+        guard userRequestedConnection, connection == nil, let selectedMacName else { return }
+        let serviceEndpoints = endpoints.filter {
             guard case let .service(name, _, _, _) = $0 else { return false }
             return name == selectedMacName
+        }
+        let advertisedHosts = (multipeerHostsByMac[selectedMacName] ?? []) +
+            (bonjourHostsByMac[selectedMacName] ?? [])
+        let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort)
+        var selectableEndpoints: [NWEndpoint] = []
+        if let port {
+            selectableEndpoints.append(contentsOf: advertisedHosts.map {
+                .hostPort(host: NWEndpoint.Host($0), port: port)
+            })
+        }
+        selectableEndpoints.append(contentsOf: serviceEndpoints)
+        var seen = Set<String>()
+        selectableEndpoints = selectableEndpoints.filter { endpoint in
+            let key = String(describing: endpoint)
+            return seen.insert(key).inserted
         }
         guard !selectableEndpoints.isEmpty else { return }
         if nextEndpointIndex >= selectableEndpoints.count { nextEndpointIndex = 0 }
@@ -280,6 +348,13 @@ final class PadLANService {
             case .ready:
                 self.connectionAttemptWorkItem?.cancel()
                 self.connectionAttemptWorkItem = nil
+                if let host = Self.privateIPv4Host(connection.currentPath?.remoteEndpoint)
+                    ?? Self.privateIPv4Host(endpoint) {
+                    // Keep the last dialable address even when this session
+                    // arrived through Bonjour. If multicast is filtered on the
+                    // next launch, the iPad can still start a direct attempt.
+                    UserDefaults.standard.set(host, forKey: "lastDirectMacHost")
+                }
                 self.beginHandshake(on: connection)
                 self.receive(on: connection)
             case .failed(let error):
@@ -311,8 +386,17 @@ final class PadLANService {
             )
             connection.send(
                 content: try LANWire.handshake(hello, marker: LANWire.clientHello),
-                completion: .contentProcessed { [weak self] error in
-                    if let error { self?.clearConnection(notify: true, error: error.localizedDescription) }
+                completion: .contentProcessed { [weak self, weak connection] error in
+                    guard let self, let connection else { return }
+                    self.queue.async {
+                        // A delayed callback from an abandoned dial must not
+                        // tear down the newer connection that replaced it.
+                        guard self.connection === connection else { return }
+                        if let error {
+                            self.clearConnection(notify: true, error: error.localizedDescription)
+                            self.retrySoon()
+                        }
+                    }
                 }
             )
         } catch {
@@ -411,7 +495,7 @@ final class PadLANService {
                     self.pairingMacName ?? "Mac",
                     self.submittedPairingCode == nil
                         ? nil
-                        : "Enter the complete 16-character code shown on the Mac."
+                        : "Enter the complete 16-digit code shown on the Mac."
                 )
             }
             return
@@ -507,9 +591,14 @@ final class PadLANService {
             let packet = try PacketCodec.encode(.authentication(message))
             connection.send(
                 content: try LANWire.encrypted(packet, session: secureSession),
-                completion: .contentProcessed { [weak self] error in
-                    if let error {
-                        self?.clearConnection(notify: true, error: error.localizedDescription)
+                completion: .contentProcessed { [weak self, weak connection] error in
+                    guard let self, let connection else { return }
+                    self.queue.async {
+                        guard self.connection === connection else { return }
+                        if let error {
+                            self.clearConnection(notify: true, error: error.localizedDescription)
+                            self.retrySoon()
+                        }
                     }
                 }
             )
@@ -525,12 +614,19 @@ final class PadLANService {
                   let connection = self.connection,
                   let secureSession = self.secureSession else { return }
             do {
-                connection.send(
-                    content: try LANWire.encrypted(packet, session: secureSession),
-                    completion: .contentProcessed { [weak self] error in
-                        if let error { self?.clearConnection(notify: true, error: error.localizedDescription) }
+            connection.send(
+                content: try LANWire.encrypted(packet, session: secureSession),
+                completion: .contentProcessed { [weak self, weak connection] error in
+                    guard let self, let connection else { return }
+                    self.queue.async {
+                        guard self.connection === connection else { return }
+                        if let error {
+                            self.clearConnection(notify: true, error: error.localizedDescription)
+                            self.retrySoon()
+                        }
                     }
-                )
+                }
+            )
             } catch {
                 self.clearConnection(notify: true, error: error.localizedDescription)
             }
@@ -549,23 +645,31 @@ final class PadLANService {
             return
         }
 
+        let sendsImmediately = input.isCoalescibleInput
         do {
-            inputSendInFlight = true
+            // Pointer/scroll updates are already coalesced upstream. Do not
+            // make the next update wait for NWConnection's contentProcessed
+            // callback (which can be delayed by TCP buffering); ordered key
+            // and button packets still use the acknowledgement gate below.
+            inputSendInFlight = !sendsImmediately
             connection.send(
                 content: try LANWire.encrypted(packet, session: secureSession),
                 completion: .contentProcessed { [weak self, weak connection] error in
                     guard let self else { return }
                     self.queue.async {
                         guard let connection, self.connection === connection else { return }
-                        self.inputSendInFlight = false
                         if let error {
                             self.clearConnection(notify: true, error: error.localizedDescription)
-                        } else {
+                        } else if !sendsImmediately {
+                            self.inputSendInFlight = false
                             self.sendNextInputIfPossible()
                         }
                     }
                 }
             )
+            if sendsImmediately {
+                sendNextInputIfPossible()
+            }
         } catch {
             inputSendInFlight = false
             clearConnection(notify: true, error: error.localizedDescription)
@@ -573,19 +677,27 @@ final class PadLANService {
     }
 
     private func retrySoon() {
-        queue.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.connectNextAvailable() }
+        queue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, self.userRequestedConnection, !self.isConnected, self.connection == nil else { return }
+            self.connectNextAvailable()
+            if self.connection == nil {
+                self.tryCachedDirectHost()
+                self.scheduleSubnetProbe(after: 0.2)
+            }
+        }
     }
 
     /// Bonjour can be filtered by some access points even when devices can
     /// still open normal TCP connections to one another. Probe a fixed,
     /// encrypted SidecarBridge port on the iPad's local /24 as a bounded
-    /// discovery fallback. The normal Curve25519 handshake and Mac pairing
-    /// approval still run before any app data is accepted.
+    /// discovery fallback. It is also allowed after an unresolved Bonjour
+    /// result so one stale service endpoint cannot strand the connection state.
+    /// The normal Curve25519 handshake and Mac pairing approval still run
+    /// before any app data is accepted.
     private func scheduleSubnetProbe(after delay: TimeInterval) {
-        guard selectedMacName != nil,
+        guard userRequestedConnection,
               !isConnected,
               connection == nil,
-              endpoints.isEmpty,
               subnetProbeStartWorkItem == nil,
               subnetProbeConnections.isEmpty else { return }
 
@@ -599,8 +711,7 @@ final class PadLANService {
     }
 
     private func startSubnetProbe() {
-        guard selectedMacName != nil,
-              !isConnected, connection == nil, endpoints.isEmpty else { return }
+        guard userRequestedConnection, !isConnected, connection == nil else { return }
         let hosts = Self.privateIPv4ProbeHosts()
         guard !hosts.isEmpty,
               let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort) else { return }
@@ -615,9 +726,10 @@ final class PadLANService {
         let batchSize = 24
         for offset in stride(from: 0, to: hosts.count, by: batchSize) {
             let batch = Array(hosts[offset..<min(offset + batchSize, hosts.count)])
-            let workItem = DispatchWorkItem { [weak self] in
-                guard let self,
-                      self.subnetProbeGeneration == generation,
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.userRequestedConnection,
+                  self.subnetProbeGeneration == generation,
                       !self.isConnected,
                       self.connection == nil else { return }
                 for host in batch {
@@ -650,11 +762,11 @@ final class PadLANService {
     }
 
     private func tryCachedDirectHost() {
-        guard selectedMacName != nil,
+        guard userRequestedConnection,
+              selectedMacName != nil,
               !triedCachedHostForBrowser,
               !isConnected,
               connection == nil,
-              endpoints.isEmpty,
               subnetProbeConnections.isEmpty,
               let host = UserDefaults.standard.string(forKey: "lastDirectMacHost"),
               Self.isPrivateIPv4Address(host),
@@ -668,7 +780,8 @@ final class PadLANService {
 
     @discardableResult
     private func tryCachedDirectHostForResume() -> Bool {
-        guard selectedMacName != nil,
+        guard userRequestedConnection,
+              selectedMacName != nil,
               !isConnected,
               connection == nil,
               let host = UserDefaults.standard.string(forKey: "lastDirectMacHost"),
@@ -819,13 +932,19 @@ final class PadLANService {
             isPrivateIPv4(parts)
     }
 
+    private static func privateIPv4Host(_ endpoint: NWEndpoint?) -> String? {
+        guard case let .hostPort(host, _) = endpoint else { return nil }
+        let value = String(describing: host)
+        return isPrivateIPv4Address(value) ? value : nil
+    }
+
     /// Bonjour can remain in `.ready` with an empty, stale result set after a
     /// Wi-Fi or AWDL transition. Recreating the browser forces mDNS discovery
     /// without requiring the user to close and reopen the iPad app.
     private func scheduleIdleDiscoveryRefresh() {
-        guard !isConnected, endpoints.isEmpty, idleDiscoveryRefreshWorkItem == nil else { return }
+        guard !isConnected, !hasSelectableDirectCandidate, idleDiscoveryRefreshWorkItem == nil else { return }
         let workItem = DispatchWorkItem { [weak self] in
-            guard let self, !self.isConnected, self.endpoints.isEmpty else { return }
+            guard let self, !self.isConnected, !self.hasSelectableDirectCandidate else { return }
             self.idleDiscoveryRefreshWorkItem = nil
             print("[SidecarBridge/LAN] No Bonjour results; refreshing browser")
             self.browser?.cancel()
@@ -834,6 +953,21 @@ final class PadLANService {
         }
         idleDiscoveryRefreshWorkItem = workItem
         queue.asyncAfter(deadline: .now() + idleDiscoveryRefreshInterval, execute: workItem)
+    }
+
+    /// Whether the currently selected Mac has an endpoint or private IPv4
+    /// address we can actually dial. `endpoints` may contain another Mac or a
+    /// stale service, so checking only whether the browser result list is
+    /// non-empty is not sufficient.
+    private var hasSelectableDirectCandidate: Bool {
+        guard let selectedMacName else { return false }
+        let hasService = endpoints.contains {
+            guard case let .service(name, _, _, _) = $0 else { return false }
+            return name == selectedMacName
+        }
+        return hasService ||
+            !(bonjourHostsByMac[selectedMacName] ?? []).isEmpty ||
+            !(multipeerHostsByMac[selectedMacName] ?? []).isEmpty
     }
 
     /// A Bonjour endpoint may survive while its route has gone stale. Do not
@@ -852,8 +986,12 @@ final class PadLANService {
             self.nextEndpointIndex = 0
             self.scheduleBrowserRestart(after: 0.25)
         }
+        // A Wi-Fi-to-AWDL path can spend several seconds in preparing while
+        // iPadOS changes interfaces. Four seconds caused false failures that
+        // looked like a bad pairing or an unavailable Mac; allow the path to
+        // settle before rebuilding discovery.
         connectionAttemptWorkItem = workItem
-            queue.asyncAfter(deadline: .now() + 4, execute: workItem)
+        queue.asyncAfter(deadline: .now() + 8, execute: workItem)
     }
 
     private func scheduleBrowserRestart(after delay: TimeInterval) {

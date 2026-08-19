@@ -5,8 +5,33 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
 # Keep the toolchain selection and all generated output on /Volumes/D.
-DEVELOPER_DIR=${DEVELOPER_DIR:-/Volumes/D/Xcode.app/Contents/Developer}
+#
+# Store builds must use the released Xcode 26.5 toolchain (17F42). Do not
+# honor a caller-provided DEVELOPER_DIR here: that made it too easy to
+# accidentally archive with Xcode-beta. The store archive workflow is kept in
+# /Volumes/D/xcode/ARCHIVE_AND_PUSH.md; it patches a beta host stamp in the
+# archive before export when this Mac is running a beta macOS. This debug/test
+# script intentionally does not produce a store archive.
+DEVELOPER_DIR=/Volumes/D/Xcode.app/Contents/Developer
 export DEVELOPER_DIR
+
+if [ ! -x "$DEVELOPER_DIR/usr/bin/xcodebuild" ]; then
+  echo "Stable Xcode 26.5 was not found at $DEVELOPER_DIR" >&2
+  exit 2
+fi
+
+XCODE_VERSION=$(
+  "$DEVELOPER_DIR/usr/bin/xcodebuild" -version |
+    awk 'NR == 1 { print $2 }'
+)
+XCODE_BUILD=$(
+  "$DEVELOPER_DIR/usr/bin/xcodebuild" -version |
+    awk 'NR == 2 { print $3 }'
+)
+if [ "$XCODE_VERSION" != "26.5" ] || [ "$XCODE_BUILD" != "17F42" ]; then
+  echo "Refusing to build: expected Xcode 26.5 (17F42), found Xcode $XCODE_VERSION ($XCODE_BUILD)." >&2
+  exit 2
+fi
 
 xcodegen generate
 xcodebuild \

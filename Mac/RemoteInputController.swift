@@ -1,28 +1,3 @@
-#if SIDECARBRIDGE_APP_STORE_SAFE
-import Foundation
-
-/// The Mac App Store companion is intentionally viewer-only. Apple does not
-/// permit this app to use Accessibility APIs for remote mouse/keyboard
-/// injection. The direct-distribution companion supplies the full pipeline
-/// below and uses the user's explicit Accessibility approval.
-final class RemoteInputPipeline {
-    var isAuthorized: Bool { false }
-
-    @discardableResult
-    func requestAccess() -> Bool { false }
-
-    func openAccessibilitySettings() {}
-    func revealApplication() {}
-    func releaseButtons() {}
-
-    func submit(
-        _ input: RemoteInputEvent,
-        completion: @escaping (Bool) -> Void
-    ) {
-        completion(false)
-    }
-}
-#else
 import ApplicationServices
 import AppKit
 import Carbon
@@ -57,12 +32,40 @@ final class RemoteInputPipeline {
         controller.revealApplication()
     }
 
+    /// Apply the display selected by ScreenCaptureKit before subsequent
+    /// pointer events are handled. The setter shares the input queue so a
+    /// stream restart cannot race a pointer packet and use stale geometry.
+    func setTargetDisplayID(_ displayID: CGDirectDisplayID?) {
+        queue.async { [controller] in
+            controller.setTargetDisplayID(displayID)
+        }
+    }
+
     func submit(
         _ input: RemoteInputEvent,
-        completion: @escaping (Bool) -> Void
+        completion: @escaping (Bool, CGPoint?) -> Void
     ) {
         queue.async { [controller] in
-            completion(controller.handle(input))
+            let accepted = controller.handle(input)
+            let pointerPosition: CGPoint?
+            switch input.kind {
+            case .pointerMove, .pointerDelta, .primaryDown, .primaryDrag,
+                 .primaryUp, .primaryClick, .primaryDoubleClick,
+                 .secondaryClick, .secondaryDoubleClick, .releaseButtons:
+                pointerPosition = controller.currentPointerPosition()
+            default:
+                pointerPosition = nil
+            }
+            completion(accepted, pointerPosition)
+        }
+    }
+
+    /// Reports the actual Quartz cursor location after a remote pointer event.
+    /// This closes the loop for coalesced trackpad deltas and display-boundary
+    /// clamping, so the iPad's virtual cursor cannot drift from WindowServer.
+    func currentPointerPosition(completion: @escaping (CGPoint?) -> Void) {
+        queue.async { [controller] in
+            completion(controller.currentPointerPosition())
         }
     }
 
@@ -74,13 +77,25 @@ final class RemoteInputPipeline {
 }
 
 final class RemoteInputController {
-    var isAuthorized: Bool { AXIsProcessTrusted() }
+    /// Posting Quartz events is a separate TCC decision from Accessibility.
+    /// The PostEvent grant is the permission that controls whether WindowServer
+    /// accepts remote keyboard, pointer, and scroll events. Accessibility is
+    /// optional here and is used only for the best-effort focused-text route.
+    var isAuthorized: Bool { CGPreflightPostEventAccess() }
     private let eventSource = CGEventSource(stateID: .privateState)
-    // A nil source makes CoreGraphics derive keyboard state from the current
-    // HID system state. WindowServer's global shortcut recognizer ignores
-    // some explicitly-created synthetic sources even though regular apps
-    // still receive their key events.
-    private let keyboardEventSource: CGEventSource? = nil
+    // Keep a dedicated private keyboard source. Passing a nil source made
+    // normal Command/Option/Control shortcuts depend on whatever physical
+    // modifier state happened to be present on the Mac; in particular,
+    // Command-C/Command-V could be posted successfully but ignored by the
+    // focused app. The system Control-arrow path below uses its own source.
+    private let keyboardEventSource = CGEventSource(stateID: .privateState)
+    // Mission Control and Spaces are global shortcuts. SidecarBridge is a
+    // remote-control producer, so keep its modifier state in an independent
+    // table. This prevents a locally held modifier from being merged into a
+    // remote shortcut and matches Apple's guidance for specialized remote
+    // control applications.
+    private let systemKeyboardEventSource = CGEventSource(stateID: .privateState)
+    private var targetDisplayID: CGDirectDisplayID?
     private var isPrimaryButtonDown = false
     private var activePrimaryButtonFlags: CGEventFlags = []
     private var scrollRemainderX = 0.0
@@ -90,7 +105,18 @@ final class RemoteInputController {
     @discardableResult
     func requestAccess() -> Bool {
         let prompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        return AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
+        // Ask for Accessibility as an optional enhancement for Unicode text
+        // insertion, but do not make remote event posting depend on it. Apple
+        // documents these as separate TCC services for sandboxed apps.
+        _ = AXIsProcessTrustedWithOptions(
+            [prompt: true] as CFDictionary
+        )
+        // Request this explicitly instead of waiting for the first shortcut
+        // to fail silently. macOS presents the native PostEvent permission
+        // prompt when it has not been granted for this signed app.
+        let postEventAuthorized = CGPreflightPostEventAccess()
+            || CGRequestPostEventAccess()
+        return postEventAuthorized
     }
 
     func openAccessibilitySettings() {
@@ -100,6 +126,14 @@ final class RemoteInputController {
 
     func revealApplication() {
         NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+    }
+
+    func setTargetDisplayID(_ displayID: CGDirectDisplayID?) {
+        targetDisplayID = displayID
+        let displayDescription = displayID.map(String.init) ?? "main"
+        remoteInputLog.notice(
+            "Pointer target display updated to \(displayDescription, privacy: .public)"
+        )
     }
 
     @discardableResult
@@ -161,8 +195,8 @@ final class RemoteInputController {
             )
         case .text:
             guard let text = input.text else { return false }
-            // NSPasteboard and NSAppleScript are AppKit APIs. Keep committed
-            // Unicode insertion on main while the serial input queue waits.
+            // Keep committed Unicode insertion on main while the serial input
+            // queue waits for the focused AppKit control.
             MainQueueExecutor.sync {
                 type(text)
             }
@@ -212,10 +246,10 @@ final class RemoteInputController {
     }
 
     private func movePointer(x: Double, y: Double) {
-        let bounds = CGDisplayBounds(CGMainDisplayID())
-        let point = CGPoint(
-            x: bounds.minX + min(max(x, 0), 1) * bounds.width,
-            y: bounds.minY + min(max(y, 0), 1) * bounds.height
+        let bounds = targetDisplayBounds()
+        let point = RemoteDisplayGeometry.displayPoint(
+            for: CGPoint(x: x, y: y),
+            in: bounds
         )
         let event = CGEvent(
             mouseEventSource: eventSource,
@@ -228,11 +262,10 @@ final class RemoteInputController {
 
     private func movePointerBy(x: Double, y: Double) {
         guard let current = CGEvent(source: nil)?.location else { return }
-        let bounds = CGDisplayBounds(CGMainDisplayID())
-        let sensitivity = 1.15
+        let bounds = targetDisplayBounds()
         let point = CGPoint(
-            x: min(max(current.x + x * bounds.width * sensitivity, bounds.minX), bounds.maxX - 1),
-            y: min(max(current.y + y * bounds.height * sensitivity, bounds.minY), bounds.maxY - 1)
+            x: min(max(current.x + x * max(bounds.width - 1, 0), bounds.minX), bounds.maxX - 1),
+            y: min(max(current.y + y * max(bounds.height - 1, 0), bounds.minY), bounds.maxY - 1)
         )
         let event = CGEvent(
             mouseEventSource: eventSource,
@@ -353,11 +386,32 @@ final class RemoteInputController {
     }
 
     private func displayPoint(x: Double, y: Double) -> CGPoint {
-        let bounds = CGDisplayBounds(CGMainDisplayID())
-        return CGPoint(
-            x: bounds.minX + min(max(x, 0), 1) * bounds.width,
-            y: bounds.minY + min(max(y, 0), 1) * bounds.height
+        let bounds = targetDisplayBounds()
+        return RemoteDisplayGeometry.displayPoint(
+            for: CGPoint(x: x, y: y),
+            in: bounds
         )
+    }
+
+    func currentPointerPosition() -> CGPoint? {
+        guard let location = CGEvent(source: nil)?.location else { return nil }
+        return RemoteDisplayGeometry.normalizedPoint(
+            location,
+            in: targetDisplayBounds()
+        )
+    }
+
+    private func targetDisplayBounds() -> CGRect {
+        let fallback = CGMainDisplayID()
+        if let displayID = targetDisplayID,
+           CGDisplayIsOnline(displayID) != 0,
+           CGDisplayIsActive(displayID) != 0 {
+            let bounds = CGDisplayBounds(displayID)
+            if bounds.width > 0, bounds.height > 0 {
+                return bounds
+            }
+        }
+        return CGDisplayBounds(fallback)
     }
 
     private func scroll(
@@ -519,24 +573,10 @@ final class RemoteInputController {
     }
 
     private func postPasteShortcut() -> Bool {
-        // System Events is also used for the Control-arrow shortcuts because
-        // WindowServer and some cross-platform controls reject otherwise
-        // valid synthetic Quartz shortcuts. Never put the remote text itself
-        // in the AppleScript source.
-        let script = """
-        tell application "System Events"
-            keystroke "v" using command down
-        end tell
-        """
-        var error: NSDictionary?
-        let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
-        if result != nil, error == nil {
-            return true
-        }
-        if let error {
-            NSLog("SidecarBridge paste shortcut via System Events failed: %@", error)
-        }
-        return press(code: 9, modifiers: .maskCommand)
+        // Use the same Accessibility-authorized Quartz path as every other
+        // keyboard event. This avoids Apple Events, which are unavailable to
+        // the sandboxed App Store profile.
+        return pressQuartz(code: 9, modifiers: .maskCommand)
     }
 
     private func snapshotPasteboard(_ pasteboard: NSPasteboard) -> PasteboardSnapshot? {
@@ -596,9 +636,24 @@ final class RemoteInputController {
 
     @discardableResult
     private func press(code: CGKeyCode, modifiers: CGEventFlags) -> Bool {
-        if modifiers == .maskControl, (123...126).contains(code) {
+        if modifiers.contains(.maskControl), (123...126).contains(code) {
             return postSystemControlArrow(code: code)
         }
+        return pressQuartz(code: code, modifiers: modifiers)
+    }
+
+    @discardableResult
+    private func pressQuartz(code: CGKeyCode, modifiers: CGEventFlags) -> Bool {
+        pressQuartz(code: code, modifiers: modifiers, keyboardSource: keyboardEventSource)
+    }
+
+    @discardableResult
+    private func pressQuartz(
+        code: CGKeyCode,
+        modifiers: CGEventFlags,
+        keyboardSource: CGEventSource?,
+        tapLocation: CGEventTapLocation = .cghidEventTap
+    ) -> Bool {
         let modifierKeys: [(flag: CGEventFlags, code: CGKeyCode)] = [
             (.maskCommand, 55),
             (.maskAlternate, 58),
@@ -610,48 +665,91 @@ final class RemoteInputController {
         for modifier in selected {
             activeFlags.insert(modifier.flag)
             guard let event = CGEvent(
-                keyboardEventSource: keyboardEventSource,
+                keyboardEventSource: keyboardSource,
                 virtualKey: modifier.code,
                 keyDown: true
             ) else { return false }
             event.flags = activeFlags
-            event.post(tap: .cghidEventTap)
+            event.post(tap: tapLocation)
             Thread.sleep(forTimeInterval: 0.006)
         }
 
-        guard let down = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: code, keyDown: true),
-              let up = CGEvent(keyboardEventSource: keyboardEventSource, virtualKey: code, keyDown: false) else {
-            releaseModifierKeys(selected, activeFlags: activeFlags)
+        guard let down = CGEvent(keyboardEventSource: keyboardSource, virtualKey: code, keyDown: true),
+              let up = CGEvent(keyboardEventSource: keyboardSource, virtualKey: code, keyDown: false) else {
+            releaseModifierKeys(
+                selected,
+                activeFlags: activeFlags,
+                keyboardSource: keyboardSource,
+                tapLocation: tapLocation
+            )
             return false
         }
         down.flags = activeFlags
-        down.post(tap: .cghidEventTap)
+        down.post(tap: tapLocation)
         Thread.sleep(forTimeInterval: 0.008)
         up.flags = activeFlags
-        up.post(tap: .cghidEventTap)
+        up.post(tap: tapLocation)
         Thread.sleep(forTimeInterval: 0.006)
 
-        releaseModifierKeys(selected, activeFlags: activeFlags)
+        releaseModifierKeys(
+            selected,
+            activeFlags: activeFlags,
+            keyboardSource: keyboardSource,
+            tapLocation: tapLocation
+        )
         return true
     }
 
     private func postSystemControlArrow(code: CGKeyCode) -> Bool {
-        // WindowServer deliberately ignores synthesized Quartz events for
-        // Mission Control and Spaces on current macOS releases. Ask the
-        // system keyboard process to perform the user's configured shortcut
-        // instead. The sandbox entitlement limits this Apple Event target to
-        // System Events, and macOS still requires explicit user approval.
-        let script = """
-        tell application "System Events"
-            key code \(code) using control down
-        end tell
-        """
-        var error: NSDictionary?
-        let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
-        if let error {
-            NSLog("SidecarBridge system shortcut failed: %@", error)
+        // macOS 27's Spaces recognizer treats arrow keys as extended-keyboard
+        // events. A synthetic arrow carrying only Control is delivered to the
+        // foreground app but is silently ignored by Mission Control. Mark the
+        // arrow itself as both Fn/extended and numeric-pad, matching the flags
+        // on a physical keyboard event, while keeping the modifier key events
+        // unchanged. This is specific to the system Control-arrow shortcut;
+        // ordinary remote arrows must retain their normal flags.
+        let arrowFlags = CGEventFlags.maskControl
+            .union(.maskSecondaryFn)
+            .union(.maskNumericPad)
+        let controlDown = CGEvent(
+            keyboardEventSource: systemKeyboardEventSource,
+            virtualKey: 59,
+            keyDown: true
+        )
+        controlDown?.flags = .maskControl
+        controlDown?.post(tap: .cghidEventTap)
+        guard let arrowDown = CGEvent(
+            keyboardEventSource: systemKeyboardEventSource,
+            virtualKey: code,
+            keyDown: true
+        ), let arrowUp = CGEvent(
+            keyboardEventSource: systemKeyboardEventSource,
+            virtualKey: code,
+            keyDown: false
+        ), let controlUp = CGEvent(
+            keyboardEventSource: systemKeyboardEventSource,
+            virtualKey: 59,
+            keyDown: false
+        ) else {
+            if let controlUp = CGEvent(
+                keyboardEventSource: systemKeyboardEventSource,
+                virtualKey: 59,
+                keyDown: false
+            ) {
+                controlUp.flags = []
+                controlUp.post(tap: .cghidEventTap)
+            }
+            return false
         }
-        return result != nil && error == nil
+        arrowDown.flags = arrowFlags
+        arrowDown.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.008)
+        arrowUp.flags = arrowFlags
+        arrowUp.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.006)
+        controlUp.flags = []
+        controlUp.post(tap: .cghidEventTap)
+        return true
     }
 
     private func postInputSourceSwitchShortcut() -> Bool {
@@ -659,36 +757,25 @@ final class RemoteInputController {
         // text-input context. TISSelectInputSource can return noErr yet be
         // ignored by WindowServer for a sandboxed app, especially when the
         // focused app restores a per-document input source.
-        let script = """
-        tell application "System Events"
-            key code 49 using control down
-        end tell
-        """
-        var error: NSDictionary?
-        let result = NSAppleScript(source: script)?.executeAndReturnError(&error)
-        if result != nil, error == nil {
-            return true
-        }
-        if let error {
-            NSLog("SidecarBridge input-source shortcut failed: %@", error)
-        }
-        return press(code: 49, modifiers: .maskControl)
+        return pressQuartz(code: 49, modifiers: .maskControl)
     }
 
     private func releaseModifierKeys(
         _ selected: [(flag: CGEventFlags, code: CGKeyCode)],
-        activeFlags initialFlags: CGEventFlags
+        activeFlags initialFlags: CGEventFlags,
+        keyboardSource: CGEventSource?,
+        tapLocation: CGEventTapLocation = .cghidEventTap
     ) {
         var activeFlags = initialFlags
         for modifier in selected.reversed() {
             activeFlags.remove(modifier.flag)
             let event = CGEvent(
-                keyboardEventSource: keyboardEventSource,
+                keyboardEventSource: keyboardSource,
                 virtualKey: modifier.code,
                 keyDown: false
             )
             event?.flags = activeFlags
-            event?.post(tap: .cghidEventTap)
+            event?.post(tap: tapLocation)
             Thread.sleep(forTimeInterval: 0.004)
         }
     }
@@ -711,8 +798,9 @@ final class RemoteInputController {
             "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "return": 36,
             "l": 37, "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43,
             "/": 44, "n": 45, "m": 46, ".": 47, "tab": 48, "space": 49,
-            "`": 50, "delete": 51, "escape": 53, "home": 115, "pageup": 116,
-            "end": 119, "pagedown": 121, "left": 123, "right": 124, "down": 125, "up": 126
+            "`": 50, "delete": 51, "escape": 53, "help": 114, "home": 115,
+            "pageup": 116, "forwarddelete": 117, "end": 119, "pagedown": 121,
+            "left": 123, "right": 124, "down": 125, "up": 126
         ]
         return map[key.lowercased()]
     }
@@ -1092,4 +1180,3 @@ private final class RemoteInputSourceController {
             .takeUnretainedValue() == kCFBooleanTrue
     }
 }
-#endif

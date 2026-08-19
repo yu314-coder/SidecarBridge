@@ -140,6 +140,7 @@ struct RemoteInputSurface: UIViewRepresentable {
     let pointerButtonMapping: RemotePointerButtonMapping
     let calibrateNextPointerClick: Bool
     let showsSoftwareKeyboard: Bool
+    let showsMagicKeyboardPointer: Bool
     let onInput: (RemoteInputEvent) -> Void
     let onPointerCalibration: (RemotePointerButtonMapping) -> Void
     let onZoom: (CGFloat, CGPoint) -> Void
@@ -153,6 +154,7 @@ struct RemoteInputSurface: UIViewRepresentable {
             pointerButtonMapping: pointerButtonMapping,
             calibrateNextPointerClick: calibrateNextPointerClick,
             showsSoftwareKeyboard: showsSoftwareKeyboard,
+            showsMagicKeyboardPointer: showsMagicKeyboardPointer,
             onInput: onInput,
             onPointerCalibration: onPointerCalibration,
             onZoom: onZoom,
@@ -167,6 +169,7 @@ struct RemoteInputSurface: UIViewRepresentable {
         uiView.pointerButtonMapping = pointerButtonMapping
         uiView.calibrateNextPointerClick = calibrateNextPointerClick
         uiView.showsSoftwareKeyboard = showsSoftwareKeyboard
+        uiView.showsMagicKeyboardPointer = showsMagicKeyboardPointer
         uiView.onInput = onInput
         uiView.onPointerCalibration = onPointerCalibration
         uiView.onZoom = onZoom
@@ -338,7 +341,7 @@ private final class RemoteTextInputView: UITextView {
     }
 }
 
-final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
+final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, UIPointerInteractionDelegate {
     var onInput: (RemoteInputEvent) -> Void
     var onPointerCalibration: (RemotePointerButtonMapping) -> Void
     var onZoom: (CGFloat, CGPoint) -> Void
@@ -348,6 +351,15 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     var zoomOffset: CGSize
     var pointerButtonMapping: RemotePointerButtonMapping
     var calibrateNextPointerClick: Bool
+    var showsMagicKeyboardPointer: Bool {
+        didSet {
+            guard showsMagicKeyboardPointer != oldValue else { return }
+            // Re-enter the pointer interaction so iPadOS immediately applies
+            // the new style instead of waiting for the next hover transition.
+            hiddenSystemPointerInteraction.isEnabled = false
+            hiddenSystemPointerInteraction.isEnabled = true
+        }
+    }
     var showsSoftwareKeyboard: Bool {
         didSet {
             guard showsSoftwareKeyboard != oldValue else { return }
@@ -391,6 +403,11 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     private let pointerClickSlop: CGFloat = 8
     private let directTouchClickSlop: CGFloat = 12
     private var gameControllerControlIsDown = false
+    // Some iPad Magic Keyboard firmware reports the modifier key as its own
+    // HID press and leaves UIKey.modifierFlags empty on the following arrow or
+    // function key. Keep the physical modifier usages until their key-up so
+    // shortcuts remain deterministic even when UIKit omits the snapshot.
+    private var activeModifierUsages = Set<Int>()
     private var lastControlArrow: (key: String, time: TimeInterval)?
     private var lastInputModeSwitchAt: TimeInterval = 0
     private var lastForwardedInputLanguage: String?
@@ -400,6 +417,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     private var hardwareKeyRepeatTasks: [Int: Task<Void, Never>] = [:]
     private let hardwareKeyRepeatDelay = Duration.milliseconds(420)
     private let hardwareKeyRepeatInterval = Duration.milliseconds(45)
+    private lazy var hiddenSystemPointerInteraction = UIPointerInteraction(delegate: self)
 
     init(
         contentAspectRatio: CGFloat,
@@ -408,6 +426,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
         pointerButtonMapping: RemotePointerButtonMapping,
         calibrateNextPointerClick: Bool,
         showsSoftwareKeyboard: Bool,
+        showsMagicKeyboardPointer: Bool,
         onInput: @escaping (RemoteInputEvent) -> Void,
         onPointerCalibration: @escaping (RemotePointerButtonMapping) -> Void,
         onZoom: @escaping (CGFloat, CGPoint) -> Void,
@@ -419,6 +438,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
         self.pointerButtonMapping = pointerButtonMapping
         self.calibrateNextPointerClick = calibrateNextPointerClick
         self.showsSoftwareKeyboard = showsSoftwareKeyboard
+        self.showsMagicKeyboardPointer = showsMagicKeyboardPointer
         self.onInput = onInput
         self.onPointerCalibration = onPointerCalibration
         self.onZoom = onZoom
@@ -429,7 +449,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
         isAccessibilityElement = true
         accessibilityLabel = "Remote Mac screen"
         accessibilityValue = "Zoom \(Int((zoomScale * 100).rounded())) percent"
-        accessibilityHint = "Direct touch controls the Mac. Use the viewer controls for named click, zoom, file transfer, and stream actions."
+        accessibilityHint = "Direct touch controls the Mac. Pinch with two fingers to zoom, drag with three fingers to pan, and use the viewer controls for click, file transfer, and stream actions."
         accessibilityTraits = [.allowsDirectInteraction, .adjustable]
         accessibilityCustomActions = [
             UIAccessibilityCustomAction(name: "Left click", target: self, selector: #selector(accessibilityLeftClick)),
@@ -439,6 +459,10 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
         configureTextInput()
         configureGestures()
         configureHardwareKeyboard()
+        // The Magic Keyboard trackpad pointer belongs to iPadOS. The viewer
+        // shows the Mac cursor in the captured frame, so suppress iPadOS's
+        // second pointer while the pointer is over this surface.
+        addInteraction(hiddenSystemPointerInteraction)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(inputContextDidBecomeActive(_:)),
@@ -484,6 +508,13 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    func pointerInteraction(
+        _ interaction: UIPointerInteraction,
+        styleFor region: UIPointerRegion
+    ) -> UIPointerStyle? {
+        showsMagicKeyboardPointer ? nil : .hidden()
+    }
 
     deinit {
         hardwareKeyRepeatTasks.values.forEach { $0.cancel() }
@@ -744,6 +775,12 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
 
     private func handleHardwareKeyDown(_ hardwareKey: UIKey) -> Bool {
         let hidUsage = hardwareKey.keyCode.rawValue
+        if Self.isModifierHIDUsage(hidUsage) {
+            activeModifierUsages.insert(hidUsage)
+            // Modifier state is carried by the following semantic shortcut;
+            // do not forward the modifier as a standalone Mac key event.
+            return true
+        }
         let modifiers = remoteModifiers(for: hardwareKey)
         if RemoteKeyboardInput.isInputModeSwitchShortcut(
             hidUsage: hidUsage,
@@ -795,6 +832,10 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
 
     private func handleHardwareKeyUp(_ hardwareKey: UIKey) -> Bool {
         let hidUsage = hardwareKey.keyCode.rawValue
+        if Self.isModifierHIDUsage(hidUsage) {
+            activeModifierUsages.remove(hidUsage)
+            return true
+        }
         if RemoteKeyboardInput.isInputModeSwitchShortcut(
             hidUsage: hidUsage,
             modifiers: remoteModifiers(for: hardwareKey)
@@ -958,7 +999,13 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     }
 
     private func remoteModifiers(for hardwareKey: UIKey) -> [String] {
-        remoteModifiers(for: hardwareKey.modifierFlags)
+        var modifiers = remoteModifiers(for: hardwareKey.modifierFlags)
+        for usage in activeModifierUsages {
+            if let modifier = Self.modifierName(forHIDUsage: usage) {
+                modifiers.append(modifier)
+            }
+        }
+        return RemoteKeyboardInput.normalizedModifiers(modifiers)
     }
 
     private func remoteModifiers(for flags: UIKeyModifierFlags) -> [String] {
@@ -968,6 +1015,20 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
         if flags.contains(.control) { modifiers.append("control") }
         if flags.contains(.shift) { modifiers.append("shift") }
         return modifiers
+    }
+
+    private static func isModifierHIDUsage(_ usage: Int) -> Bool {
+        modifierName(forHIDUsage: usage) != nil
+    }
+
+    private static func modifierName(forHIDUsage usage: Int) -> String? {
+        switch usage {
+        case 224...225: return usage == 224 ? "control" : "shift"
+        case 226...227: return usage == 226 ? "option" : "command"
+        case 228...229: return usage == 228 ? "control" : "shift"
+        case 230...231: return usage == 230 ? "option" : "command"
+        default: return nil
+        }
     }
 
     private func configureGestures() {
@@ -1024,12 +1085,19 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
         discreteScroll.delegate = self
         addGestureRecognizer(discreteScroll)
 
+        // Keep pinch on UIKit's native recognizer. It receives the same
+        // direct touches as the iPad Magic Keyboard/trackpad surface and is
+        // deliberately independent from the two-finger scroll recognizer so
+        // a pinch is not classified as a scroll and dropped.
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         pinch.cancelsTouchesInView = false
         pinch.delegate = self
         addGestureRecognizer(pinch)
 
-        let touchScroll = RemoteScrollGestureRecognizer(target: self, action: #selector(handleScroll(_:)))
+        let touchScroll = RemoteScrollGestureRecognizer(
+            target: self,
+            action: #selector(handleScroll(_:))
+        )
         touchScroll.representsContinuousScroll = true
         touchScroll.minimumNumberOfTouches = 2
         touchScroll.maximumNumberOfTouches = 2
@@ -1146,8 +1214,27 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
             interval: pointerDoubleClickInterval,
             movedBeyondClickSlop: false
         )
-        onInput(.primaryDownAtCurrentPointer(clickCount: count))
-        onInput(.primaryUp(clickCount: count))
+        // A direct finger tap may arrive without a final hover/pointer packet
+        // (for example after the viewer resumes from the background). Anchor
+        // the click to the same normalized point used by the existing viewer
+        // geometry instead of relying on a possibly stale Mac cursor. This
+        // does not change the alignment transform; it only makes the click
+        // packet carry the point that was actually touched.
+        if let point = normalizedPoint(location) {
+            onInput(.primaryDown(
+                x: point.x,
+                y: point.y,
+                clickCount: count
+            ))
+            onInput(.primaryUp(
+                x: point.x,
+                y: point.y,
+                clickCount: count
+            ))
+        } else {
+            onInput(.primaryDownAtCurrentPointer(clickCount: count))
+            onInput(.primaryUp(clickCount: count))
+        }
     }
 
     @objc private func handlePointerPress(_ recognizer: PointerPressGestureRecognizer) {
@@ -1330,7 +1417,11 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
             isPrimaryDragging = true
             lastPointerTime = 0
             directTouchHoldLastLocation = point
-            onInput(.primaryDownAtCurrentPointer())
+            if let normalized = normalizedPoint(point) {
+                onInput(.primaryDown(x: normalized.x, y: normalized.y))
+            } else {
+                onInput(.primaryDownAtCurrentPointer())
+            }
         case .changed:
             guard isPrimaryDragging else { return }
             sendRelativePointer(from: directTouchHoldLastLocation, to: point)
@@ -1382,6 +1473,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     private func releaseRemoteButtons() {
         hardwareKeyRepeatTasks.values.forEach { $0.cancel() }
         hardwareKeyRepeatTasks.removeAll(keepingCapacity: true)
+        activeModifierUsages.removeAll(keepingCapacity: true)
         finishPrimaryDrag(at: nil)
         onInput(.releaseButtons())
     }
@@ -1483,49 +1575,30 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
             otherGestureRecognizer is PointerPressGestureRecognizer {
             return false
         }
-        if gestureRecognizer is UIPinchGestureRecognizer || otherGestureRecognizer is UIPinchGestureRecognizer {
+        if gestureRecognizer is UIPinchGestureRecognizer ||
+            otherGestureRecognizer is UIPinchGestureRecognizer {
             return false
         }
         return gestureRecognizer is UIPanGestureRecognizer || otherGestureRecognizer is UIPanGestureRecognizer
     }
 
     private func normalizedPoint(_ point: CGPoint) -> CGPoint? {
-        guard bounds.width > 0, bounds.height > 0, contentAspectRatio > 0 else { return nil }
-        let scale = max(zoomScale, 1)
-        let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        let point = CGPoint(
-            x: center.x + (point.x - center.x - zoomOffset.width) / scale,
-            y: center.y + (point.y - center.y - zoomOffset.height) / scale
-        )
-        let viewAspect = bounds.width / bounds.height
-        let contentRect: CGRect
-        if viewAspect > contentAspectRatio {
-            let width = bounds.height * contentAspectRatio
-            contentRect = CGRect(x: (bounds.width - width) / 2, y: 0, width: width, height: bounds.height)
-        } else {
-            let height = bounds.width / contentAspectRatio
-            contentRect = CGRect(x: 0, y: (bounds.height - height) / 2, width: bounds.width, height: height)
-        }
-        guard contentRect.contains(point) else { return nil }
-        return CGPoint(
-            x: (point.x - contentRect.minX) / contentRect.width,
-            y: (point.y - contentRect.minY) / contentRect.height
+        RemoteDisplayGeometry.normalizedPoint(
+            point,
+            in: bounds.size,
+            aspectRatio: contentAspectRatio,
+            zoomScale: zoomScale,
+            zoomOffset: zoomOffset
         )
     }
 
     private func normalizedDelta(from previous: CGPoint, to current: CGPoint) -> CGPoint? {
-        guard bounds.width > 0, bounds.height > 0, contentAspectRatio > 0 else { return nil }
-        let viewAspect = bounds.width / bounds.height
-        let contentSize: CGSize
-        if viewAspect > contentAspectRatio {
-            contentSize = CGSize(width: bounds.height * contentAspectRatio, height: bounds.height)
-        } else {
-            contentSize = CGSize(width: bounds.width, height: bounds.width / contentAspectRatio)
-        }
-        let scale = max(zoomScale, 1)
-        return CGPoint(
-            x: (current.x - previous.x) / max(contentSize.width * scale, 1),
-            y: (current.y - previous.y) / max(contentSize.height * scale, 1)
+        RemoteDisplayGeometry.normalizedDelta(
+            from: previous,
+            to: current,
+            in: bounds.size,
+            aspectRatio: contentAspectRatio,
+            zoomScale: zoomScale
         )
     }
 }

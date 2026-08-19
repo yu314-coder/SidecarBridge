@@ -49,7 +49,6 @@ final class MacPeerService: NSObject {
     private var mcConnectionWatchdog: DispatchWorkItem?
     private let mcVideoQueue = DispatchQueue(label: "SidecarBridge.MCVideo")
     private var mcVideoInFlight = Set<UInt64>()
-    private let mcVideoWindowSize = 6
     private var pendingMCVideo: [PendingMCVideo] = []
     private var mcWaitingForKeyFrame = false
     private var heartbeatTimer: DispatchSourceTimer?
@@ -57,6 +56,9 @@ final class MacPeerService: NSObject {
     private var lastPeerActivity = ProcessInfo.processInfo.systemUptime
     private var peerSupportsHeartbeat = false
     private var remoteViewerIsBackgrounded = false
+    // Mirror the iPad resume grace period so the Mac does not recover a
+    // healthy socket while iPadOS is still waking its Wi-Fi/AWDL route.
+    private var remoteViewerResumeGraceUntil: TimeInterval = 0
 
     override init() {
         session = MCSession(
@@ -118,9 +120,12 @@ final class MacPeerService: NSObject {
         remoteViewerIsBackgrounded = backgrounded
         heartbeatSentAt.removeAll(keepingCapacity: true)
         if backgrounded {
+            remoteViewerResumeGraceUntil = 0
             onConnectionHealthChanged?("Viewer suspended — preserving encrypted session", nil)
         } else {
-            lastPeerActivity = ProcessInfo.processInfo.systemUptime
+            let now = ProcessInfo.processInfo.systemUptime
+            lastPeerActivity = now
+            remoteViewerResumeGraceUntil = now + 15
             onConnectionHealthChanged?("Viewer returned — verifying encrypted session", nil)
         }
     }
@@ -159,10 +164,13 @@ final class MacPeerService: NSObject {
         if lanConnected {
             lan.sendVideoFrame(frame)
         } else if mcConnected,
-                  !session.connectedPeers.isEmpty,
-                  let data = try? PacketCodec.encode(.video(frame)) {
+                  !session.connectedPeers.isEmpty {
             mcVideoQueue.async { [weak self] in
-                self?.enqueueMCVideo(PendingMCVideo(
+                guard let self,
+                      self.mcConnected,
+                      !self.session.connectedPeers.isEmpty,
+                      let data = try? PacketCodec.encode(.video(frame)) else { return }
+                self.enqueueMCVideo(PendingMCVideo(
                     sequence: frame.sequence,
                     isKeyFrame: frame.isKeyFrame,
                     data: data
@@ -192,48 +200,39 @@ final class MacPeerService: NSObject {
             return
         }
 
-        if pendingMCVideo.count < 2 {
-            pendingMCVideo.append(video)
-            sendNextMCVideoIfPossible()
-        } else {
-            pendingMCVideo.removeAll(keepingCapacity: true)
-            mcWaitingForKeyFrame = true
-            onKeyFrameNeeded?()
-            if video.isKeyFrame {
-                mcWaitingForKeyFrame = false
-                pendingMCVideo = [video]
-            }
+        // Multipeer's reliable channel is also used for keyboard, pointer
+        // buttons, shortcuts, and pairing. Queuing H.264 frames there made a
+        // slow nearby link head-of-line-block input. Keep only the newest
+        // frame and send it unreliably; a dropped inter-frame is recovered by
+        // the encoder's periodic/requested key frame instead of blocking the
+        // reliable input channel.
+        if let pendingKeyFrame = pendingMCVideo.last?.isKeyFrame,
+           pendingKeyFrame,
+           !video.isKeyFrame {
+            return
         }
+        pendingMCVideo = [video]
+        sendNextMCVideoIfPossible()
     }
 
     private func sendNextMCVideoIfPossible() {
         guard mcConnected, !session.connectedPeers.isEmpty else { return }
-        while mcVideoInFlight.count < mcVideoWindowSize, !pendingMCVideo.isEmpty {
-            let video = pendingMCVideo.removeFirst()
-            do {
-                guard let mcSecureSession else {
-                    throw SecurePacketSession.SecurePacketError.invalidEnvelope
-                }
-                try session.send(
-                    mcSecureSession.seal(video.data),
-                    toPeers: session.connectedPeers,
-                    with: .reliable
-                )
-                mcVideoInFlight.insert(video.sequence)
-                mcVideoQueue.asyncAfter(deadline: .now() + 2) { [weak self] in
-                    guard let self, self.mcVideoInFlight.contains(video.sequence) else { return }
-                    self.mcVideoInFlight.removeAll(keepingCapacity: true)
-                    self.pendingMCVideo.removeAll(keepingCapacity: true)
-                    self.mcWaitingForKeyFrame = true
-                    self.onKeyFrameNeeded?()
-                }
-            } catch {
-                mcVideoInFlight.removeAll(keepingCapacity: true)
-                pendingMCVideo.removeAll(keepingCapacity: true)
-                mcWaitingForKeyFrame = true
-                onKeyFrameNeeded?()
-                return
+        guard let video = pendingMCVideo.popLast() else { return }
+        do {
+            guard let mcSecureSession else {
+                throw SecurePacketSession.SecurePacketError.invalidEnvelope
             }
+            try session.send(
+                mcSecureSession.seal(video.data),
+                toPeers: session.connectedPeers,
+                with: .unreliable
+            )
+            mcVideoInFlight.remove(video.sequence)
+        } catch {
+            pendingMCVideo.removeAll(keepingCapacity: true)
+            mcVideoInFlight.removeAll(keepingCapacity: true)
+            mcWaitingForKeyFrame = true
+            onKeyFrameNeeded?()
         }
     }
 
@@ -271,6 +270,7 @@ final class MacPeerService: NSObject {
             let token = String(detail.dropFirst("heartbeat-pong:".count))
             guard let sentAt = heartbeatSentAt.removeValue(forKey: token) else { return }
             peerSupportsHeartbeat = true
+            remoteViewerResumeGraceUntil = 0
             let latency = max(0, Int((ProcessInfo.processInfo.systemUptime - sentAt) * 1_000))
             onConnectionHealthChanged?("Encrypted link healthy", latency)
         }
@@ -317,6 +317,9 @@ final class MacPeerService: NSObject {
             return
         }
         let now = ProcessInfo.processInfo.systemUptime
+        if now < remoteViewerResumeGraceUntil {
+            return
+        }
         if RemoteSessionLifecyclePolicy.shouldRecoverStaleConnection(
             isViewerBackgrounded: remoteViewerIsBackgrounded,
             peerSupportsHeartbeat: peerSupportsHeartbeat,
@@ -337,6 +340,7 @@ final class MacPeerService: NSObject {
     }
 
     private func recoverStaleConnection(reason: String) {
+        remoteViewerResumeGraceUntil = 0
         onConnectionHealthChanged?("Recovering stale connection", nil)
         onP2PStateChanged?(.recovering(reason))
         stopHeartbeat()
@@ -358,9 +362,17 @@ final class MacPeerService: NSObject {
         fallbackWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.started, !self.lanConnected, !self.advertiserRunning else { return }
+            var discoveryInfo = ["role": "mac"]
+            if let hosts = BridgeNetworkMetadata.encodedLocalPrivateIPv4Addresses() {
+                // Bonjour/mDNS can be filtered by an access point even while
+                // Multipeer discovery works. Give the iPad direct candidates
+                // so it can try the encrypted LAN path before using the
+                // lower-bandwidth nearby transport.
+                discoveryInfo[BridgeConstants.hostsTXTKey] = hosts
+            }
             let advertiser = MCNearbyServiceAdvertiser(
                 peer: self.peerID,
-                discoveryInfo: ["role": "mac"],
+                discoveryInfo: discoveryInfo,
                 serviceType: BridgeConstants.serviceType
             )
             advertiser.delegate = self
@@ -568,7 +580,12 @@ final class MacPeerService: NSObject {
     ) {
         guard let mcSecureSession,
               let encrypted = try? mcSecureSession.seal(packet) else { return }
-        try? session.send(encrypted, toPeers: peers, with: mode)
+        do {
+            try session.send(encrypted, toPeers: peers, with: mode)
+        } catch {
+            let delivery = mode == .reliable ? "reliable" : "unreliable"
+            print("[SidecarBridge/P2P] send \(delivery) packet failed: \(error.localizedDescription)")
+        }
     }
 
     private func restartMultipeerAdvertisingAfterDisconnect() {

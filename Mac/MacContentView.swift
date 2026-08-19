@@ -26,10 +26,8 @@ struct MacContentView: View {
                     statusCard
                     quickActionsCard
                     modeCards
-                    #if !SIDECARBRIDGE_APP_STORE_SAFE
-                    shortcutTestCard
-                    #endif
                     fileTransferCard
+                    clipboardCard
                     permissionCard
                     systemInformationCard
                     startupCard
@@ -45,42 +43,6 @@ struct MacContentView: View {
         }
     }
 
-    #if !SIDECARBRIDGE_APP_STORE_SAFE
-    private var shortcutTestCard: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 5) {
-                Label("Mission Control shortcut test", systemImage: "keyboard")
-                    .font(.headline)
-                Text(model.shortcutTestStatus)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.62))
-            }
-            Spacer()
-            ForEach(["left", "right", "down", "up"], id: \.self) { key in
-                Button("⌃\(arrow(for: key))") { model.testControlShortcut(key) }
-                    .buttonStyle(.bordered)
-                    .help("Inject Control-\(arrow(for: key)) locally")
-            }
-            Button("⌥Click") { model.testModifierClick(["option"]) }
-                .buttonStyle(.bordered)
-                .help("Inject an Option-click at the current Mac pointer")
-            Button("⇧Click") { model.testModifierClick(["shift"]) }
-                .buttonStyle(.bordered)
-                .help("Inject a Shift-click at the current Mac pointer")
-            Button("⌥⇧Click") { model.testModifierClick(["option", "shift"]) }
-                .buttonStyle(.bordered)
-                .help("Inject an Option-Shift-click at the current Mac pointer")
-        }
-        .padding(16)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
-    }
-
-    private func arrow(for key: String) -> String {
-        ["left": "←", "right": "→", "down": "↓", "up": "↑"][key] ?? key
-    }
-    #endif
-
     private var header: some View {
         HStack(spacing: 18) {
             Image("BrandMark")
@@ -92,15 +54,9 @@ struct MacContentView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text("SidecarBridge")
                     .font(.system(size: 32, weight: .bold, design: .rounded))
-                #if SIDECARBRIDGE_APP_STORE_SAFE
-                Text("Your screen on iPad, with a private local connection.")
-                    .font(.headline)
-                    .foregroundStyle(.white.opacity(0.62))
-                #else
                 Text("Your Mac screen, with the iPad keyboard and trackpad.")
                     .font(.headline)
                     .foregroundStyle(.white.opacity(0.62))
-                #endif
             }
             Spacer()
             Text("MAC")
@@ -114,34 +70,59 @@ struct MacContentView: View {
     }
 
     private var statusCard: some View {
-        HStack(spacing: 16) {
-            ZStack {
-                Circle().fill(statusColor.opacity(0.16))
-                Image(systemName: model.isStreaming ? "dot.radiowaves.left.and.right" : "ipad.and.arrow.forward")
-                    .font(.system(size: 25, weight: .semibold))
-                    .foregroundStyle(statusColor)
-            }
-            .frame(width: 54, height: 54)
+        VStack(alignment: .leading, spacing: 15) {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle().fill(statusColor.opacity(0.16))
+                    Image(systemName: model.isStreaming ? "dot.radiowaves.left.and.right" : "ipad.and.arrow.forward")
+                        .font(.system(size: 25, weight: .semibold))
+                        .foregroundStyle(statusColor)
+                }
+                .frame(width: 54, height: 54)
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text(model.status)
-                    .font(.title3.bold())
-                Text(model.detail)
-                    .font(.callout)
-                    .foregroundStyle(.white.opacity(0.62))
-                    .textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(model.sessionSummaryTitle)
+                        .font(.title3.bold())
+                    Text(model.sessionSummaryDetail)
+                        .font(.callout)
+                        .foregroundStyle(.white.opacity(0.62))
+                        .textSelection(.enabled)
+                }
+                Spacer(minLength: 12)
+                HStack(spacing: 7) {
+                    Circle().fill(statusColor).frame(width: 8, height: 8)
+                    Text(model.sessionBadge)
+                        .font(.caption2.bold())
+                        .tracking(1)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
+                .background(statusColor.opacity(0.13), in: Capsule())
+                .foregroundStyle(statusColor)
             }
-            Spacer(minLength: 12)
-            HStack(spacing: 7) {
-                Circle().fill(statusColor).frame(width: 8, height: 8)
-                Text(model.isStreaming ? "LIVE" : model.hasPadPeer ? "CONNECTED" : "READY")
-                    .font(.caption2.bold())
-                    .tracking(1)
+
+            HStack(spacing: 10) {
+                Label(
+                    model.hasPadPeer ? model.connectionTransport : "Direct Wi-Fi/AWDL and nearby P2P listener",
+                    systemImage: model.hasPadPeer ? "lock.fill" : "dot.radiowaves.left.and.right"
+                )
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.55))
+                Spacer()
+                if model.isStreaming {
+                    Button("Stop In-App Display") { model.stopFallback() }
+                        .buttonStyle(.bordered)
+                        .tint(.orange)
+                } else if model.hasPadPeer {
+                    Button("Start In-App Display") { model.startFallback() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.cyan)
+                } else {
+                    Text("Open the iPad app to connect")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.42))
+                }
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
-            .background(statusColor.opacity(0.13), in: Capsule())
-            .foregroundStyle(statusColor)
         }
         .padding(18)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -302,37 +283,28 @@ struct MacContentView: View {
                 }
             }
 
-            #if !SIDECARBRIDGE_APP_STORE_SAFE
             Divider().overlay(.white.opacity(0.08))
 
             PermissionRow(
                 icon: "keyboard.badge.ellipsis",
                 title: "Keyboard & trackpad",
-                detail: model.remoteInputAuthorized ? "Accessibility input is enabled" : "Accessibility permission required",
+                detail: model.remoteInputAuthorized
+                    ? "Keyboard, trackpad, and scroll event posting are enabled"
+                    : "Allow SidecarBridge to post keyboard and pointer events",
                 isReady: model.remoteInputAuthorized
             ) {
                 if !model.remoteInputAuthorized {
-                    Button("Open Accessibility") { model.enableRemoteInput() }
+                    Button("Allow Remote Input") { model.enableRemoteInput() }
                     Button("Show App") { model.revealApplication() }
                 }
             }
-            #else
-            Divider().overlay(.white.opacity(0.08))
-            PermissionRow(
-                icon: "rectangle.on.rectangle",
-                title: "Mac App Store viewer edition",
-                detail: "Remote keyboard and trackpad control is provided by the direct companion build.",
-                isReady: true,
-                stateLabel: "VIEWER"
-            ) { EmptyView() }
-            #endif
 
             Divider().overlay(.white.opacity(0.08))
 
             PermissionRow(
                 icon: "lock.badge.clock",
                 title: "First-time secure pairing code",
-                detail: "\(model.pairingCode) • 16 characters, expires after five minutes, and is replaced by a Keychain credential.",
+                detail: "\(model.pairingCode) • 16 digits shown as four groups with dashes; expires after five minutes and is replaced by a Keychain credential.",
                 isReady: true,
                 stateLabel: "ONE-TIME"
             ) {
@@ -351,27 +323,15 @@ struct MacContentView: View {
     }
 
     private var inAppDisplayDescription: String {
-        #if SIDECARBRIDGE_APP_STORE_SAFE
-        return "Encrypted same-Wi-Fi screen stream for private viewing on iPad."
-        #else
         return "Encrypted same-Wi-Fi screen stream with Magic Keyboard, trackpad, touch, and Pencil input."
-        #endif
     }
 
     private var systemDisplayTitle: String {
-        #if SIDECARBRIDGE_APP_STORE_SAFE
-        return "System Display Settings"
-        #else
         return "System Sidecar"
-        #endif
     }
 
     private var systemDisplayDescription: String {
-        #if SIDECARBRIDGE_APP_STORE_SAFE
-        return "Opens the system display settings. This companion uses only public APIs."
-        #else
-        return "Opens Displays settings so you can choose Apple Sidecar. The direct companion uses public APIs for this system action."
-        #endif
+        return "Opens Displays settings so you can choose Apple's built-in display feature."
     }
 
     private var fileTransferCard: some View {
@@ -402,7 +362,7 @@ struct MacContentView: View {
                     } else if let error = model.fileTransferError {
                         Text(error).font(.caption).foregroundStyle(.orange)
                     } else {
-                        Text("Send one or more files to the iPad, or receive into Downloads/SidecarBridge Transfers.")
+                        Text("Send one or more files to the iPad, or receive into SidecarBridge's private Transfers folder.")
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.55))
                     }
@@ -436,6 +396,50 @@ struct MacContentView: View {
                         .buttonStyle(.bordered)
                 }
             }
+        }
+        .padding(17)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+    }
+
+    private var clipboardCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "doc.on.clipboard.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.purple)
+                    .frame(width: 44, height: 44)
+                    .background(.purple.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Clipboard transfer").font(.headline)
+                    Text("Move text in either direction with one tap. Clipboard contents stay opt-in.")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.58))
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    model.requestPadClipboard()
+                } label: {
+                    Label("Copy iPad → Mac", systemImage: "arrow.down.doc")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.purple)
+                .disabled(!model.hasPadPeer)
+
+                Button {
+                    model.sendClipboardToPad()
+                } label: {
+                    Label("Send Mac → iPad", systemImage: "arrow.up.doc")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!model.hasPadPeer)
+            }
+
+            Text(model.clipboardTransferStatus)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.62))
         }
         .padding(17)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -602,11 +606,9 @@ struct MacContentView: View {
             Spacer()
             Button("Displays Settings") { model.openDisplaysSettings() }
                 .buttonStyle(.link)
-            #if !SIDECARBRIDGE_APP_STORE_SAFE
             if !model.reachableSidecarDevices.isEmpty {
                 Text("Apple Sidecar: \(model.reachableSidecarDevices.joined(separator: ", "))")
             }
-            #endif
         }
         .font(.caption)
         .foregroundStyle(.white.opacity(0.42))

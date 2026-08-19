@@ -7,37 +7,25 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		059BC3AD739693C36520932C /* MainQueueExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0A09A2C484EA8062D7FAD7C /* MainQueueExecutor.swift */; };
 		05C40EDEFB916FC2A2DEB7A4 /* MacPeerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 068FB904EF6CA41BBDCF4992 /* MacPeerService.swift */; };
-		090BE96F320BEA5D2813B616 /* RemoteInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD3847ACDC7DFFDCCBAC490 /* RemoteInputController.swift */; };
 		0A6EC89FFFAC699185EA8EB6 /* PacketCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C270B0D7506B1B8A83205AC3 /* PacketCodecTests.swift */; };
 		0B337B768F061F2FD7CB58D1 /* RemoteTextDelta.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2D5FA8EF5650AFCFE710FD8 /* RemoteTextDelta.swift */; };
 		0F1A65FF0EB6D78056A41646 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6931674BFB3F75F81BCA5C59 /* Network.framework */; };
-		10CF5551F5B0CD40FF8D5FF8 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2244FD217DF03045706FB4DD /* PrivacyInfo.xcprivacy */; };
-		116574C6B256DAF400EEDCDD /* SidecarBridgeMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A47529E9BB2E0E36EC5D5C4 /* SidecarBridgeMacApp.swift */; };
 		136F9FBF23D970658AD94CAD /* ScreenStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */; };
 		154E5AB99E78F33E381C5A3F /* RemoteInputLanguageState.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD61B12D30F5060118D8D060 /* RemoteInputLanguageState.swift */; };
 		1A2A594605AD0CDD16288BD7 /* PairingSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E761A2ACE33A1FF2E676C1 /* PairingSecurity.swift */; };
 		1B099F584710DD4062CF3E75 /* SystemInformation.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE7DA9C5B96E49B459CB9359 /* SystemInformation.swift */; };
-		1BEA576B10D776B074EBE535 /* RemoteInputLanguageState.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD61B12D30F5060118D8D060 /* RemoteInputLanguageState.swift */; };
 		20B298BCDAC275DC4E471CF0 /* LocalAuthentication.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F3E2A19AD0FE529BC023FD81 /* LocalAuthentication.framework */; };
 		260A8266864871B3766E5BBA /* RemoteInputLanguageState.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD61B12D30F5060118D8D060 /* RemoteInputLanguageState.swift */; };
-		27DF6FDD7BAE5E0C201AE813 /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */; };
 		28409B33478CD0C30D1765CC /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
-		29C3D2797F90058D4F075821 /* MacLANService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74E92BAEB461529898894895 /* MacLANService.swift */; };
 		2DE9DD403F558013C9EFB8F1 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B52029E2120BA39ED6507A8 /* Security.framework */; };
-		2FCBE98FF609032F32F8FFE6 /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
-		32DED8AE5A7C9B6A0395B609 /* MacShutdownCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56DF645E6C1593B359A7A622 /* MacShutdownCoordinator.swift */; };
-		341FDA09E1491BA3B16AFDA2 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B52029E2120BA39ED6507A8 /* Security.framework */; };
 		34BD90A03AAF1334454D9850 /* PadContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B074CA5AC5C67EC30F9A42EA /* PadContentView.swift */; };
 		35BF87461BAD13C706604E5A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 722C341A866CEB112E6AE410 /* Assets.xcassets */; };
 		3B3347A2045CD1A250163F3B /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C128FA50735B8EF865A75273 /* BridgeProtocol.swift */; };
 		3E55D2E99A56C8D41D376274 /* PairingSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E761A2ACE33A1FF2E676C1 /* PairingSecurity.swift */; };
-		3F004C1702381B2845D17CB7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 722C341A866CEB112E6AE410 /* Assets.xcassets */; };
 		3F3DBD84934E913F0B53A640 /* RemoteTextDelta.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2D5FA8EF5650AFCFE710FD8 /* RemoteTextDelta.swift */; };
 		3F656BFEE9F000BE8F25F32A /* MainQueueExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0A09A2C484EA8062D7FAD7C /* MainQueueExecutor.swift */; };
 		3FD9087ADD82977C0EC13AA1 /* PairingSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E761A2ACE33A1FF2E676C1 /* PairingSecurity.swift */; };
-		40A565445B4FE8B279084825 /* MacDeviceAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC5BF383941F9C156E7F434 /* MacDeviceAuthorization.swift */; };
 		4145B17A8C27484CAE6FA820 /* FileTransferEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */; };
 		4179193B540F02A36A7DF0DF /* LANProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */; };
 		44778D308D034459FF6C8C19 /* PadLANService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D9BF92830E37416BC52E328 /* PadLANService.swift */; };
@@ -46,21 +34,11 @@
 		4C8E982163B11BFE3240B06C /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C128FA50735B8EF865A75273 /* BridgeProtocol.swift */; };
 		4F20AB25974ACF595AB7A02F /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C42FA478C6EEBF14951CE4F4 /* Carbon.framework */; };
 		5021588D18791766FA8C613E /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 09EF8EAB93178074C7D6559D /* ServiceManagement.framework */; };
-		512B7885A4342227F152E796 /* DirectInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 642278EC2DE55C1C54F0DF22 /* DirectInfo.plist */; };
-		5A3FD228829688D95699C6FD /* ScreenCaptureKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C215B5E7806DF0EE7746B9C6 /* ScreenCaptureKit.framework */; };
 		5B34959ED24406173D9A3F1A /* MainQueueExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0A09A2C484EA8062D7FAD7C /* MainQueueExecutor.swift */; };
 		605E1E80BBA2869CC7BD4D80 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2688DB8C49E0676ABEF1A885 /* PrivacyInfo.xcprivacy */; };
 		6611C2566550F8C25E509AC5 /* MacConnectionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */; };
 		6AAB9BD6EC5C4CDD49C29543 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2244FD217DF03045706FB4DD /* PrivacyInfo.xcprivacy */; };
-		6EF3C57CE799E1DD4FC277B4 /* H264Encoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C55DE7760B526EE98A4C2A /* H264Encoder.swift */; };
 		6F1F78888D0A2E48006FFAAF /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6931674BFB3F75F81BCA5C59 /* Network.framework */; };
-		70EA24FABC71778B73FC1F4F /* LocalAuthentication.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F3E2A19AD0FE529BC023FD81 /* LocalAuthentication.framework */; };
-		70FB29193458F6E127771A9B /* SidecarConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875676002A874A36BB721BDD /* SidecarConnector.swift */; };
-		72200C15F56E877E890C1DEB /* Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 34875BE7BD3F9883AEFE56C5 /* Info.plist */; };
-		72D92666608DBE845952F165 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6931674BFB3F75F81BCA5C59 /* Network.framework */; };
-		746FCAE02EEE3826BF7C9ED6 /* RemoteTextDelta.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2D5FA8EF5650AFCFE710FD8 /* RemoteTextDelta.swift */; };
-		765D7F3CC66776ECD0DAD5D0 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */; };
-		79336C71F9CF17D47D08CF54 /* MacContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4316F908EA1732F27087B925 /* MacContentView.swift */; };
 		80FA3B6C5CA37DA293EDEE78 /* MacContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4316F908EA1732F27087B925 /* MacContentView.swift */; };
 		81ED97DD9B5D381D636F49E4 /* SystemInformation.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE7DA9C5B96E49B459CB9359 /* SystemInformation.swift */; };
 		875EB2F7C4A025AC74DAA63F /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 487CD2D42D52E0E526CCA155 /* AVKit.framework */; };
@@ -69,22 +47,15 @@
 		8BF65511D829825BA5768DE3 /* H264Encoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46C55DE7760B526EE98A4C2A /* H264Encoder.swift */; };
 		8BF6837887D06508B554992B /* RemoteTextDelta.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2D5FA8EF5650AFCFE710FD8 /* RemoteTextDelta.swift */; };
 		8D467B67CF7786EEA5045A38 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B5BBAA34470E4D405231752F /* AVFoundation.framework */; };
-		8F4110CABA9BCD4EE672ABC4 /* MacPeerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 068FB904EF6CA41BBDCF4992 /* MacPeerService.swift */; };
-		91F9DBDBFE1BA5FD70ECFBA2 /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 09EF8EAB93178074C7D6559D /* ServiceManagement.framework */; };
 		92B2D5720EB7A79457B2308D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5BFDF69103D50AB830DBBC34 /* Assets.xcassets */; };
-		98596F11F51F177BA5E07F09 /* ScreenStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */; };
 		A11C3D60796289052EEE84A5 /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */; };
 		A461F9BE2A202A46BD1AB1E1 /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C128FA50735B8EF865A75273 /* BridgeProtocol.swift */; };
-		A4AB701B628079483BCA61D8 /* PairingSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E761A2ACE33A1FF2E676C1 /* PairingSecurity.swift */; };
 		AE58CE3B6126833BE8F35893 /* SidecarBridgePadApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0498686ABD4560A441EB7B0A /* SidecarBridgePadApp.swift */; };
 		B3EB497F5D6CA7BE9944E643 /* MacShutdownCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56DF645E6C1593B359A7A622 /* MacShutdownCoordinator.swift */; };
 		B4C95DAABC9C51DA336AACED /* ShutdownProtectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F56B763694D517FFB925EA1F /* ShutdownProtectionPolicy.swift */; };
 		B6EEF0774D2870D93A451FCE /* SidecarConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875676002A874A36BB721BDD /* SidecarConnector.swift */; };
-		B7D48B2D0D0C1D442D833E8F /* ShutdownProtectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F56B763694D517FFB925EA1F /* ShutdownProtectionPolicy.swift */; };
 		B813704EF97E4288E3747C1E /* SidecarBridgeMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A47529E9BB2E0E36EC5D5C4 /* SidecarBridgeMacApp.swift */; };
 		B83F67487E628FE3195562CA /* MacLANService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74E92BAEB461529898894895 /* MacLANService.swift */; };
-		B8CD872BF426035C7EC6B9BE /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C128FA50735B8EF865A75273 /* BridgeProtocol.swift */; };
-		B9BBDE0B4A40BEF9699B53EC /* SystemInformation.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE7DA9C5B96E49B459CB9359 /* SystemInformation.swift */; };
 		BB94E33810371F48190B51FF /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */; };
 		BEC6E52110E54E537F5B89BD /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B52029E2120BA39ED6507A8 /* Security.framework */; };
 		C5741A0FA3C65F02D5D6BB85 /* FileTransferEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */; };
@@ -97,11 +68,8 @@
 		DDD681F579FE17C68A57FF20 /* RemoteInputSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */; };
 		E277CF7C68908D7AB4FA2DC6 /* MacDeviceAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC5BF383941F9C156E7F434 /* MacDeviceAuthorization.swift */; };
 		EF96FEDBEB9021AEBB5607E4 /* VideoDisplaySurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECEBB8AE7F4ECF8E0D6ADF61 /* VideoDisplaySurface.swift */; };
-		F0842699B408D6C212DF59E7 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C42FA478C6EEBF14951CE4F4 /* Carbon.framework */; };
-		F0DBCF0329B6058D2E61FF6D /* MacConnectionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */; };
 		F21D85957D037CD13A0BD638 /* ShutdownProtectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F56B763694D517FFB925EA1F /* ShutdownProtectionPolicy.swift */; };
 		F53696C5A9D0E99ACEA17578 /* SystemInformation.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE7DA9C5B96E49B459CB9359 /* SystemInformation.swift */; };
-		F5D5BAF2B8128B36D2479D0D /* FileTransferEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */; };
 		F8B43CC43FFBE5550CF68338 /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C77EC1B8575D5AB3F18C18C2 /* GameController.framework */; };
 		FBDC2A47CAC1ACB40AA3BCDF /* MultipeerConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9222E572CA65F8A6685181CF /* MultipeerConnectivity.framework */; };
 		FEF077EFBA61BCD06B63DB8C /* PadDeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C73B3B16472356E5FE1B1A58 /* PadDeviceIdentity.swift */; };
@@ -125,8 +93,6 @@
 		5BFDF69103D50AB830DBBC34 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5DC5BF383941F9C156E7F434 /* MacDeviceAuthorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacDeviceAuthorization.swift; sourceTree = "<group>"; };
 		5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteInputSurface.swift; sourceTree = "<group>"; };
-		6366697D1A53BA58139ECCBA /* SidecarBridgeMacDirect.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SidecarBridgeMacDirect.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		642278EC2DE55C1C54F0DF22 /* DirectInfo.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = DirectInfo.plist; sourceTree = "<group>"; };
 		6931674BFB3F75F81BCA5C59 /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
 		6B52029E2120BA39ED6507A8 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		722C341A866CEB112E6AE410 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -153,7 +119,6 @@
 		C77EC1B8575D5AB3F18C18C2 /* GameController.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameController.framework; path = System/Library/Frameworks/GameController.framework; sourceTree = SDKROOT; };
 		CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LANProtocol.swift; sourceTree = "<group>"; };
 		CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
-		D73C3A73767BAB656A253823 /* SidecarBridgeMacDirect.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SidecarBridgeMacDirect.entitlements; sourceTree = "<group>"; };
 		E5E700FBB5674124211D2524 /* PadConnectionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadConnectionModel.swift; sourceTree = "<group>"; };
 		E7C4B161D91984971FF7309C /* PadPeerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadPeerService.swift; sourceTree = "<group>"; };
 		ECEBB8AE7F4ECF8E0D6ADF61 /* VideoDisplaySurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDisplaySurface.swift; sourceTree = "<group>"; };
@@ -174,21 +139,6 @@
 				875EB2F7C4A025AC74DAA63F /* AVKit.framework in Frameworks */,
 				F8B43CC43FFBE5550CF68338 /* GameController.framework in Frameworks */,
 				8772700EECC1261EF4841DF7 /* Security.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		5E99CD8CA1E300E7CC51A4A8 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				5A3FD228829688D95699C6FD /* ScreenCaptureKit.framework in Frameworks */,
-				27DF6FDD7BAE5E0C201AE813 /* MultipeerConnectivity.framework in Frameworks */,
-				91F9DBDBFE1BA5FD70ECFBA2 /* ServiceManagement.framework in Frameworks */,
-				72D92666608DBE845952F165 /* Network.framework in Frameworks */,
-				765D7F3CC66776ECD0DAD5D0 /* VideoToolbox.framework in Frameworks */,
-				70EA24FABC71778B73FC1F4F /* LocalAuthentication.framework in Frameworks */,
-				341FDA09E1491BA3B16AFDA2 /* Security.framework in Frameworks */,
-				F0842699B408D6C212DF59E7 /* Carbon.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -222,7 +172,6 @@
 			isa = PBXGroup;
 			children = (
 				722C341A866CEB112E6AE410 /* Assets.xcassets */,
-				642278EC2DE55C1C54F0DF22 /* DirectInfo.plist */,
 				46C55DE7760B526EE98A4C2A /* H264Encoder.swift */,
 				34875BE7BD3F9883AEFE56C5 /* Info.plist */,
 				A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */,
@@ -236,7 +185,6 @@
 				AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */,
 				93CB5164889E245469D18E50 /* SidecarBridgeMac.entitlements */,
 				8A47529E9BB2E0E36EC5D5C4 /* SidecarBridgeMacApp.swift */,
-				D73C3A73767BAB656A253823 /* SidecarBridgeMacDirect.entitlements */,
 				875676002A874A36BB721BDD /* SidecarConnector.swift */,
 			);
 			path = Mac;
@@ -318,7 +266,6 @@
 			isa = PBXGroup;
 			children = (
 				796A25DB4ABDCDB1108CC28F /* SidecarBridgeMac.app */,
-				6366697D1A53BA58139ECCBA /* SidecarBridgeMacDirect.app */,
 				1D42BDECCE5EF18BD39F0173 /* SidecarBridgePad.app */,
 				83E1072643E5526D82D2EFE9 /* SidecarBridgeTests.xctest */,
 			);
@@ -345,25 +292,6 @@
 			);
 			productName = SidecarBridgePad;
 			productReference = 1D42BDECCE5EF18BD39F0173 /* SidecarBridgePad.app */;
-			productType = "com.apple.product-type.application";
-		};
-		9CB03395FF8D0F3A74A1F0A5 /* SidecarBridgeMacDirect */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 1A719D1EE90F391F74546EB8 /* Build configuration list for PBXNativeTarget "SidecarBridgeMacDirect" */;
-			buildPhases = (
-				E0F07C2B4227841B075B5BAA /* Sources */,
-				DC01D2E394E6D11769535FF4 /* Resources */,
-				5E99CD8CA1E300E7CC51A4A8 /* Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = SidecarBridgeMacDirect;
-			packageProductDependencies = (
-			);
-			productName = SidecarBridgeMacDirect;
-			productReference = 6366697D1A53BA58139ECCBA /* SidecarBridgeMacDirect.app */;
 			productType = "com.apple.product-type.application";
 		};
 		AA42C4F067082A54E6D97C29 /* SidecarBridgeMac */ = {
@@ -416,10 +344,6 @@
 						DevelopmentTeam = LYK4LV2859;
 						ProvisioningStyle = Automatic;
 					};
-					9CB03395FF8D0F3A74A1F0A5 = {
-						DevelopmentTeam = LYK4LV2859;
-						ProvisioningStyle = Automatic;
-					};
 					AA42C4F067082A54E6D97C29 = {
 						DevelopmentTeam = LYK4LV2859;
 						ProvisioningStyle = Automatic;
@@ -444,7 +368,6 @@
 			projectRoot = "";
 			targets = (
 				AA42C4F067082A54E6D97C29 /* SidecarBridgeMac */,
-				9CB03395FF8D0F3A74A1F0A5 /* SidecarBridgeMacDirect */,
 				13D5AEC0CBFE55D643E7DAEA /* SidecarBridgePad */,
 				AC888CE8BE4AF79DBFE5116F /* SidecarBridgeTests */,
 			);
@@ -457,7 +380,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				35BF87461BAD13C706604E5A /* Assets.xcassets in Resources */,
-				512B7885A4342227F152E796 /* DirectInfo.plist in Resources */,
 				6AAB9BD6EC5C4CDD49C29543 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -468,16 +390,6 @@
 			files = (
 				92B2D5720EB7A79457B2308D /* Assets.xcassets in Resources */,
 				605E1E80BBA2869CC7BD4D80 /* PrivacyInfo.xcprivacy in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		DC01D2E394E6D11769535FF4 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				3F004C1702381B2845D17CB7 /* Assets.xcassets in Resources */,
-				72200C15F56E877E890C1DEB /* Info.plist in Resources */,
-				10CF5551F5B0CD40FF8D5FF8 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -552,33 +464,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		E0F07C2B4227841B075B5BAA /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				B8CD872BF426035C7EC6B9BE /* BridgeProtocol.swift in Sources */,
-				F5D5BAF2B8128B36D2479D0D /* FileTransferEngine.swift in Sources */,
-				6EF3C57CE799E1DD4FC277B4 /* H264Encoder.swift in Sources */,
-				2FCBE98FF609032F32F8FFE6 /* LANProtocol.swift in Sources */,
-				F0DBCF0329B6058D2E61FF6D /* MacConnectionModel.swift in Sources */,
-				79336C71F9CF17D47D08CF54 /* MacContentView.swift in Sources */,
-				40A565445B4FE8B279084825 /* MacDeviceAuthorization.swift in Sources */,
-				29C3D2797F90058D4F075821 /* MacLANService.swift in Sources */,
-				8F4110CABA9BCD4EE672ABC4 /* MacPeerService.swift in Sources */,
-				32DED8AE5A7C9B6A0395B609 /* MacShutdownCoordinator.swift in Sources */,
-				059BC3AD739693C36520932C /* MainQueueExecutor.swift in Sources */,
-				A4AB701B628079483BCA61D8 /* PairingSecurity.swift in Sources */,
-				090BE96F320BEA5D2813B616 /* RemoteInputController.swift in Sources */,
-				1BEA576B10D776B074EBE535 /* RemoteInputLanguageState.swift in Sources */,
-				746FCAE02EEE3826BF7C9ED6 /* RemoteTextDelta.swift in Sources */,
-				98596F11F51F177BA5E07F09 /* ScreenStreamer.swift in Sources */,
-				B7D48B2D0D0C1D442D833E8F /* ShutdownProtectionPolicy.swift in Sources */,
-				116574C6B256DAF400EEDCDD /* SidecarBridgeMacApp.swift in Sources */,
-				70FB29193458F6E127771A9B /* SidecarConnector.swift in Sources */,
-				B9BBDE0B4A40BEF9699B53EC /* SystemInformation.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
@@ -616,7 +501,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 39;
+				CURRENT_PROJECT_VERSION = 61;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = LYK4LV2859;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -661,7 +546,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
 				PRODUCT_NAME = SidecarBridge;
 				SDKROOT = macosx;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) SIDECARBRIDGE_APP_STORE_SAFE";
 			};
 			name = Release;
 		};
@@ -687,15 +571,15 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 40;
+				CURRENT_PROJECT_VERSION = 70;
 				INFOPLIST_FILE = Pad/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
 				PRODUCT_NAME = SidecarBridge;
-				MARKETING_VERSION = 1.0;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -718,67 +602,21 @@
 			};
 			name = Debug;
 		};
-		A7387132C64B5998332B6DC9 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = Mac/SidecarBridgeMacDirect.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				COPY_PHASE_STRIP = YES;
-				DEAD_CODE_STRIPPING = YES;
-				ENABLE_APP_SANDBOX = YES;
-				ENABLE_DEBUG_DYLIB = NO;
-				ENABLE_HARDENED_RUNTIME = YES;
-				INFOPLIST_FILE = Mac/DirectInfo.plist;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac.direct;
-				PRODUCT_NAME = SidecarBridgeDirect;
-				SDKROOT = macosx;
-			};
-			name = Debug;
-		};
-		C08F49E04DF152929A86F047 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = Mac/SidecarBridgeMacDirect.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
-				COPY_PHASE_STRIP = YES;
-				DEAD_CODE_STRIPPING = YES;
-				ENABLE_APP_SANDBOX = YES;
-				ENABLE_DEBUG_DYLIB = NO;
-				ENABLE_HARDENED_RUNTIME = YES;
-				INFOPLIST_FILE = Mac/DirectInfo.plist;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac.direct;
-				PRODUCT_NAME = SidecarBridgeDirect;
-				SDKROOT = macosx;
-			};
-			name = Release;
-		};
 		DD63900372DF422720D65C72 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 40;
+				CURRENT_PROJECT_VERSION = 70;
 				INFOPLIST_FILE = Pad/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
 				PRODUCT_NAME = SidecarBridge;
-				MARKETING_VERSION = 1.0;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -805,7 +643,6 @@
 				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
 				PRODUCT_NAME = SidecarBridge;
 				SDKROOT = macosx;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) SIDECARBRIDGE_APP_STORE_SAFE";
 			};
 			name = Debug;
 		};
@@ -843,7 +680,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 39;
+				CURRENT_PROJECT_VERSION = 61;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = LYK4LV2859;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -878,15 +715,6 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		1A719D1EE90F391F74546EB8 /* Build configuration list for PBXNativeTarget "SidecarBridgeMacDirect" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				A7387132C64B5998332B6DC9 /* Debug */,
-				C08F49E04DF152929A86F047 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Debug;
-		};
 		970A21E03E42CA5E188712C4 /* Build configuration list for PBXNativeTarget "SidecarBridgeTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

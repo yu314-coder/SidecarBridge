@@ -42,11 +42,19 @@ final class PadPeerService: NSObject {
     private var validationWorkItem: DispatchWorkItem?
     private var peerSupportsHeartbeat = false
     private var applicationIsBackgrounded = false
+    // Wi-Fi/AWDL can take several seconds to deliver the first packet after
+    // iPadOS resumes the app. Keep the session in a coordinated grace window
+    // instead of letting the idle watchdog tear down a route that is waking.
+    private var resumeGraceUntil: TimeInterval = 0
     private var pendingMultipeerInput = RemoteInputCoalescer()
     private var multipeerInputDrainScheduled = false
     private var lanDiscoveredMacs = Set<String>()
     private var multipeerDiscoveredMacs: [String: MCPeerID] = [:]
+    private var multipeerDiscoveredHosts: [String: [String]] = [:]
     private var selectedMacName: String?
+    // Finding a peer is not consent to invite it. This is enabled only by the
+    // explicit Connect action in PadConnectionModel.
+    private var userRequestedConnection = false
 
     override init() {
         session = MCSession(
@@ -109,6 +117,11 @@ final class PadPeerService: NSObject {
 
     func restart() {
         started = true
+        // Restart is used for an explicit retry/forget action. Do not leave
+        // the previous dial consent armed while discovery is rebuilt; a
+        // discovered Mac must remain passive until the user taps Connect.
+        userRequestedConnection = false
+        selectedMacName = nil
         fallbackWorkItem?.cancel()
         stopMultipeerFallback()
         invitedPeers.removeAll()
@@ -117,16 +130,38 @@ final class PadPeerService: NSObject {
     }
 
     func selectMac(named name: String) {
+        userRequestedConnection = true
         selectedMacName = name
         invitedPeers.removeAll()
+        lan.setMultipeerAdvertisedHosts(
+            multipeerDiscoveredHosts[name] ?? [],
+            forMacName: name
+        )
         lan.selectMac(named: name)
         if let peer = multipeerDiscoveredMacs[name], let browser {
             invite(peer, using: browser)
         }
     }
 
+    /// Stops discovery from dialing a previously selected Mac. Discovery can
+    /// continue publishing device rows; a new connection starts only after
+    /// the user selects a row again.
+    func clearMacSelection() {
+        userRequestedConnection = false
+        selectedMacName = nil
+        invitedPeers.removeAll()
+        lan.clearSelectedMac()
+        if mcConnected || !session.connectedPeers.isEmpty {
+            session.disconnect()
+        }
+        mcConnected = false
+        mcPeerName = nil
+        clearPendingMultipeerAuthentication()
+    }
+
     func prepareForBackground() {
         applicationIsBackgrounded = true
+        resumeGraceUntil = 0
         validationWorkItem?.cancel()
         validationWorkItem = nil
         heartbeatSentAt.removeAll(keepingCapacity: true)
@@ -156,8 +191,14 @@ final class PadPeerService: NSObject {
     }
 
     func resumeAfterBackground() {
+        // iPadOS may suspend the process while the user is in another app.
+        // Returning from background may restore the remembered session, but
+        // it must never turn passive discovery into an unsolicited dial.
+        guard userRequestedConnection else { return }
         applicationIsBackgrounded = false
-        lastPeerActivity = ProcessInfo.processInfo.systemUptime
+        let now = ProcessInfo.processInfo.systemUptime
+        lastPeerActivity = now
+        resumeGraceUntil = now + 15
         guard lanConnected || mcConnected else {
             onConnectionHealthChanged?("Restoring remembered Mac session", nil)
             lan.resumeAfterBackground()
@@ -171,16 +212,21 @@ final class PadPeerService: NSObject {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.heartbeatSentAt[token] != nil else { return }
             self.heartbeatSentAt.removeValue(forKey: token)
-            if self.peerSupportsHeartbeat, self.lastPeerActivity <= sentAt {
+            // A live session must produce either the heartbeat pong or other
+            // encrypted traffic. Older Mac builds may not advertise heartbeat
+            // support, so do not treat a silent socket as healthy merely
+            // because `peerSupportsHeartbeat` is still false. Rebuilding the
+            // selected direct/P2P path here is what makes swipe-away/return
+            // reliable after iPadOS has suspended the socket.
+            if self.lastPeerActivity <= sentAt {
                 self.recoverStaleConnection(reason: "No encrypted traffic after returning from background.")
-            } else if !self.peerSupportsHeartbeat {
-                self.onConnectionHealthChanged?("Connected — update Mac app for health checks", nil)
             } else {
+                self.resumeGraceUntil = 0
                 self.onConnectionHealthChanged?("Encrypted link healthy", nil)
             }
         }
         validationWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: workItem)
     }
 
     func send(_ message: ControlMessage) {
@@ -274,6 +320,7 @@ final class PadPeerService: NSObject {
             let token = String(detail.dropFirst("heartbeat-pong:".count))
             guard let sentAt = heartbeatSentAt.removeValue(forKey: token) else { return }
             peerSupportsHeartbeat = true
+            resumeGraceUntil = 0
             validationWorkItem?.cancel()
             validationWorkItem = nil
             let latency = max(0, Int((ProcessInfo.processInfo.systemUptime - sentAt) * 1_000))
@@ -316,6 +363,12 @@ final class PadPeerService: NSObject {
             return
         }
         let now = ProcessInfo.processInfo.systemUptime
+        if now < resumeGraceUntil {
+            // The route may be ready before its first packet is deliverable.
+            // Let the foreground resume validator own recovery during this
+            // short handoff instead of declaring the session stale.
+            return
+        }
         if RemoteSessionLifecyclePolicy.shouldRecoverStaleConnection(
             isViewerBackgrounded: applicationIsBackgrounded,
             peerSupportsHeartbeat: peerSupportsHeartbeat,
@@ -342,6 +395,7 @@ final class PadPeerService: NSObject {
     }
 
     private func recoverStaleConnection(reason: String) {
+        resumeGraceUntil = 0
         onConnectionHealthChanged?("Recovering stale connection", nil)
         stopHeartbeat()
         if lanConnected {
@@ -550,7 +604,7 @@ final class PadPeerService: NSObject {
                 remotePeer.displayName,
                 submittedMCPairingCode == nil
                     ? nil
-                    : "Enter the complete 16-character code shown on the Mac."
+                    : "Enter the complete 16-digit code shown on the Mac."
             )
             return
         }
@@ -606,7 +660,12 @@ final class PadPeerService: NSObject {
     ) {
         guard let mcSecureSession,
               let encrypted = try? mcSecureSession.seal(packet) else { return }
-        try? session.send(encrypted, toPeers: peers, with: mode)
+        do {
+            try session.send(encrypted, toPeers: peers, with: mode)
+        } catch {
+            let delivery = mode == .reliable ? "reliable" : "unreliable"
+            print("[SidecarBridge/P2P] send \(delivery) packet failed: \(error.localizedDescription)")
+        }
     }
 
     private func restartMultipeerBrowserAfterDisconnect() {
@@ -627,9 +686,15 @@ extension PadPeerService: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         DispatchQueue.main.async { [weak self, weak browser] in
             guard let self, let browser, self.browser === browser else { return }
-            self.multipeerDiscoveredMacs[peerID.displayName] = peerID
+            let name = peerID.displayName
+            let hosts = BridgeNetworkMetadata.decodePrivateIPv4Addresses(
+                info?[BridgeConstants.hostsTXTKey]
+            )
+            self.multipeerDiscoveredHosts[name] = hosts
+            self.lan.setMultipeerAdvertisedHosts(hosts, forMacName: name)
+            self.multipeerDiscoveredMacs[name] = peerID
             self.publishDiscoveredMacs()
-            if self.selectedMacName == peerID.displayName {
+            if self.userRequestedConnection, self.selectedMacName == name {
                 self.invite(peerID, using: browser)
             }
         }
@@ -639,6 +704,7 @@ extension PadPeerService: MCNearbyServiceBrowserDelegate {
         DispatchQueue.main.async { [weak self] in
             self?.invitedPeers.remove(peerID.displayName)
             self?.multipeerDiscoveredMacs.removeValue(forKey: peerID.displayName)
+            self?.multipeerDiscoveredHosts.removeValue(forKey: peerID.displayName)
             self?.publishDiscoveredMacs()
         }
     }
@@ -731,11 +797,6 @@ extension PadPeerService: MCSessionDelegate {
                 self.onFrame?(frame)
             }
         case .video(let frame):
-            if let receipt = try? PacketCodec.encode(
-                .control(ControlMessage(.status, detail: "video-ack:\(frame.sequence)"))
-            ) {
-                sendMultipeerPacket(receipt, to: [peerID], mode: .reliable)
-            }
             DispatchQueue.main.async {
                 self.notePeerActivity()
                 self.onVideoFrame?(frame)

@@ -1,4 +1,119 @@
+import Darwin
 import Foundation
+import CoreGraphics
+
+/// Geometry shared by the iPad input surface, the virtual cursor overlay, and
+/// the Mac event injector. Keeping the letterbox and normalization math in one
+/// place prevents the overlay from slowly disagreeing with the touch surface
+/// when the stream aspect ratio or viewer zoom changes.
+enum RemoteDisplayGeometry {
+    static func contentRect(in size: CGSize, aspectRatio: CGFloat) -> CGRect {
+        guard size.width > 0, size.height > 0, aspectRatio > 0 else {
+            return CGRect(origin: .zero, size: size)
+        }
+        let viewAspect = size.width / size.height
+        if viewAspect > aspectRatio {
+            let width = size.height * aspectRatio
+            return CGRect(
+                x: (size.width - width) / 2,
+                y: 0,
+                width: width,
+                height: size.height
+            )
+        }
+        let height = size.width / aspectRatio
+        return CGRect(
+            x: 0,
+            y: (size.height - height) / 2,
+            width: size.width,
+            height: height
+        )
+    }
+
+    static func normalizedPoint(
+        _ point: CGPoint,
+        in size: CGSize,
+        aspectRatio: CGFloat,
+        zoomScale: CGFloat = 1,
+        zoomOffset: CGSize = .zero
+    ) -> CGPoint? {
+        guard size.width > 0, size.height > 0, aspectRatio > 0 else { return nil }
+
+        // Match the older stable viewer path: undo SwiftUI's center scale and
+        // offset first, then apply the untransformed letterbox. This is less
+        // sensitive to fractional CGRect edges than testing a separately
+        // transformed rectangle and is exactly how the image layer is laid
+        // out by SwiftUI.
+        let scale = max(zoomScale, 1)
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let untransformedPoint = CGPoint(
+            x: center.x + (point.x - center.x - zoomOffset.width) / scale,
+            y: center.y + (point.y - center.y - zoomOffset.height) / scale
+        )
+        let rect = contentRect(in: size, aspectRatio: aspectRatio)
+        guard rect.width > 0, rect.height > 0, rect.contains(untransformedPoint) else { return nil }
+        return CGPoint(
+            x: (untransformedPoint.x - rect.minX) / rect.width,
+            y: (untransformedPoint.y - rect.minY) / rect.height
+        )
+    }
+
+    /// The exact rectangle occupied by the rendered screen after the same
+    /// center-scale and offset used by the SwiftUI viewer. Keeping this
+    /// explicit avoids subtle safe-area/letterbox drift between the image and
+    /// the UIKit input surface.
+    static func transformedContentRect(
+        in size: CGSize,
+        aspectRatio: CGFloat,
+        zoomScale: CGFloat = 1,
+        zoomOffset: CGSize = .zero
+    ) -> CGRect {
+        let base = contentRect(in: size, aspectRatio: aspectRatio)
+        guard base.width > 0, base.height > 0 else { return base }
+        let scale = max(zoomScale, 1)
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        return CGRect(
+            x: center.x + (base.minX - center.x) * scale + zoomOffset.width,
+            y: center.y + (base.minY - center.y) * scale + zoomOffset.height,
+            width: base.width * scale,
+            height: base.height * scale
+        )
+    }
+
+    static func normalizedDelta(
+        from previous: CGPoint,
+        to current: CGPoint,
+        in size: CGSize,
+        aspectRatio: CGFloat,
+        zoomScale: CGFloat = 1
+    ) -> CGPoint? {
+        guard size.width > 0, size.height > 0, aspectRatio > 0 else { return nil }
+        let base = contentRect(in: size, aspectRatio: aspectRatio)
+        guard base.width > 0, base.height > 0 else { return nil }
+        let scale = max(zoomScale, 1)
+        return CGPoint(
+            x: (current.x - previous.x) / max(base.width * scale, 1),
+            y: (current.y - previous.y) / max(base.height * scale, 1)
+        )
+    }
+
+    static func displayPoint(for normalized: CGPoint, in bounds: CGRect) -> CGPoint {
+        let maximumX = max(bounds.width - 1, 0)
+        let maximumY = max(bounds.height - 1, 0)
+        return CGPoint(
+            x: bounds.minX + min(max(normalized.x, 0), 1) * maximumX,
+            y: bounds.minY + min(max(normalized.y, 0), 1) * maximumY
+        )
+    }
+
+    static func normalizedPoint(_ point: CGPoint, in bounds: CGRect) -> CGPoint? {
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        return CGPoint(
+            x: min(max((point.x - bounds.minX) / bounds.width, 0), 1),
+            y: min(max((point.y - bounds.minY) / bounds.height, 0), 1)
+        )
+    }
+}
 
 enum BridgeConstants {
     static let serviceType = "sb-screen"
@@ -9,6 +124,82 @@ enum BridgeConstants {
     // lets the mobile UI distinguish an old Mac binary before pairing fails.
     static let protocolTXTKey = "sbp"
     static let buildTXTKey = "build"
+    // A Bonjour result can be filtered or resolved through the wrong active
+    // interface when a Mac has Ethernet and Wi-Fi enabled together. The Mac
+    // therefore advertises its private IPv4 candidates as a small hint. They
+    // are still authenticated by the normal encrypted handshake before use.
+    static let hostsTXTKey = "hosts"
+}
+
+enum BridgeNetworkMetadata {
+    /// Returns private IPv4 addresses that can be reached from a local peer.
+    /// Virtual-only and loopback interfaces are intentionally excluded.
+    static func localPrivateIPv4Addresses() -> [String] {
+        var pointer: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&pointer) == 0, let first = pointer else { return [] }
+        defer { freeifaddrs(pointer) }
+
+        var addresses = Set<String>()
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+        while let interface = current {
+            defer { current = interface.pointee.ifa_next }
+            guard let address = interface.pointee.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_INET),
+                  (interface.pointee.ifa_flags & UInt32(IFF_UP)) != 0,
+                  (interface.pointee.ifa_flags & UInt32(IFF_LOOPBACK)) == 0 else {
+                continue
+            }
+
+            let name = String(cString: interface.pointee.ifa_name)
+            guard name.hasPrefix("en") || name.hasPrefix("bridge") else { continue }
+
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                address,
+                socklen_t(address.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 else { continue }
+
+            let value = String(cString: host)
+            let parts = value.split(separator: ".").compactMap { Int($0) }
+            guard parts.count == 4,
+                  parts.allSatisfy({ (0...255).contains($0) }),
+                  isPrivateIPv4(parts) else { continue }
+            addresses.insert(value)
+        }
+        return addresses.sorted()
+    }
+
+    /// Encodes a bounded TXT/discovery value. Private addresses are the only
+    /// values emitted, so this never publishes a public or virtual endpoint.
+    static func encodedLocalPrivateIPv4Addresses() -> String? {
+        let value = localPrivateIPv4Addresses().joined(separator: ",")
+        return value.isEmpty ? nil : value
+    }
+
+    static func decodePrivateIPv4Addresses(_ value: String?) -> [String] {
+        guard let value else { return [] }
+        var result = Set<String>()
+        for raw in value.split(separator: ",") {
+            let candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parts = candidate.split(separator: ".").compactMap { Int($0) }
+            guard parts.count == 4,
+                  parts.allSatisfy({ (0...255).contains($0) }),
+                  isPrivateIPv4(parts) else { continue }
+            result.insert(candidate)
+        }
+        return result.sorted()
+    }
+
+    private static func isPrivateIPv4(_ parts: [Int]) -> Bool {
+        parts[0] == 10 ||
+            (parts[0] == 172 && (16...31).contains(parts[1])) ||
+            (parts[0] == 192 && parts[1] == 168)
+    }
 }
 
 struct BridgePeerIdentity: Codable, Equatable {
@@ -51,6 +242,9 @@ enum ControlKind: String, Codable, Equatable {
     case input
     case requestSystemInformation
     case systemInformation
+    case requestClipboard
+    case clipboardText
+    case clipboardError
 }
 
 struct ControlMessage: Codable, Equatable {
@@ -60,6 +254,27 @@ struct ControlMessage: Codable, Equatable {
     init(_ kind: ControlKind, detail: String? = nil) {
         self.kind = kind
         self.detail = detail
+    }
+}
+
+/// Clipboard messages stay deliberately small so a copy operation cannot
+/// monopolize the control channel. Larger files should use FileTransferEngine.
+enum ClipboardTransfer {
+    static let maximumTextBytes = 48 * 1_024
+
+    static func prepare(_ text: String) -> String {
+        guard text.utf8.count > maximumTextBytes else { return text }
+
+        var result = ""
+        var byteCount = 0
+        for scalar in text.unicodeScalars {
+            let value = String(scalar)
+            let scalarBytes = value.utf8.count
+            guard byteCount + scalarBytes <= maximumTextBytes else { break }
+            result.append(contentsOf: value)
+            byteCount += scalarBytes
+        }
+        return result
     }
 }
 
@@ -496,6 +711,16 @@ enum RemoteKeyboardInput {
         modifiers: [String] = []
     ) -> RemoteInputEvent? {
         let normalized = normalizedModifiers(modifiers)
+        // UIKit reports a Magic Keyboard shortcut as a HID usage plus its
+        // modifier snapshot. Convert special keys to their semantic names as
+        // soon as a modifier is present. This avoids relying on the focused
+        // Mac app to reinterpret a raw HID position and makes combinations
+        // such as Control-arrow, Option-Tab, and Shift-Delete deterministic.
+        if let hidUsage,
+           !normalized.isEmpty,
+           let shortcutKey = shortcutKeyName(forHIDUsage: hidUsage) {
+            return .key(shortcutKey, modifiers: normalized)
+        }
         if let hidUsage, supportsRemoteHIDUsage(hidUsage) {
             return .hardwareKey(hidUsage: hidUsage, modifiers: normalized)
         }
@@ -504,6 +729,27 @@ enum RemoteKeyboardInput {
         }
         guard let text, !text.isEmpty else { return nil }
         return .text(text)
+    }
+
+    static func shortcutKeyName(forHIDUsage usage: Int) -> String? {
+        switch usage {
+        case 40: return "return"
+        case 41: return "escape"
+        case 42: return "delete"
+        case 43: return "tab"
+        case 44: return "space"
+        case 73: return "help"
+        case 74: return "home"
+        case 75: return "pageup"
+        case 76: return "forwarddelete"
+        case 77: return "end"
+        case 78: return "pagedown"
+        case 79: return "right"
+        case 80: return "left"
+        case 81: return "down"
+        case 82: return "up"
+        default: return nil
+        }
     }
 }
 
@@ -536,6 +782,17 @@ extension ControlMessage {
     var remoteInputEvent: RemoteInputEvent? {
         guard kind == .input, let detail, let data = detail.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(RemoteInputEvent.self, from: data)
+    }
+
+    static func clipboardText(_ text: String) -> ControlMessage {
+        ControlMessage(.clipboardText, detail: ClipboardTransfer.prepare(text))
+    }
+
+    var clipboardTextPayload: String? {
+        guard kind == .clipboardText,
+              let detail,
+              detail.utf8.count <= ClipboardTransfer.maximumTextBytes else { return nil }
+        return detail
     }
 }
 

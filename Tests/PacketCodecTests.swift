@@ -81,6 +81,23 @@ final class PacketCodecTests: XCTestCase {
         )
     }
 
+    func testClipboardControlRoundTrip() throws {
+        let message = ControlMessage.clipboardText("Hello from the iPad 👋")
+        XCTAssertEqual(
+            try PacketCodec.decode(PacketCodec.encode(.control(message))),
+            .control(message)
+        )
+        XCTAssertEqual(message.clipboardTextPayload, "Hello from the iPad 👋")
+    }
+
+    func testClipboardTextIsCappedBeforeTransport() {
+        let original = String(repeating: "界", count: 30_000)
+        let prepared = ClipboardTransfer.prepare(original)
+        XCTAssertLessThanOrEqual(prepared.utf8.count, ClipboardTransfer.maximumTextBytes)
+        XCTAssertTrue(original.hasPrefix(prepared))
+        XCTAssertNotEqual(prepared, original)
+    }
+
     func testJPEGFrameRoundTrip() throws {
         let input = Data([0xFF, 0xD8, 0xFF, 0xD9])
         let data = try PacketCodec.encode(.jpeg(input))
@@ -193,6 +210,24 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(message.remoteInputEvent, input)
     }
 
+    func testShortcutEventsPreserveKeyAndModifierOrder() {
+        let input = RemoteInputEvent.key(
+            "left",
+            modifiers: ["shift", "option", "control"]
+        )
+        XCTAssertEqual(input.kind, .key)
+        XCTAssertEqual(input.key, "left")
+        XCTAssertEqual(input.modifiers, ["option", "control", "shift"])
+    }
+
+    func testModifierClickHasNoAbsolutePointerCoordinates() {
+        let input = RemoteInputEvent.click(modifiers: ["shift", "option"])
+        XCTAssertEqual(input.kind, .primaryClick)
+        XCTAssertNil(input.x)
+        XCTAssertNil(input.y)
+        XCTAssertEqual(input.modifiers, ["option", "shift"])
+    }
+
     func testRelativePointerRoundTripAndCoalescing() throws {
         let first = RemoteInputEvent.pointerDelta(x: 0.02, y: -0.01)
         let second = RemoteInputEvent.pointerDelta(x: 0.03, y: 0.04)
@@ -206,6 +241,84 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(accumulated.kind, .pointerDelta)
         XCTAssertEqual(accumulated.deltaX ?? 0, 0.05, accuracy: 0.000_001)
         XCTAssertEqual(accumulated.deltaY ?? 0, 0.03, accuracy: 0.000_001)
+    }
+
+    func testRemoteDisplayGeometryUsesSameLetterboxForInputAndOverlay() throws {
+        let size = CGSize(width: 1_024, height: 768)
+        let content = RemoteDisplayGeometry.contentRect(
+            in: size,
+            aspectRatio: 16.0 / 9.0
+        )
+        XCTAssertEqual(content.width, 1_024, accuracy: 0.001)
+        XCTAssertEqual(content.height, 576, accuracy: 0.001)
+        XCTAssertEqual(content.minY, 96, accuracy: 0.001)
+
+        let normalized = try XCTUnwrap(
+            RemoteDisplayGeometry.normalizedPoint(
+                CGPoint(x: 512, y: 384),
+                in: size,
+                aspectRatio: 16.0 / 9.0
+            )
+        )
+        XCTAssertEqual(normalized.x, 0.5, accuracy: 0.000_001)
+        XCTAssertEqual(normalized.y, 0.5, accuracy: 0.000_001)
+    }
+
+    func testRemoteDisplayGeometryKeepsZoomedInputAlignedWithRenderedContent() throws {
+        let size = CGSize(width: 1_024, height: 768)
+        let zoomed = RemoteDisplayGeometry.transformedContentRect(
+            in: size,
+            aspectRatio: 16.0 / 9.0,
+            zoomScale: 2,
+            zoomOffset: CGSize(width: 38, height: -24)
+        )
+        let normalized = try XCTUnwrap(
+            RemoteDisplayGeometry.normalizedPoint(
+                CGPoint(x: zoomed.midX, y: zoomed.midY),
+                in: size,
+                aspectRatio: 16.0 / 9.0,
+                zoomScale: 2,
+                zoomOffset: CGSize(width: 38, height: -24)
+            )
+        )
+        XCTAssertEqual(normalized.x, 0.5, accuracy: 0.000_001)
+        XCTAssertEqual(normalized.y, 0.5, accuracy: 0.000_001)
+        XCTAssertNil(
+            RemoteDisplayGeometry.normalizedPoint(
+                CGPoint(x: zoomed.minX - 1, y: zoomed.midY),
+                in: size,
+                aspectRatio: 16.0 / 9.0,
+                zoomScale: 2,
+                zoomOffset: CGSize(width: 38, height: -24)
+            )
+        )
+    }
+
+    func testRelativePointerDeltaMatchesDisplayGeometryWithoutSensitivityDrift() throws {
+        let delta = try XCTUnwrap(
+            RemoteDisplayGeometry.normalizedDelta(
+                from: CGPoint(x: 100, y: 100),
+                to: CGPoint(x: 125, y: 120),
+                in: CGSize(width: 1_024, height: 768),
+                aspectRatio: 16.0 / 9.0
+            )
+        )
+        let bounds = CGRect(x: -1_920, y: 0, width: 1_920, height: 1_080)
+        // The letterboxed 16:9 content is 1,024 × 576 inside the 4:3 view,
+        // so 25 × 20 view points becomes this exact display-space delta.
+        XCTAssertEqual(delta.x * (bounds.width - 1), 25.0 / 1_024.0 * 1_919.0, accuracy: 0.001)
+        XCTAssertEqual(delta.y * (bounds.height - 1), 20.0 / 576.0 * 1_079.0, accuracy: 0.001)
+    }
+
+    func testDisplayPointClampsToTheActualDisplayPixelBounds() {
+        let bounds = CGRect(x: -1_920, y: 20, width: 1_920, height: 1_080)
+        XCTAssertEqual(
+            RemoteDisplayGeometry.displayPoint(
+                for: CGPoint(x: 1, y: 1),
+                in: bounds
+            ),
+            CGPoint(x: -1, y: 1_099)
+        )
     }
 
     func testCurrentPointerClickDoesNotCarryAbsoluteCoordinates() {
@@ -237,6 +350,15 @@ final class PacketCodecTests: XCTestCase {
         let decoded = try LANWire.decodeHandshake(payload, marker: LANWire.clientHello)
         XCTAssertEqual(decoded.deviceID, identity.deviceID)
         XCTAssertEqual(decoded.deviceKind, "iPhone")
+    }
+
+    func testAdvertisedHostMetadataOnlyAcceptsPrivateIPv4Addresses() {
+        XCTAssertEqual(
+            BridgeNetworkMetadata.decodePrivateIPv4Addresses(
+                "192.168.1.124,10.0.0.8,172.20.10.2,8.8.8.8,not-an-ip,192.168.1.124"
+            ),
+            ["10.0.0.8", "172.20.10.2", "192.168.1.124"]
+        )
     }
 
     func testPairingProofBindsDeviceMacAndNonce() {
@@ -358,11 +480,14 @@ final class PacketCodecTests: XCTestCase {
         ))
     }
 
-    func testPairingCodeHasEightyBitsAndNormalizesGroupedInput() {
+    func testPairingCodeIsSixteenDigitsAndNormalizesGroupedInput() {
         let code = PairingCode.generate()
         XCTAssertEqual(code.count, PairingCode.characterCount)
+        XCTAssertTrue(code.allSatisfy { $0.isNumber })
         XCTAssertEqual(PairingCode.normalize(PairingCode.formatted(code)), code)
-        XCTAssertEqual(PairingCode.normalize("abcd-2345-efgh-6789"), "ABCD2345EFGH6789")
+        XCTAssertEqual(PairingCode.normalize("1234-5678-9012-3456"), "1234567890123456")
+        XCTAssertEqual(PairingCode.formattedInput("123456789012345678"), "1234-5678-9012-3456")
+        XCTAssertEqual(PairingCode.normalize("ABCD-1234"), "1234")
     }
 
     func testLegacyHandshakeFailsClosed() throws {
@@ -720,6 +845,34 @@ final class PacketCodecTests: XCTestCase {
             XCTAssertEqual(event?.key, key)
             XCTAssertEqual(event?.modifiers, ["control"])
         }
+    }
+
+    func testModifiedHIDArrowsBecomeSemanticShortcutEvents() {
+        let expected: [(Int, String)] = [
+            (79, "right"),
+            (80, "left"),
+            (81, "down"),
+            (82, "up")
+        ]
+
+        for (usage, key) in expected {
+            let event = RemoteKeyboardInput.event(
+                hidUsage: usage,
+                modifiers: ["control"]
+            )
+            XCTAssertEqual(event?.kind, .key)
+            XCTAssertEqual(event?.key, key)
+            XCTAssertNil(event?.hidUsage)
+            XCTAssertEqual(event?.modifiers, ["control"])
+        }
+    }
+
+    func testUnmodifiedHIDArrowsStayPhysicalEvents() {
+        let event = RemoteKeyboardInput.event(hidUsage: 82)
+        XCTAssertEqual(event?.kind, .key)
+        XCTAssertNil(event?.key)
+        XCTAssertEqual(event?.hidUsage, 82)
+        XCTAssertEqual(event?.modifiers, [])
     }
 
     func testRemoteKeyboardKeyFactoryNormalizesCase() {

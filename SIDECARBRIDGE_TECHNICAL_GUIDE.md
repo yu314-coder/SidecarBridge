@@ -160,7 +160,7 @@ The direct path uses a small framed protocol in `Shared/LANProtocol.swift`.
 1. The mobile app generates an ephemeral Curve25519 key pair and sends its stable app identity and public key.
 2. The Mac generates its ephemeral key, stable Mac identifier, and a fresh 256-bit authentication nonce.
 3. Both peers use Curve25519 and HKDF-SHA256 to derive independent client-to-server and server-to-client keys; the HKDF salt binds both public keys.
-4. A new device enters the rotating 16-character code displayed by the Mac. It has about 80 bits of entropy and expires after five minutes. A remembered device instead reads its random credential from Keychain.
+4. A new device enters the rotating 16-digit code displayed by the Mac. It has about 53 bits of entropy and expires after five minutes. A remembered device instead reads its random credential from Keychain.
 5. The mobile app sends a role-separated client HMAC-SHA256 proof inside the encrypted channel. The proof transcript binds the protocol version, mobile identity, Mac identity, nonce, and transport channel binding.
 6. The Mac verifies the proof in constant time, rate-limits failures to five per device and twenty globally per minute, and returns an independent role-separated server proof.
 7. The mobile app verifies the server proof before marking the connection trusted or storing a newly issued credential. Missing authentication metadata and older protocol versions fail closed.
@@ -248,7 +248,7 @@ The iPad can forward:
 - typed text;
 - arrows, Return, Tab, Escape, Delete, and common Command shortcuts.
 
-The Mac converts the normalized coordinates to the captured display and posts CGEvents. This requires explicit Accessibility permission in macOS System Settings. Indirect pointer events carry UIKit's active modifier flags through the encrypted protocol. The direct Mac companion applies Option, Shift, and Option–Shift to the mouse down/drag/up sequence, enabling modifier-click workflows such as opening a link in a new tab or extending a selection. The Mac menu and direct-build shortcut card include local modifier-click checks.
+The Mac converts the normalized coordinates to the captured display and posts CGEvents. This requires explicit Accessibility permission in macOS System Settings. Indirect pointer events carry UIKit's active modifier flags through the encrypted protocol. The Mac app applies Option, Shift, and Option–Shift to the mouse down/drag/up sequence, enabling modifier-click workflows such as opening a link in a new tab or extending a selection. Shortcut input comes from the iPad's connected keyboard or trackpad; the Mac UI intentionally has no separate shortcut palette or test card.
 
 A mouse or trackpad primary press uses a custom continuous indirect-pointer recognizer rather than waiting for competing single- and double-tap recognizers. The recognizer stores UIKit's original event button mask and precise coalesced touch location, follows the began/changed/ended/cancelled state machine, and clears all state in `reset()`. Button-down is transmitted as soon as the physical press begins, stationary press-and-hold remains down, movement produces drag events at up to 120 Hz, and button-up is a reliable release barrier. Ambiguous primary-plus-secondary chords are ignored instead of guessed. Only short presses within an eight-point movement tolerance participate in the next double-click; a drag, long hold, or cancelled press resets that click history. Nearby valid clicks carry click-state values 1 and 2 so macOS still receives a true double-click without delaying the first press. Direct touch and Apple Pencil also provide a 0.22-second hold gesture. The viewer drawer retains separate **Left**, **Double**, and **Right** controls for users who prefer explicit buttons.
 
@@ -285,7 +285,7 @@ The iPad UI includes an AnyDesk-style right-edge control drawer for:
 
 ### 7.1 File transfer
 
-`FileTransferEngine` sends files in either direction over the active paired transport. Each 128 KB chunk is acknowledged before the next chunk is read, bounding memory and preventing a large transfer queue from starving video or input. Transfers are limited to 512 MB, validate offsets and sizes, sanitize destination names, and use the existing authenticated encryption layer. The Mac UI can queue multiple selected files, cancel the active transfer, open the transfer folder, and show live byte progress, rate, and ETA. An idle transfer has a 45-second recovery window. The Mac saves received files in `Downloads/SidecarBridge Transfers`; the iPad stores them in its Documents container and exposes the system share sheet.
+`FileTransferEngine` sends files in either direction over the active paired transport. Each 128 KB chunk is acknowledged before the next chunk is read, bounding memory and preventing a large transfer queue from starving video or input. Transfers are limited to 512 MB, validate offsets and sizes, sanitize destination names, and use the existing authenticated encryption layer. The Mac UI can queue multiple selected files, cancel the active transfer, open the transfer folder, and show live byte progress, rate, and ETA. An idle transfer has a 45-second recovery window. The Mac saves received files in its private `Application Support/SidecarBridge/Transfers` folder; the iPad stores them in its Documents container and exposes the system share sheet.
 
 ## 8. Permission model
 
@@ -296,14 +296,15 @@ The iPad UI includes an AnyDesk-style right-edge control drawer for:
 | App Sandbox | Required for Mac App Store validation |
 | Network client | Outgoing local and peer connections |
 | Network server | Incoming Bonjour/TCP connections |
-| Downloads read/write | Save files explicitly received from the paired iPad |
+| Application Support | Save files explicitly received from the paired iPad in the app container |
 | USB device access | Detect a trusted wired iPad |
 | Local Network | Bonjour and nearby discovery |
 | Screen Recording | Capture the Mac display |
-| Accessibility | Inject keyboard, pointer, click, drag, and scroll events |
+| PostEvent permission | Inject keyboard, pointer, click, drag, and scroll events |
+| Accessibility (optional) | Focused-element Unicode insertion and richer text controls |
 | Login Item | Optional user-controlled automatic startup |
 
-The app cannot add itself to Screen Recording or Accessibility. The user must approve those permissions.
+The app cannot add itself to Screen Recording or event-posting permissions. The user must approve those permissions. Accessibility is requested as an optional text-insertion enhancement; event posting is checked separately with `CGPreflightPostEventAccess`/`CGRequestPostEventAccess`.
 
 ### 8.2 iPadOS
 
@@ -491,7 +492,7 @@ The in-app stream has no raw USB transport. A cable may create a usable network 
 
 ### 13.4 Click works but pointer, drag, or scroll does not
 
-- Enable SidecarBridge under macOS Accessibility.
+- Use **Allow Remote Input** in SidecarBridge and accept the native PostEvent prompt. If macOS opens Accessibility, add the current SidecarBridge app there too.
 - Confirm the Mac app shows the input permission as passed.
 - Re-add the current app path if the app moved or was rebuilt.
 - Make sure pointer down, drag, and up events all reach the Mac; a missing up event can leave the drag state stuck.

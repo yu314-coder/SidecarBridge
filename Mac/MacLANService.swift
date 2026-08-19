@@ -97,9 +97,11 @@ final class MacLANService {
     }
 
     func sendVideoFrame(_ frame: VideoFrame) {
-        guard let data = try? PacketCodec.encode(.video(frame)) else { return }
         queue.async { [weak self] in
-            self?.enqueueVideo(PendingVideo(
+            guard let self,
+                  self.isConnected,
+                  let data = try? PacketCodec.encode(.video(frame)) else { return }
+            self.enqueueVideo(PendingVideo(
                 sequence: frame.sequence,
                 isKeyFrame: frame.isKeyFrame,
                 packet: data
@@ -130,6 +132,9 @@ final class MacLANService {
             txtRecord[BridgeConstants.buildTXTKey] = Bundle.main.object(
                 forInfoDictionaryKey: "CFBundleVersion"
             ) as? String ?? "unknown"
+            if let hosts = BridgeNetworkMetadata.encodedLocalPrivateIPv4Addresses() {
+                txtRecord[BridgeConstants.hostsTXTKey] = hosts
+            }
             listener.service = NWListener.Service(
                 name: name,
                 type: BridgeConstants.lanServiceType,

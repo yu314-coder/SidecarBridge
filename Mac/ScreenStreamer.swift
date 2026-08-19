@@ -26,6 +26,10 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
     private let captureQueue = DispatchQueue(label: "io.sidecarbridge.capture", qos: .userInteractive)
     private let encoder = H264Encoder()
     private var stream: SCStream?
+    /// The display selected by ScreenCaptureKit for this stream. Input events
+    /// must target the same display; the main display can differ when an
+    /// external monitor is attached.
+    private(set) var captureDisplayID: CGDirectDisplayID?
     private var lastFrameTime: TimeInterval = 0
     private var preferredWidth = 2360
     private var transportProfile: TransportProfile = .direct
@@ -70,10 +74,27 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
             throw StreamError.permissionRequired
         }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first else {
+        // Include displays even when they do not currently have an on-screen
+        // window.  An external monitor, a clamshell display, or a display
+        // that has just been attached can otherwise be omitted from
+        // ScreenCaptureKit's filtered list even though it is capturable.
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        let onlineDisplays = content.displays.filter { display in
+            let isOnline = CGDisplayIsOnline(display.displayID) != 0
+            let isActive = CGDisplayIsActive(display.displayID) != 0
+            return isOnline && isActive
+        }
+        let mainDisplayID = CGMainDisplayID()
+        let mainDisplay = onlineDisplays.first { display in
+            display.displayID == mainDisplayID
+        }
+        let largestDisplay = onlineDisplays.max { left, right in
+            left.width * left.height < right.width * right.height
+        }
+        guard let display = mainDisplay ?? largestDisplay ?? content.displays.first else {
             throw StreamError.noDisplay
         }
+        captureDisplayID = display.displayID
 
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let configuration = SCStreamConfiguration()
@@ -87,9 +108,13 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
         configuration.width = max(960, Int(Double(display.width) * scale)) & ~1
         configuration.height = max(540, Int(Double(display.height) * scale)) & ~1
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(activeFrameRate))
-        // A few buffers absorb USB/Wi-Fi scheduling jitter without forcing
-        // ScreenCaptureKit to collapse the stream below 30 FPS.
-        configuration.queueDepth = transportProfile == .nearbyP2P ? 3 : 5
+        // Keep only a small capture cushion. A deep ScreenCaptureKit queue
+        // makes the viewer look smooth while adding avoidable end-to-end
+        // latency when the link is busy.
+        configuration.queueDepth = transportProfile == .nearbyP2P ? 2 : 3
+        // Capture the real Mac cursor. The iPad viewer deliberately does not
+        // draw a second software cursor, so the pointer users see is the one
+        // that WindowServer actually moved after a remote input event.
         configuration.showsCursor = true
         configuration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         configuration.colorSpaceName = CGColorSpace.sRGB
@@ -110,6 +135,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
 
     func stop() {
         encoder.stop()
+        captureDisplayID = nil
         guard let stream else { return }
         self.stream = nil
         Task { try? await stream.stopCapture() }

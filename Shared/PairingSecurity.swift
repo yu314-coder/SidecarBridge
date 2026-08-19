@@ -70,18 +70,27 @@ enum PairingProofRole: String {
 }
 
 enum PairingCode {
-    static let characterCount = 16
+    /// A first-time device enters this short-lived numeric code. The Mac
+    /// issues it locally; after verification, the random Keychain credential
+    /// is used instead so trusted devices do not have to re-enter it.
+    static let digitCount = 16
+    // Keep the existing internal name for protocol call sites and older
+    // tests. It describes the length, not an allowance for alphabetic input.
+    static let characterCount = digitCount
     static let lifetime: TimeInterval = 5 * 60
-    private static let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
 
     static func generate() -> String {
         let bytes = SecureCredentialStore.randomBytes(count: characterCount)
-        return String(bytes.map { alphabet[Int($0) % alphabet.count] })
+        // The code is intentionally numeric so it can be entered quickly on
+        // an iPad hardware/software keyboard. A five-minute lifetime and the
+        // existing per-device/global attempt limits protect the one-time
+        // secret while the trusted credential remains much stronger.
+        return String(bytes.map { Character(String(Int($0) % 10)) })
     }
 
     static func normalize(_ value: String) -> String {
-        String(value.uppercased().filter { character in
-            character.isASCII && (character.isLetter || character.isNumber)
+        String(value.unicodeScalars.filter { scalar in
+            (0x30...0x39).contains(scalar.value)
         })
     }
 
@@ -92,6 +101,14 @@ enum PairingCode {
             let end = normalized.index(start, offsetBy: min(4, normalized.count - offset))
             return String(normalized[start..<end])
         }.joined(separator: "-")
+    }
+
+    /// Formats live text-field input while the user types or pastes. This
+    /// keeps the four-digit groups visible without ever sending separators as
+    /// part of the proof secret.
+    static func formattedInput(_ value: String) -> String {
+        let normalized = String(normalize(value).prefix(digitCount))
+        return formatted(normalized)
     }
 }
 

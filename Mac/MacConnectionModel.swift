@@ -27,8 +27,8 @@ final class MacConnectionModel: ObservableObject {
     @Published var lastReceivedFile: URL?
     @Published var fileTransferError: String?
     @Published var queuedFileCount = 0
+    @Published var clipboardTransferStatus = "Clipboard transfer ready."
     @Published var pairingCode = MacPairingSecurity.shared.currentDisplayCode()
-    @Published var shortcutTestStatus = "Not tested in this Mac session"
     @Published var localSystemInformation = SystemInformation.current()
     @Published var remoteSystemInformation: SystemInformation?
     @Published var diagnosticActionDetail = "System information is ready."
@@ -50,22 +50,47 @@ final class MacConnectionModel: ObservableObject {
         return status
     }
 
+    /// User-facing session copy for the main window. The Mac is the listener,
+    /// so opening it should advertise readiness rather than imply an automatic
+    /// connection or display stream.
+    var sessionSummaryTitle: String {
+        if isStreaming { return "Mac screen is live" }
+        if hasPadPeer { return "Ready to start the Mac display" }
+        return "Waiting for your iPad"
+    }
+
+    var sessionSummaryDetail: String {
+        if isStreaming {
+            return "The encrypted app stream is active with iPad keyboard and trackpad input."
+        }
+        if hasPadPeer {
+            return "The iPad is connected. Start In-App Display when you want to share the Mac screen."
+        }
+        return "Keep SidecarBridge open, then choose this Mac from My Devices on the iPad."
+    }
+
+    var sessionBadge: String {
+        if isStreaming { return "LIVE" }
+        if hasPadPeer { return "CONNECTED" }
+        return incomingListenerReady ? "READY" : "STARTING"
+    }
+
     private let sidecar = SidecarConnector()
     private let peers = MacPeerService()
     private let streamer = ScreenStreamer()
     private let remoteInput = RemoteInputPipeline()
     private lazy var fileTransfer = FileTransferEngine {
-        guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
+        guard let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             throw CocoaError(.fileNoSuchFile)
         }
-        return downloads.appendingPathComponent("SidecarBridge Transfers", isDirectory: true)
+        return applicationSupport
+            .appendingPathComponent("SidecarBridge", isDirectory: true)
+            .appendingPathComponent("Transfers", isDirectory: true)
     }
     private var started = false
     private var isStartingFallback = false
     private var attemptID = UUID()
-    #if !SIDECARBRIDGE_APP_STORE_SAFE
     private var accessibilityPollTask: Task<Void, Never>?
-    #endif
     private var screenRecordingPollTask: Task<Void, Never>?
     private var streamResumeRetentionTask: Task<Void, Never>?
     private var remoteViewerIsBackgrounded = false
@@ -118,15 +143,9 @@ final class MacConnectionModel: ObservableObject {
                 self.refreshPermissions()
                 self.connectionTransport = isDirectLAN ? "Direct local link / AWDL" : "Nearby P2P fallback"
                 self.status = isDirectLAN ? "iPad connected on same Wi-Fi" : "iPad app connected nearby"
-                #if SIDECARBRIDGE_APP_STORE_SAFE
-                self.detail = isDirectLAN
-                    ? "Waiting for the iPad's selected viewer mode."
-                    : "Waiting for the iPad's selected viewer mode."
-                #else
                 self.detail = isDirectLAN
                     ? "Waiting for the iPad's selected display mode. Apple Sidecar will not start automatically."
                     : "Waiting for the iPad's selected display mode."
-                #endif
                 self.pairedPeer = MacAuthorizedDeviceStore.shared.displaySummary
                 self.sendRemoteInputPermissionStatus()
                 self.exchangeSystemInformation()
@@ -165,16 +184,19 @@ final class MacConnectionModel: ObservableObject {
         let inputPipeline = remoteInput
         let peerService = peers
         peers.onInput = { [weak self] event in
-            inputPipeline.submit(event) { accepted in
+            inputPipeline.submit(event) { [weak self] accepted, pointer in
                 if event.shouldAcknowledge, let sequence = event.sequence {
                     peerService.send(ControlMessage(
                         .status,
-                        detail: "input-ack:\(sequence):\(accepted ? 1 : 0)"
+                        detail: Self.inputAcknowledgementDetail(
+                            sequence: sequence,
+                            accepted: accepted,
+                            pointer: pointer
+                        )
                     ))
                 }
                 DispatchQueue.main.async { [weak self] in
                     self?.applyRemoteInputResult(accepted)
-                    self?.recordShortcutResult(event, accepted: accepted, source: "iPad")
                 }
             }
         }
@@ -186,43 +208,6 @@ final class MacConnectionModel: ObservableObject {
     }
 
     var isFileTransferring: Bool { fileTransfer.isBusy }
-
-    func testControlShortcut(_ key: String) {
-        guard ["up", "down", "left", "right"].contains(key) else { return }
-        let event = RemoteInputEvent.key(key, modifiers: ["control"])
-        remoteInput.submit(event) { [weak self] accepted in
-            DispatchQueue.main.async {
-                self?.recordShortcutResult(event, accepted: accepted, source: "Mac test")
-            }
-        }
-    }
-
-    func testModifierClick(_ modifiers: [String]) {
-        let event = RemoteInputEvent.click(modifiers: modifiers)
-        remoteInput.submit(event) { [weak self] accepted in
-            DispatchQueue.main.async {
-                let names = modifiers.map { $0.capitalized }.joined(separator: "–")
-                self?.shortcutTestStatus = accepted
-                    ? "Mac test: \(names)–click injected at the current pointer"
-                    : "Mac test: \(names)–click rejected — check Accessibility"
-            }
-        }
-    }
-
-    private func recordShortcutResult(
-        _ event: RemoteInputEvent,
-        accepted: Bool,
-        source: String
-    ) {
-        guard event.kind == .key,
-              event.modifiers?.contains("control") == true,
-              let key = event.key,
-              ["up", "down", "left", "right"].contains(key) else { return }
-        let arrow = ["up": "↑", "down": "↓", "left": "←", "right": "→"][key] ?? key
-        shortcutTestStatus = accepted
-            ? "\(source): Control-\(arrow) injected with HID timing"
-            : "\(source): Control-\(arrow) rejected — check Accessibility"
-    }
 
     func chooseFileToSend() {
         guard hasPadPeer else {
@@ -251,11 +236,13 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func openTransferFolder() {
-        guard let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else {
-            fileTransferError = "The Downloads folder is unavailable."
+        guard let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            fileTransferError = "The SidecarBridge application-support folder is unavailable."
             return
         }
-        let directory = downloads.appendingPathComponent("SidecarBridge Transfers", isDirectory: true)
+        let directory = applicationSupport
+            .appendingPathComponent("SidecarBridge", isDirectory: true)
+            .appendingPathComponent("Transfers", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             NSWorkspace.shared.open(directory)
@@ -310,11 +297,7 @@ final class MacConnectionModel: ObservableObject {
         peers.start()
         refreshDevices()
         status = "Waiting for iPad"
-        #if SIDECARBRIDGE_APP_STORE_SAFE
-        detail = "Open SidecarBridge on the iPad. Its selected mode decides whether to use the private viewer stream."
-        #else
         detail = "Open SidecarBridge on the iPad. Its selected mode decides whether to use the app stream or Apple Sidecar."
-        #endif
     }
 
     func setShutdownProtectionEnabled(_ enabled: Bool) {
@@ -346,10 +329,8 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func prepareForTermination() {
-        #if !SIDECARBRIDGE_APP_STORE_SAFE
         accessibilityPollTask?.cancel()
         accessibilityPollTask = nil
-        #endif
         screenRecordingPollTask?.cancel()
         screenRecordingPollTask = nil
         streamResumeRetentionTask?.cancel()
@@ -443,11 +424,7 @@ final class MacConnectionModel: ObservableObject {
         }
         isStartingFallback = true
 
-        #if SIDECARBRIDGE_APP_STORE_SAFE
-        remoteInputAuthorized = false
-        #else
         remoteInputAuthorized = remoteInput.requestAccess()
-        #endif
         sendRemoteInputPermissionStatus()
 
         status = "Starting app stream…"
@@ -455,15 +432,21 @@ final class MacConnectionModel: ObservableObject {
         Task {
             do {
                 try await streamer.start()
+                remoteInput.setTargetDisplayID(streamer.captureDisplayID)
+                remoteInput.currentPointerPosition { [weak self] pointer in
+                    guard let self, let pointer else { return }
+                    DispatchQueue.main.async {
+                        self.peers.send(ControlMessage(
+                            .status,
+                            detail: "pointer-position:\(pointer.x):\(pointer.y)"
+                        ))
+                    }
+                }
                 isStartingFallback = false
                 isStreaming = true
                 screenRecordingAuthorized = true
                 status = "Streaming to iPad"
-                #if SIDECARBRIDGE_APP_STORE_SAFE
-                detail = "Using the encrypted viewer stream. Full iPad keyboard and trackpad control is available in the direct companion build."
-                #else
                 detail = "Using the encrypted app stream with iPad keyboard and trackpad input."
-                #endif
                 peers.send(ControlMessage(.status, detail: "fallback-active"))
             } catch {
                 isStartingFallback = false
@@ -482,6 +465,7 @@ final class MacConnectionModel: ObservableObject {
         streamer.setWaitingForViewerResume(false)
         streamer.setViewerBackgrounded(false)
         streamer.stop()
+        remoteInput.setTargetDisplayID(nil)
         isStartingFallback = false
         isStreaming = false
     }
@@ -583,6 +567,31 @@ final class MacConnectionModel: ObservableObject {
         diagnosticActionDetail = "Privacy-safe diagnostic report copied."
     }
 
+    func requestPadClipboard() {
+        guard hasPadPeer else {
+            clipboardTransferStatus = "Connect the iPad before requesting its clipboard."
+            return
+        }
+        clipboardTransferStatus = "Requesting the iPad clipboard…"
+        peers.send(ControlMessage(.requestClipboard))
+    }
+
+    func sendClipboardToPad() {
+        guard hasPadPeer else {
+            clipboardTransferStatus = "Connect the iPad before sending clipboard text."
+            return
+        }
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            clipboardTransferStatus = "The Mac clipboard has no text to send."
+            return
+        }
+        let prepared = ClipboardTransfer.prepare(text)
+        peers.send(.clipboardText(prepared))
+        clipboardTransferStatus = prepared == text
+            ? "Mac clipboard sent to iPad."
+            : "Mac clipboard sent (truncated to 48 KB)."
+    }
+
     var diagnosticReport: String {
         var connectionFields = [
             DiagnosticField("Status", status),
@@ -603,14 +612,12 @@ final class MacConnectionModel: ObservableObject {
                 screenRecordingAuthorized ? "Passed" : "Required"
             )
         ]
-        #if !SIDECARBRIDGE_APP_STORE_SAFE
         connectionFields.append(
             DiagnosticField(
-                "Accessibility permission",
+                "Remote input posting permission",
                 remoteInputAuthorized ? "Passed" : "Required"
             )
         )
-        #endif
         return DiagnosticReportBuilder.make(
             local: localSystemInformation,
             remote: remoteSystemInformation,
@@ -730,55 +737,38 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func enableRemoteInput() {
-        #if SIDECARBRIDGE_APP_STORE_SAFE
-        remoteInputAuthorized = false
-        status = "Viewer-only Mac companion"
-        detail = "Remote keyboard and trackpad control is available in the direct companion build."
-        sendRemoteInputPermissionStatus()
-        #else
         remoteInputAuthorized = remoteInput.requestAccess()
         if remoteInputAuthorized {
             status = "Remote input enabled"
-            detail = "The iPad Magic Keyboard and trackpad can control this Mac during app streaming."
+            detail = "Keyboard, trackpad, and scroll event posting are enabled for the iPad."
             sendRemoteInputPermissionStatus()
         } else {
-            status = "Allow Accessibility access"
-            detail = "In Accessibility, click + and select this SidecarBridge app. Use Show App if you cannot find it."
+            status = "Allow Mac input access"
+            detail = "Allow SidecarBridge to post keyboard and pointer events; macOS may show a native permission prompt."
             remoteInput.openAccessibilitySettings()
             pollForAccessibilityAccess()
         }
-        #endif
     }
 
     func openAccessibilitySettings() {
-        #if SIDECARBRIDGE_APP_STORE_SAFE
-        status = "Viewer-only Mac companion"
-        detail = "The Mac App Store edition does not request Accessibility permission."
-        #else
         remoteInput.openAccessibilitySettings()
         pollForAccessibilityAccess()
-        #endif
     }
 
     func revealApplication() {
-        #if SIDECARBRIDGE_APP_STORE_SAFE
-        return
-        #else
         remoteInput.revealApplication()
-        #endif
     }
 
-    #if !SIDECARBRIDGE_APP_STORE_SAFE
     private func pollForAccessibilityAccess() {
         accessibilityPollTask?.cancel()
         accessibilityPollTask = Task { [weak self] in
             for _ in 0..<120 {
                 guard !Task.isCancelled else { return }
-                if AXIsProcessTrusted() {
+                if self?.remoteInput.isAuthorized == true {
                     guard let self else { return }
                     self.remoteInputAuthorized = true
                     self.status = "Remote input enabled"
-                    self.detail = "The iPad Magic Keyboard and trackpad can control this Mac during app streaming."
+                    self.detail = "Keyboard, trackpad, and scroll event posting are enabled for the iPad."
                     self.sendRemoteInputPermissionStatus()
                     return
                 }
@@ -786,7 +776,6 @@ final class MacConnectionModel: ObservableObject {
             }
         }
     }
-    #endif
 
     private func pollForScreenRecordingAccess() {
         screenRecordingPollTask?.cancel()
@@ -842,11 +831,15 @@ final class MacConnectionModel: ObservableObject {
         case .input:
             guard let event = command.remoteInputEvent else { return }
             let peerService = peers
-            remoteInput.submit(event) { [weak self] accepted in
+            remoteInput.submit(event) { [weak self] accepted, pointer in
                 if event.shouldAcknowledge, let sequence = event.sequence {
                     peerService.send(ControlMessage(
                         .status,
-                        detail: "input-ack:\(sequence):\(accepted ? 1 : 0)"
+                        detail: Self.inputAcknowledgementDetail(
+                            sequence: sequence,
+                            accepted: accepted,
+                            pointer: pointer
+                        )
                     ))
                 }
                 DispatchQueue.main.async { [weak self] in
@@ -862,6 +855,22 @@ final class MacConnectionModel: ObservableObject {
             guard let information = command.systemInformationPayload else { return }
             remoteSystemInformation = information
             diagnosticActionDetail = "Connected device information updated."
+        case .requestClipboard:
+            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+                peers.send(ControlMessage(.clipboardError, detail: "The Mac clipboard has no text."))
+                return
+            }
+            peers.send(.clipboardText(text))
+        case .clipboardText:
+            guard let text = command.clipboardTextPayload else {
+                clipboardTransferStatus = "The received clipboard text was invalid or too large."
+                return
+            }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            clipboardTransferStatus = "Copied iPad clipboard to the Mac."
+        case .clipboardError:
+            clipboardTransferStatus = command.detail ?? "Clipboard transfer failed."
         }
     }
 
@@ -876,17 +885,21 @@ final class MacConnectionModel: ObservableObject {
     }
 
     private func sendRemoteInputPermissionStatus() {
-        #if SIDECARBRIDGE_APP_STORE_SAFE
-        peers.send(ControlMessage(
-            .status,
-            detail: "remote-input-unavailable-store-build"
-        ))
-        #else
         peers.send(ControlMessage(
             .status,
             detail: remoteInputAuthorized ? "accessibility-passed" : "accessibility-required"
         ))
-        #endif
+    }
+
+    private nonisolated static func inputAcknowledgementDetail(
+        sequence: UInt64,
+        accepted: Bool,
+        pointer: CGPoint?
+    ) -> String {
+        var detail = "input-ack:\(sequence):\(accepted ? 1 : 0)"
+        guard let pointer else { return detail }
+        detail += ":\(pointer.x):\(pointer.y)"
+        return detail
     }
 
     private func refreshDevices() {

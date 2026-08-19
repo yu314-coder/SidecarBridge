@@ -28,10 +28,6 @@ struct SidecarBridgeMacApp: App {
                 .task {
                     MacShutdownCoordinator.shared.attach(model)
                     model.start()
-                    if ProcessInfo.processInfo.arguments.contains("--test-control-up") {
-                        try? await Task.sleep(for: .seconds(1))
-                        model.testControlShortcut("up")
-                    }
                 }
         }
         .windowResizability(.contentMinSize)
@@ -64,20 +60,12 @@ struct SidecarBridgeMacApp: App {
             Button("Open Transfers Folder") { model.openTransferFolder() }
                 .keyboardShortcut("f", modifiers: [.command, .option])
 
-            Menu("Input shortcuts") {
-                #if SIDECARBRIDGE_APP_STORE_SAFE
-                Text("Available in the direct companion build")
-                #else
-                Button("Control–↑") { model.testControlShortcut("up") }
-                Button("Control–↓") { model.testControlShortcut("down") }
-                Button("Control–←") { model.testControlShortcut("left") }
-                Button("Control–→") { model.testControlShortcut("right") }
-                Divider()
-                Button("Option–click") { model.testModifierClick(["option"]) }
-                Button("Shift–click") { model.testModifierClick(["shift"]) }
-                Button("Option–Shift–click") { model.testModifierClick(["option", "shift"]) }
-                #endif
-            }
+            Divider()
+
+            Button("Copy iPad Clipboard") { model.requestPadClipboard() }
+                .disabled(!model.hasPadPeer)
+            Button("Send Mac Clipboard") { model.sendClipboardToPad() }
+                .disabled(!model.hasPadPeer)
 
             Divider()
 
