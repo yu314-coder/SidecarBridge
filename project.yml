@@ -91,9 +91,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
         PRODUCT_NAME: SidecarBridge
         MARKETING_VERSION: "1.2"
-        # iOS/iPadOS has build 71 as its latest uploaded build, so 72 is the
-        # next valid build for marketing version 1.2.
-        CURRENT_PROJECT_VERSION: "72"
+        # App Store Connect accepted a fresh iOS build string for the new
+        # marketing version, so the selected 1.2 build is 1. (The Mac target
+        # must continue its independent monotonically increasing sequence.)
+        CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO

@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **macOS build 63 and iOS/iPadOS build 72** on 2026-08-19.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **macOS build 63 and iOS/iPadOS build 1** on 2026-08-19.
 
 ## App Store links
 
@@ -9,7 +9,7 @@ Both platform listings are approved and available through the same SidecarBridge
 - [Mac App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
 - [iOS/iPadOS App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
 
-Version 1.0 is approved and available on both platforms. Version 1.1 is approved for iOS/iPadOS; the Mac 1.1 record remains the active App Store submission. Version 1.2 is uploaded and valid as macOS build 63 and iOS/iPadOS build 72. The iOS/iPadOS 1.2 version record is prepared with build 72 attached; the Mac 1.2 build is available as a valid pre-release build until the active Mac 1.1 submission is cleared.
+Version 1.0 is approved and available on both platforms. Version 1.1 is approved for iOS/iPadOS; the Mac 1.1 record remains the active App Store submission. Version 1.2 is uploaded and valid as macOS build 63 and iOS/iPadOS build 1. The iOS/iPadOS 1.2 version record is prepared with build 1 attached; build 72 remains a valid unselected pre-release build. The Mac 1.2 build is available as a valid pre-release build until the active Mac 1.1 submission is cleared.
 
 Apple controls regional redirects and listing propagation after approval.
 
@@ -45,7 +45,7 @@ The current project has the following identity:
 | Shared bundle ID | `io.sidecarbridge.mac` |
 | Marketing version | `1.2` (uploaded; 1.0 and 1.1 are available/active by platform) |
 | Current macOS build | `63` |
-| Current iOS/iPadOS build | `72` |
+| Current iOS/iPadOS build | `1` |
 | macOS minimum | macOS 14 |
 | iOS/iPadOS minimum | iOS/iPadOS 17 |
 

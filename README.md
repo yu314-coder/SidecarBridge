@@ -22,7 +22,7 @@ SidecarBridge is a paired macOS + iOS/iPadOS app that turns an iPhone or iPad in
 - **macOS:** [Download SidecarBridge from the Mac App Store](https://apps.apple.com/app/sidecarbridge/id6792298083)
 - **iOS/iPadOS:** [Download SidecarBridge from the App Store](https://apps.apple.com/app/sidecarbridge/id6792298083)
 
-The universal iOS/iPadOS app has passed App Store review and is available from the same multi-platform listing. Version 1.2 has been uploaded as macOS build 63 and iOS/iPadOS build 72. The iOS/iPadOS 1.2 record is prepared in App Store Connect; the Mac 1.2 build is valid in TestFlight while the active Mac 1.1 store submission is still being cleared.
+The universal iOS/iPadOS app has passed App Store review and is available from the same multi-platform listing. Version 1.2 has been uploaded as macOS build 63 and iOS/iPadOS build 1. The iOS/iPadOS 1.2 record is prepared in App Store Connect with build 1 attached; the Mac 1.2 build is valid in TestFlight while the active Mac 1.1 store submission is still being cleared.
 
 On macOS, optional **Shutdown Handoff** keeps an active remote-control session alive while other user apps close during logout, restart, or shutdown. If another app still needs attention, or the remote connection is lost, SidecarBridge cancels the termination request instead of disappearing and leaving the Mac uncontrollable. macOS limits graceful termination delays to under two minutes, so the hold is capped at 105 seconds.
 
