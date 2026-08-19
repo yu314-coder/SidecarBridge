@@ -1,13 +1,15 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **Build 14** on 2026-07-27.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **macOS build 62 and iOS/iPadOS build 71** on 2026-08-19.
 
 ## App Store links
 
-The macOS listing is approved and available through the SidecarBridge App Store record:
+Both platform listings are approved and available through the same SidecarBridge App Store record:
 
 - [Mac App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
-- **iOS/iPadOS:** _Add the listing after iOS App Store review approval._
+- [iOS/iPadOS App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
+
+Version 1.0 is approved and available on both platforms. Version 1.1 is the current submission: macOS build 62 and iOS/iPadOS build 71 have passed processing and are waiting for App Store review.
 
 Apple controls regional redirects and listing propagation after approval.
 
@@ -41,8 +43,9 @@ The current project has the following identity:
 | macOS target | `SidecarBridgeMac` |
 | Universal iOS/iPadOS target | `SidecarBridgePad` |
 | Shared bundle ID | `io.sidecarbridge.mac` |
-| Marketing version | `1.0` |
-| Build number | `3` |
+| Marketing version | `1.1` (current submission; 1.0 is available) |
+| Current macOS build | `62` |
+| Current iOS/iPadOS build | `71` |
 | macOS minimum | macOS 14 |
 | iOS/iPadOS minimum | iOS/iPadOS 17 |
 

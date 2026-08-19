@@ -10,7 +10,7 @@
   <a href="https://apps.apple.com/app/sidecarbridge/id6792298083">
     <img src="https://img.shields.io/badge/Mac%20App%20Store-Available-0A84FF?logo=apple&logoColor=white" alt="Mac App Store available">
   </a>
-  <img src="https://img.shields.io/badge/iOS%2FiPadOS-Coming%20after%20review-lightgrey?logo=apple&logoColor=555555" alt="iOS and iPadOS coming after review">
+  <img src="https://img.shields.io/badge/iOS%2FiPadOS-Available-34C759?logo=apple&logoColor=white" alt="iOS and iPadOS available">
 </p>
 
 For the full architecture, protocol, permission, distribution, testing, and troubleshooting reference, see [SIDECARBRIDGE_TECHNICAL_GUIDE.md](SIDECARBRIDGE_TECHNICAL_GUIDE.md). The current accessibility support matrix is in [ACCESSIBILITY.md](ACCESSIBILITY.md).
@@ -20,7 +20,9 @@ SidecarBridge is a paired macOS + iOS/iPadOS app that turns an iPhone or iPad in
 ## App Store
 
 - **macOS:** [Download SidecarBridge from the Mac App Store](https://apps.apple.com/app/sidecarbridge/id6792298083)
-- **iOS/iPadOS:** _The App Store link will be added after iOS review approval._
+- **iOS/iPadOS:** [Download SidecarBridge from the App Store](https://apps.apple.com/app/sidecarbridge/id6792298083)
+
+The universal iOS/iPadOS app has passed App Store review and is available from the same multi-platform listing. The current 1.1 update is under review with macOS build 62 and iOS/iPadOS build 71.
 
 On macOS, optional **Shutdown Handoff** keeps an active remote-control session alive while other user apps close during logout, restart, or shutdown. If another app still needs attention, or the remote connection is lost, SidecarBridge cancels the termination request instead of disappearing and leaving the Mac uncontrollable. macOS limits graceful termination delays to under two minutes, so the hold is capped at 105 seconds.
 
@@ -66,7 +68,7 @@ If the app reports `NoAuth`, macOS or iOS/iPadOS has denied Local Network access
 
 ### iPhone support
 
-Build 14 is universal (`TARGETED_DEVICE_FAMILY = 1,2`). iPhone provides the encrypted in-app display, touch input, discovery, settings, file transfer, zoom, and background Picture in Picture controls. Apple System Sidecar is an iPad-only feature, so SidecarBridge hides that mode on iPhone instead of presenting a control that cannot work.
+The current mobile target is universal (`TARGETED_DEVICE_FAMILY = 1,2`). iPhone provides the encrypted in-app display, touch input, discovery, settings, file transfer, zoom, and background Picture in Picture controls. Apple System Sidecar is an iPad-only feature, so SidecarBridge hides that mode on iPhone instead of presenting a control that cannot work.
 
 ## What is and is not possible
 
