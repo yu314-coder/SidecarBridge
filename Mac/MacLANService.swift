@@ -48,7 +48,14 @@ final class MacLANService {
 
     private var sendingFrame = false
     private var waitingForKeyFrame = false
-    private var inFlightVideoSequence: UInt64?
+    // Allow a small number of Network.framework sends to be in flight. A
+    // single contentProcessed gate made a large H.264 frame serialize the
+    // entire capture path and produced visible cadence dips on fast local
+    // links. The window is bounded so control packets still get prompt queue
+    // time and old frames cannot accumulate latency.
+    private let maximumVideoInFlight = 3
+    private var inFlightVideoSequences = Set<UInt64>()
+    private var videoWatchdogs: [UInt64: DispatchWorkItem] = [:]
     private var pendingVideo: [PendingVideo] = []
     private(set) var isConnected = false
 
@@ -453,11 +460,9 @@ final class MacLANService {
             return
         }
 
-        if inFlightVideoSequence == nil && pendingVideo.isEmpty {
+        if pendingVideo.count < 4 {
             pendingVideo.append(video)
             sendNextVideoIfPossible()
-        } else if pendingVideo.count < 2 {
-            pendingVideo.append(video)
         } else {
             // Never let old frames build latency. Once the small burst buffer
             // fills, discard that dependency chain and restart at a keyframe.
@@ -472,39 +477,55 @@ final class MacLANService {
     }
 
     private func sendNextVideoIfPossible() {
-        guard inFlightVideoSequence == nil,
-              !pendingVideo.isEmpty,
-              isConnected,
+        guard isConnected,
               let connection,
               let secureSession else { return }
 
-        let video = pendingVideo.removeFirst()
-
-        do {
-            let data = try LANWire.encrypted(video.packet, session: secureSession)
-            sendingFrame = true
-            inFlightVideoSequence = video.sequence
-            connection.send(content: data, completion: .contentProcessed { [weak self] error in
-                guard let self else { return }
-                if let error {
-                    self.clearConnection(notify: true, error: error.localizedDescription)
-                } else if self.inFlightVideoSequence == video.sequence {
-                    self.inFlightVideoSequence = nil
-                    self.sendingFrame = false
-                    self.sendNextVideoIfPossible()
-                }
-            })
-            queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self, self.inFlightVideoSequence == video.sequence else { return }
-                self.inFlightVideoSequence = nil
-                self.sendingFrame = false
-                self.pendingVideo.removeAll(keepingCapacity: true)
-                self.waitingForKeyFrame = true
-                self.onKeyFrameNeeded?()
+        while inFlightVideoSequences.count < maximumVideoInFlight,
+              !pendingVideo.isEmpty {
+            let video = pendingVideo.removeFirst()
+            do {
+                let data = try LANWire.encrypted(video.packet, session: secureSession)
+                inFlightVideoSequences.insert(video.sequence)
+                sendingFrame = true
+                connection.send(content: data, completion: .contentProcessed { [weak self, weak connection] error in
+                    guard let self else { return }
+                    self.queue.async {
+                        guard let connection, self.connection === connection else { return }
+                        if let error {
+                            self.clearConnection(notify: true, error: error.localizedDescription)
+                        } else {
+                            self.videoWatchdogs.removeValue(forKey: video.sequence)?.cancel()
+                            self.inFlightVideoSequences.remove(video.sequence)
+                            self.sendingFrame = !self.inFlightVideoSequences.isEmpty
+                            self.sendNextVideoIfPossible()
+                        }
+                    }
+                })
+                armVideoWatchdog(for: video.sequence)
+            } catch {
+                clearConnection(notify: true, error: error.localizedDescription)
+                return
             }
-        } catch {
-            clearConnection(notify: true, error: error.localizedDescription)
         }
+    }
+
+    private func armVideoWatchdog(for sequence: UInt64) {
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.inFlightVideoSequences.contains(sequence) else { return }
+            self.inFlightVideoSequences.removeAll(keepingCapacity: true)
+            self.videoWatchdogs.values.forEach { $0.cancel() }
+            self.videoWatchdogs.removeAll(keepingCapacity: true)
+            self.sendingFrame = false
+            self.pendingVideo.removeAll(keepingCapacity: true)
+            self.waitingForKeyFrame = true
+            self.onKeyFrameNeeded?()
+        }
+        videoWatchdogs[sequence] = workItem
+        // This is a recovery guard, not the normal pacing mechanism. A
+        // slightly longer window avoids restarting a healthy high-bitrate
+        // stream merely because one local send briefly waited for the socket.
+        queue.asyncAfter(deadline: .now() + 1.5, execute: workItem)
     }
 
     private func clearConnection(notify shouldNotify: Bool, error: String? = nil) {
@@ -518,7 +539,9 @@ final class MacLANService {
         secureSession = nil
         sendingFrame = false
         waitingForKeyFrame = false
-        inFlightVideoSequence = nil
+        videoWatchdogs.values.forEach { $0.cancel() }
+        videoWatchdogs.removeAll(keepingCapacity: true)
+        inFlightVideoSequences.removeAll(keepingCapacity: true)
         pendingVideo.removeAll(keepingCapacity: true)
         isConnected = false
         if shouldNotify && (wasConnected || error != nil) { notify(connected: false, value: error) }

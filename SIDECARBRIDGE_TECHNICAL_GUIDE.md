@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **macOS build 62 and iOS/iPadOS build 71** on 2026-08-19.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **macOS build 63 and iOS/iPadOS build 72** on 2026-08-19.
 
 ## App Store links
 
@@ -9,7 +9,7 @@ Both platform listings are approved and available through the same SidecarBridge
 - [Mac App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
 - [iOS/iPadOS App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
 
-Version 1.0 is approved and available on both platforms. Version 1.1 is the current submission: macOS build 62 and iOS/iPadOS build 71 have passed processing and are waiting for App Store review.
+Version 1.0 is approved and available on both platforms. Version 1.1 is approved for iOS/iPadOS; the Mac 1.1 record remains the active App Store submission. Version 1.2 is uploaded and valid as macOS build 63 and iOS/iPadOS build 72. The iOS/iPadOS 1.2 version record is prepared with build 72 attached; the Mac 1.2 build is available as a valid pre-release build until the active Mac 1.1 submission is cleared.
 
 Apple controls regional redirects and listing propagation after approval.
 
@@ -43,9 +43,9 @@ The current project has the following identity:
 | macOS target | `SidecarBridgeMac` |
 | Universal iOS/iPadOS target | `SidecarBridgePad` |
 | Shared bundle ID | `io.sidecarbridge.mac` |
-| Marketing version | `1.1` (current submission; 1.0 is available) |
-| Current macOS build | `62` |
-| Current iOS/iPadOS build | `71` |
+| Marketing version | `1.2` (uploaded; 1.0 and 1.1 are available/active by platform) |
+| Current macOS build | `63` |
+| Current iOS/iPadOS build | `72` |
 | macOS minimum | macOS 14 |
 | iOS/iPadOS minimum | iOS/iPadOS 17 |
 
@@ -191,7 +191,7 @@ The shared packet codec supports:
 
 - JSON control messages;
 - JPEG frames retained for compatibility;
-- structured H.264 frames containing sequence, dimensions, keyframe state, parameter sets, and encoded sample bytes.
+- structured H.264 frames containing sequence, dimensions, encoder frame rate, keyframe state, parameter sets, and encoded sample bytes.
 
 Authenticated peers also exchange a bounded system-information snapshot through
 the encrypted control channel. The receiver validates string lengths, processor
@@ -215,8 +215,8 @@ Encryption protects packet confidentiality and integrity. The one-time-code proo
 
 - native-width-aware HiDPI output;
 - width clamped to a practical 1440–2880-pixel range;
-- up to 40 frames per second on direct LAN/AWDL and 30 on nearby fallback;
-- transport-specific bitrate and frame pacing;
+- up to 60 frames per second on direct LAN/AWDL and 30 on nearby fallback;
+- transport-specific bitrate and frame pacing (direct quality is bounded at 20 Mbps; nearby at 8 Mbps);
 - automatic 15 fps pacing while the iPad viewer is in background PiP, restored on foreground return;
 - one periodic keyframe per second, plus an immediate keyframe request when a transport drops a dependent frame chain.
 
@@ -225,8 +225,8 @@ Encryption protects packet confidentiality and integrity. The one-time-code proo
 The Mac never allows old frames to create an ever-growing latency queue:
 
 - ScreenCaptureKit queue depth is two surfaces;
-- only one dependent frame waits behind the in-flight frame;
-- direct LAN/AWDL sends the next frame when Network.framework finishes processing the preceding send, avoiding a frame-rate limit based on round-trip latency;
+- at most three encrypted video sends are in flight, with a four-frame pending cap;
+- direct LAN/AWDL uses the bounded send window so a large frame does not serialize the capture path or impose a round-trip frame-rate limit;
 - nearby Multipeer video does not send a reliable receipt for every frame, avoiding reverse-path congestion and round-trip gating;
 - if the queue saturates, dependent frames are discarded;
 - transmission resumes at the next keyframe;

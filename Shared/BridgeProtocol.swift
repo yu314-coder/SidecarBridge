@@ -827,9 +827,30 @@ struct VideoFrame: Equatable {
     let sequence: UInt64
     let width: Int
     let height: Int
+    /// The encoder's actual cadence. Keeping this with the frame prevents a
+    /// 60 FPS stream from being scheduled at the old 30 FPS display clock.
+    let frameRate: Int
     let isKeyFrame: Bool
     let parameterSets: [Data]
     let sampleData: Data
+
+    init(
+        sequence: UInt64,
+        width: Int,
+        height: Int,
+        frameRate: Int = 30,
+        isKeyFrame: Bool,
+        parameterSets: [Data],
+        sampleData: Data
+    ) {
+        self.sequence = sequence
+        self.width = width
+        self.height = height
+        self.frameRate = min(max(frameRate, 1), 120)
+        self.isKeyFrame = isKeyFrame
+        self.parameterSets = parameterSets
+        self.sampleData = sampleData
+    }
 }
 
 enum PacketCodec {
@@ -846,6 +867,9 @@ enum PacketCodec {
         let sequence: UInt64
         let width: Int
         let height: Int
+        // Optional keeps a newly built viewer able to decode frames from a
+        // previous build while all current senders advertise their cadence.
+        let frameRate: Int?
         let isKeyFrame: Bool
         let parameterSets: [Data]
     }
@@ -865,6 +889,7 @@ enum PacketCodec {
                 sequence: frame.sequence,
                 width: frame.width,
                 height: frame.height,
+                frameRate: frame.frameRate,
                 isKeyFrame: frame.isKeyFrame,
                 parameterSets: frame.parameterSets
             ))
@@ -920,6 +945,7 @@ enum PacketCodec {
                 sequence: header.sequence,
                 width: header.width,
                 height: header.height,
+                frameRate: min(max(header.frameRate ?? 30, 1), 120),
                 isKeyFrame: header.isKeyFrame,
                 parameterSets: header.parameterSets,
                 sampleData: Data(videoData[headerEnd...])

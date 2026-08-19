@@ -109,6 +109,7 @@ final class PacketCodecTests: XCTestCase {
             sequence: 99,
             width: 2360,
             height: 1328,
+            frameRate: 60,
             isKeyFrame: true,
             parameterSets: [Data([0x67, 1, 2]), Data([0x68, 3, 4])],
             sampleData: Data([0, 0, 0, 2, 0x65, 0x88])

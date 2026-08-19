@@ -83,7 +83,11 @@ final class H264Encoder {
         guard status == noErr, let session else { throw EncoderError.createFailed(status) }
         self.session = session
 
-        let bitrate = targetBitrate ?? min(16_000_000, max(8_000_000, width * height * 7 / 2))
+        // Keep enough bits for fine text at the larger iPad sizes while
+        // bounding the direct stream so a transient Wi-Fi dip does not create
+        // an unbounded TCP backlog. The value is bits per second; VideoToolbox
+        // receives the corresponding byte-per-second data-rate limit below.
+        let bitrate = targetBitrate ?? min(24_000_000, max(12_000_000, width * height * 6))
         // One periodic keyframe per second preserves recovery without spending
         // bandwidth on four large IDR frames every second. Transport queues
         // explicitly request an immediate keyframe when they drop a chain.
@@ -96,7 +100,7 @@ final class H264Encoder {
             (kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: keyFrameInterval)),
             (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 1.0)),
             (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate)),
-            (kVTCompressionPropertyKey_DataRateLimits, [NSNumber(value: bitrate * 3 / 16), NSNumber(value: 1)] as CFArray)
+            (kVTCompressionPropertyKey_DataRateLimits, [NSNumber(value: bitrate / 8), NSNumber(value: 1)] as CFArray)
         ]
         for (key, value) in settings {
             let result = VTSessionSetProperty(session, key: key, value: value)
@@ -180,6 +184,7 @@ final class H264Encoder {
             sequence: nextSequence,
             width: width,
             height: height,
+            frameRate: frameRate,
             isKeyFrame: isKeyFrame,
             parameterSets: parameterSets,
             sampleData: sampleData

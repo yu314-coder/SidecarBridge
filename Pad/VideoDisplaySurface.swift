@@ -68,6 +68,7 @@ final class VideoDisplayController: NSObject {
         guard let sampleBuffer = makeSampleBuffer(
             data: frame.sampleData,
             format: formatDescription,
+            frameRate: frame.frameRate,
             sequence: frame.sequence,
             isKeyFrame: frame.isKeyFrame
         ) else { return false }
@@ -382,6 +383,7 @@ final class VideoDisplayController: NSObject {
     private func makeSampleBuffer(
         data: Data,
         format: CMVideoFormatDescription,
+        frameRate: Int,
         sequence: UInt64,
         isKeyFrame: Bool
     ) -> CMSampleBuffer? {
@@ -410,11 +412,12 @@ final class VideoDisplayController: NSObject {
         }
         guard copyStatus == kCMBlockBufferNoErr else { return nil }
 
+        let safeFrameRate = min(max(frameRate, 1), 120)
         var timing = CMSampleTimingInfo(
-            duration: CMTime(value: 1, timescale: 30),
+            duration: CMTime(value: 1, timescale: CMTimeScale(safeFrameRate)),
             presentationTimeStamp: CMTime(
                 value: Int64(clamping: sequence),
-                timescale: 30
+                timescale: CMTimeScale(safeFrameRate)
             ),
             decodeTimeStamp: .invalid
         )

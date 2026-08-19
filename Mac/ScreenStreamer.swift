@@ -34,7 +34,10 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
     private var preferredWidth = 2360
     private var transportProfile: TransportProfile = .direct
     private var activeFrameRate = 40
-    private var foregroundFrameRate = 40
+    // Match the 60 Hz iPad display clock on the direct local route. Nearby
+    // Multipeer remains deliberately lower so it does not turn loss into
+    // visible stutter on a constrained AWDL path.
+    private var foregroundFrameRate = 60
     private var viewerIsBackgrounded = false
     private var waitingForViewerResume = false
 
@@ -99,11 +102,11 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let configuration = SCStreamConfiguration()
         let targetWidth = transportProfile == .nearbyP2P
-            ? min(preferredWidth, 1728)
+            ? min(preferredWidth, 1920)
             : preferredWidth
-        foregroundFrameRate = transportProfile == .nearbyP2P ? 30 : 40
+        foregroundFrameRate = transportProfile == .nearbyP2P ? 30 : 60
         updateActiveFrameRate()
-        let targetBitrate = transportProfile == .nearbyP2P ? 5_000_000 : nil
+        let targetBitrate = transportProfile == .nearbyP2P ? 8_000_000 : 20_000_000
         let scale = min(1.0, Double(targetWidth) / Double(display.width))
         configuration.width = max(960, Int(Double(display.width) * scale)) & ~1
         configuration.height = max(540, Int(Double(display.height) * scale)) & ~1
@@ -111,7 +114,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
         // Keep only a small capture cushion. A deep ScreenCaptureKit queue
         // makes the viewer look smooth while adding avoidable end-to-end
         // latency when the link is busy.
-        configuration.queueDepth = transportProfile == .nearbyP2P ? 2 : 3
+        configuration.queueDepth = 2
         // Capture the real Mac cursor. The iPad viewer deliberately does not
         // draw a second software cursor, so the pointer users see is the one
         // that WindowServer actually moved after a remote input event.
@@ -120,6 +123,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput {
         configuration.colorSpaceName = CGColorSpace.sRGB
 
         encoder.onFrame = { [weak self] frame in self?.onFrame?(frame) }
+        lastFrameTime = 0
         try encoder.start(
             width: configuration.width,
             height: configuration.height,

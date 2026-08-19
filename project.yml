@@ -7,8 +7,11 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.1"
-    CURRENT_PROJECT_VERSION: "61"
+    MARKETING_VERSION: "1.2"
+    # App Store Connect requires a monotonically increasing build number for
+    # each platform. The last uploaded Mac build is 62, so 63 is the next
+    # valid Mac build for marketing version 1.2.
+    CURRENT_PROJECT_VERSION: "63"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -87,8 +90,10 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
         PRODUCT_NAME: SidecarBridge
-        MARKETING_VERSION: "1.1"
-        CURRENT_PROJECT_VERSION: "70"
+        MARKETING_VERSION: "1.2"
+        # iOS/iPadOS has build 71 as its latest uploaded build, so 72 is the
+        # next valid build for marketing version 1.2.
+        CURRENT_PROJECT_VERSION: "72"
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
