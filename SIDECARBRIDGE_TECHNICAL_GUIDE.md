@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **macOS build 63 and iOS/iPadOS build 1** on 2026-08-19.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **macOS build 63 and iOS/iPadOS build 73** on 2026-08-20.
 
 ## App Store links
 
@@ -9,7 +9,7 @@ Both platform listings are approved and available through the same SidecarBridge
 - [Mac App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
 - [iOS/iPadOS App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
 
-Version 1.0 is approved and available on both platforms. Version 1.1 is approved for iOS/iPadOS; the Mac 1.1 record remains the active App Store submission. Version 1.2 is uploaded and valid as macOS build 63 and iOS/iPadOS build 1. The iOS/iPadOS 1.2 version record is prepared with build 1 attached; build 72 remains a valid unselected pre-release build. The Mac 1.2 build is available as a valid pre-release build until the active Mac 1.1 submission is cleared.
+Version 1.0 is approved and available on both platforms. Version 1.1 is approved for iOS/iPadOS; the Mac 1.1 record remains the active App Store submission. Version 1.2 is uploaded and valid as macOS build 63 and iOS/iPadOS build 73. The iOS/iPadOS 1.2 version record is prepared with build 73 attached; earlier 1.2 builds remain valid unselected pre-release builds. The Mac 1.2 build is available as a valid pre-release build until the active Mac 1.1 submission is cleared.
 
 Apple controls regional redirects and listing propagation after approval.
 
@@ -45,11 +45,15 @@ The current project has the following identity:
 | Shared bundle ID | `io.sidecarbridge.mac` |
 | Marketing version | `1.2` (uploaded; 1.0 and 1.1 are available/active by platform) |
 | Current macOS build | `63` |
-| Current iOS/iPadOS build | `1` |
+| Current iOS/iPadOS build | `73` |
 | macOS minimum | macOS 14 |
 | iOS/iPadOS minimum | iOS/iPadOS 17 |
 
 The macOS and universal iOS/iPadOS targets intentionally use the same app name and bundle ID so App Store Connect can represent them as one multi-platform app record. Their target names differ only inside Xcode.
+
+### Release-numbering smoke test
+
+Before the next marketing-version change, both targets were dry-built with Xcode 26.5 using the requested `MARKETING_VERSION=1.3 CURRENT_PROJECT_VERSION=1` overrides. The macOS and iOS/iPadOS projects compile successfully with that pair. The override is a compile test only: App Store Connect still validates build numbers per platform. In this app record the next Mac upload must continue from Mac build 63 (64 or higher), while the iOS/iPadOS 1.3 record can start at build 1. Do not upload macOS 1.3 (1) unless App Store Connect explicitly accepts a new platform sequence; the prior Mac 1.0/1.1/1.2 uploads make that number non-monotonic.
 
 The latest live verification confirmed:
 
@@ -61,7 +65,7 @@ The latest live verification confirmed:
 - when Bonjour results were absent on the iPad, its fixed-port probe reached both Mac interfaces;
 - the Mac preserved the first handshake, rejected the duplicate interface arrival, and established the encrypted stream;
 - the iPad displayed the live Mac screen over the same-Wi-Fi direct path;
-- all 14 protocol and chunked-transfer tests pass.
+- all 83 protocol, input, clipboard, and chunked-transfer tests pass in the current Mac test run.
 
 ## 3. High-level architecture
 
@@ -128,6 +132,8 @@ The iPad starts `PadLANService`, which:
 - tries the last successful private Mac IPv4 address before a full subnet scan;
 - probes only port `45454` across the iPad's private local `/24` when Bonjour is ready but empty;
 - reconnects automatically after a connection ends.
+
+Discovery is passive until the user chooses a device card or presses **Connect with Code**. The iPad always presents the 16-digit pairing-code field while disconnected. A code may include dashes; the UI normalizes and groups digits before sending. When a Mac card is selected (or a single discovered Mac is the only candidate), the code-first action starts the selected route and submits the code before the handshake reaches authentication. The code proves identity but does not replace a network route, so an unfamiliar Mac still has to be located by Bonjour, the remembered direct address, the fixed-port local fallback, or nearby P2P. A successful first proof saves a device-specific Keychain credential; subsequent connects use it without asking again.
 
 The fixed-port probe is a discovery fallback for access points that filter multicast DNS while still allowing ordinary device-to-device TCP. It does not weaken the protocol: the Mac still requires the Curve25519 handshake and remembered or explicit pairing approval before accepting control or video traffic. Probes are batched, time-bounded, restricted to private IPv4 addresses on active Ethernet-style interfaces, and stopped immediately after one path succeeds.
 
@@ -288,7 +294,7 @@ The iPad UI includes an AnyDesk-style right-edge control drawer for:
 
 ### 7.1 File transfer
 
-`FileTransferEngine` sends files in either direction over the active paired transport. Each 128 KB chunk is acknowledged before the next chunk is read, bounding memory and preventing a large transfer queue from starving video or input. Transfers are limited to 512 MB, validate offsets and sizes, sanitize destination names, and use the existing authenticated encryption layer. The Mac UI can queue multiple selected files, cancel the active transfer, open the transfer folder, and show live byte progress, rate, and ETA. An idle transfer has a 45-second recovery window. The Mac saves received files in its private `Application Support/SidecarBridge/Transfers` folder; the iPad stores them in its Documents container and exposes the system share sheet.
+`FileTransferEngine` sends files in either direction over the active paired transport. Each 128 KB chunk is acknowledged before the next chunk is read, bounding memory and preventing a large transfer queue from starving video or input. Transfers are limited to 512 MB, validate offsets and sizes, sanitize destination names, and use the existing authenticated encryption layer. The Mac UI can queue multiple selected files, cancel the active transfer, open the transfer folder, and show live byte progress, rate, and ETA. An idle transfer has a 45-second recovery window. The Mac saves received files in its private `Application Support/SidecarBridge/Transfers` folder; the iPad stores them in its Documents container and exposes the system share sheet. A file copied to either device's clipboard follows this same verified path and is installed as a clipboard file URL only after the receiver has validated and atomically saved it. With automatic text/file sync enabled, the copied file is queued directly from the pasteboard, so the user does not need to open the transfer picker.
 
 ## 8. Permission model
 
@@ -331,6 +337,8 @@ On iPadOS:
 - a short system background task protects the connection while PiP is starting;
 - a three-second PiP start watchdog clears a stuck start, and the model retries up to three times;
 - the encrypted connection is validated when the app becomes active, with discovery rebuilt only if the route is stale;
+- clipboard monitoring is owned by the connection model: change notifications plus pasteboard change-count polling run while the process is alive, including PiP; local changes are retained across reconnects, and the foreground transition checks the latest clipboard after suspension and requests the Mac value only when the iPad pasteboard did not change;
+- an iPadOS background task protects a copy made during the app-switch grace period and an active file transfer; unrestricted real-time clipboard monitoring is not possible after iPadOS fully suspends a third-party app, so the latest value is reconciled on foreground return;
 - the Mac lowers capture pacing to 15 fps during PiP and restores the transport's foreground rate on return;
 - if PiP is unavailable, disabled, or dismissed, iPadOS can suspend the ordinary app after the grace period.
 
@@ -452,20 +460,21 @@ Check in this order:
 3. Keep Wi-Fi and Bluetooth enabled on both devices.
 4. Confirm both devices are on the same non-isolated LAN. Guest Wi-Fi often blocks client-to-client traffic.
 5. Tap **Search Again** in the iPad recovery panel.
-6. Verify the Mac advertises the direct service:
+6. If discovery is slow, select the remembered/visible Mac card, enter the current 16-digit code shown on the Mac, and tap **Connect with Code**. The field is intentionally always available; entering the code does not silently connect to an arbitrary discovered device.
+7. Verify the Mac advertises the direct service:
 
    ```sh
    /usr/bin/dns-sd -B _sb-direct._tcp local.
    ```
 
-7. Verify the nearby fallback advertisement:
+8. Verify the nearby fallback advertisement:
 
    ```sh
    /usr/bin/dns-sd -B _sb-screen._tcp local.
    ```
 
-8. Confirm the Mac firewall allows SidecarBridge.
-9. If installing from Xcode, unlock the iPad, trust the Mac, enable Developer Mode, and reconnect once by cable.
+9. Confirm the Mac firewall allows SidecarBridge.
+10. If installing from Xcode, unlock the iPad, trust the Mac, enable Developer Mode, and reconnect once by cable.
 
 Do not interpret the Mac's **READY** or **STANDBY** state as a failed connection. Those states mean it is ready for an iPad. **CONNECTING**, **ACTIVE**, and **RECOVERING** describe actual transport work.
 

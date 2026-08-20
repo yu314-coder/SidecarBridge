@@ -62,10 +62,11 @@ struct SidecarBridgeMacApp: App {
 
             Divider()
 
-            Button("Copy iPad Clipboard") { model.requestPadClipboard() }
+            Button("Receive Clipboard") { model.requestPadClipboard() }
                 .disabled(!model.hasPadPeer)
-            Button("Send Mac Clipboard") { model.sendClipboardToPad() }
+            Button("Send Clipboard") { model.sendClipboardToPad() }
                 .disabled(!model.hasPadPeer)
+            Toggle("Automatic text and file sync", isOn: $model.automaticClipboardSyncEnabled)
 
             Divider()
 

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MacContentView: View {
     @ObservedObject var model: MacConnectionModel
@@ -400,6 +401,9 @@ struct MacContentView: View {
         .padding(17)
         .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+            model.acceptDroppedFiles(providers)
+        }
     }
 
     private var clipboardCard: some View {
@@ -412,17 +416,20 @@ struct MacContentView: View {
                     .background(.purple.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Clipboard transfer").font(.headline)
-                    Text("Move text in either direction with one tap. Clipboard contents stay opt-in.")
+                    Text("Copy on either device and it syncs automatically while connected. No send button is needed; the buttons below are a manual fallback.")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.58))
                 }
             }
 
+            Toggle("Automatic text and file sync", isOn: $model.automaticClipboardSyncEnabled)
+                .toggleStyle(.switch)
+
             HStack(spacing: 10) {
                 Button {
                     model.requestPadClipboard()
                 } label: {
-                    Label("Copy iPad → Mac", systemImage: "arrow.down.doc")
+                    Label("Receive Clipboard", systemImage: "arrow.down.doc")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.purple)
@@ -431,7 +438,7 @@ struct MacContentView: View {
                 Button {
                     model.sendClipboardToPad()
                 } label: {
-                    Label("Send Mac → iPad", systemImage: "arrow.up.doc")
+                    Label("Send Clipboard", systemImage: "arrow.up.doc")
                 }
                 .buttonStyle(.bordered)
                 .disabled(!model.hasPadPeer)

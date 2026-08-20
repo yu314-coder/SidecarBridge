@@ -98,6 +98,19 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertNotEqual(prepared, original)
     }
 
+    func testClipboardFileSignatureAndDeduplicationAreStable() {
+        let first = URL(fileURLWithPath: "/tmp/one.txt")
+        let second = URL(fileURLWithPath: "/tmp/two.txt")
+        let files = ClipboardTransfer.uniqueFileURLs([first, first, second])
+
+        XCTAssertEqual(files, [first, second])
+        XCTAssertEqual(
+            ClipboardTransfer.fileSignature(files),
+            "files:/tmp/one.txt|/tmp/two.txt"
+        )
+        XCTAssertNil(ClipboardTransfer.fileSignature([]))
+    }
+
     func testJPEGFrameRoundTrip() throws {
         let input = Data([0xFF, 0xD8, 0xFF, 0xD9])
         let data = try PacketCodec.encode(.jpeg(input))

@@ -276,6 +276,25 @@ enum ClipboardTransfer {
         }
         return result
     }
+
+    /// Stable content identity for a pasteboard containing file URLs. The
+    /// path is metadata only; file bytes still travel through the authenticated
+    /// chunked transfer engine.
+    static func fileSignature(_ urls: [URL]) -> String? {
+        let paths = urls
+            .filter(\.isFileURL)
+            .map { $0.standardizedFileURL.path }
+        guard !paths.isEmpty else { return nil }
+        return "files:" + paths.joined(separator: "|")
+    }
+
+    static func uniqueFileURLs(_ urls: [URL]) -> [URL] {
+        var seen = Set<String>()
+        return urls.filter { url in
+            guard url.isFileURL else { return false }
+            return seen.insert(url.standardizedFileURL.path).inserted
+        }
+    }
 }
 
 enum RemoteInputKind: String, Codable, Equatable {

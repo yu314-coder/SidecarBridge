@@ -93,14 +93,14 @@ struct PadContentView: View {
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [.item],
-            allowsMultipleSelection: false
+            allowsMultipleSelection: true
         ) { handleFileImport($0) }
     }
 
     private func handleFileImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            if let url = urls.first { model.sendFile(at: url) }
+            model.sendFiles(at: urls)
         case .failure(let error):
             model.fileTransferError = error.localizedDescription
         }
@@ -135,6 +135,12 @@ struct PadContentView: View {
                             } else {
                                 macSelectionPanel
                                 connectActionCard
+                                // Pairing is deliberately code-first: the
+                                // field is always present, even while Bonjour
+                                // or AWDL discovery is unavailable. Entering
+                                // the code never connects by itself; the user
+                                // still chooses a visible/remembered Mac.
+                                pairingCodePanel
                                 requirementStrip
 
                                 if visibleMacNames.isEmpty || model.isConnecting || model.pairingRequired || model.isDiscoveryTakingLonger || model.localNetworkPermissionNeeded {
@@ -490,11 +496,6 @@ struct PadContentView: View {
 
             Divider().overlay(.white.opacity(0.08))
 
-            if model.pairingRequired {
-                Divider().overlay(.white.opacity(0.08))
-                pairingCodePanel
-            }
-
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 12) { discoveryPathTiles }
                 VStack(spacing: 12) { discoveryPathTiles }
@@ -626,10 +627,13 @@ struct PadContentView: View {
 
     private var pairingCodePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("First-time secure pairing", systemImage: "lock.badge.clock")
+            Label(
+                model.pairingRequired ? "Enter the Mac pairing code" : "Connect with a 16-digit code",
+                systemImage: "lock.badge.clock"
+            )
                 .font(.headline)
                 .foregroundStyle(.cyan)
-            Text("Enter the 16-digit code shown by SidecarBridge on \(model.pairingMacName), including the dashes. They are inserted automatically as you type. It expires after five minutes and is replaced by a Keychain credential.")
+            Text("Enter the 16-digit code shown by SidecarBridge on \(model.pairingMacName), including the dashes. It is used for the first connection only; a trusted Keychain credential is saved for later connections. The code authenticates the selected Mac while discovery continues in the background.")
                 .font(.callout)
                 .foregroundStyle(.white.opacity(0.78))
                 .fixedSize(horizontal: false, vertical: true)
@@ -645,9 +649,12 @@ struct PadContentView: View {
                     .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 12))
                     .onSubmit { model.submitPairingCode() }
 
-                Button("Trust This Mac") { model.submitPairingCode() }
+                Button(model.pairingRequired ? "Send Code" : "Connect with Code") {
+                    model.submitPairingCode()
+                }
                     .buttonStyle(.borderedProminent)
                     .tint(.cyan)
+                    .disabled(model.isConnected || PairingCode.normalize(model.pairingCode).count != PairingCode.characterCount)
             }
 
             if let error = model.pairingError {
@@ -655,6 +662,10 @@ struct PadContentView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
+
+            Text(model.selectedMacName.map { "Target: \($0)" } ?? "Select a Mac card before connecting if more than one device is visible.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.58))
         }
         .padding(16)
         .background(.cyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
@@ -1021,6 +1032,11 @@ struct PadContentView: View {
                             .font(.callout)
                             .foregroundStyle(.white.opacity(0.78))
                             .fixedSize(horizontal: false, vertical: true)
+                        if model.queuedFileCount > 0 {
+                            Text("+\(model.queuedFileCount) queued")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.55))
+                        }
                         ProgressView(value: transfer.progress)
                             .tint(.cyan)
                             .accessibilityValue("\(Int(transfer.progress * 100)) percent")
@@ -1051,6 +1067,9 @@ struct PadContentView: View {
         .padding(17)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.08)))
+        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+            model.acceptDroppedFiles(providers)
+        }
     }
 
     private var clipboardCard: some View {
@@ -1065,12 +1084,15 @@ struct PadContentView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Clipboard transfer").font(.headline)
-                    Text("Copy text from the Mac or send the current iPad clipboard. Nothing syncs automatically.")
+                    Text("Copy on either device and it syncs automatically while connected. No send button is needed; the buttons below are a manual fallback.")
                         .font(.callout)
                         .foregroundStyle(.white.opacity(0.78))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+
+            Toggle("Automatic text and file sync", isOn: $model.automaticClipboardSyncEnabled)
+                .toggleStyle(.switch)
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) { clipboardButtons; Spacer() }
@@ -1091,7 +1113,7 @@ struct PadContentView: View {
         Button {
             model.requestMacClipboard()
         } label: {
-            Label("Copy Mac → iPad", systemImage: "arrow.down.doc")
+            Label("Receive Clipboard", systemImage: "arrow.down.doc")
                 .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
         }
         .buttonStyle(.borderedProminent)
@@ -1101,7 +1123,7 @@ struct PadContentView: View {
         Button {
             model.sendClipboardToMac()
         } label: {
-            Label("Send iPad → Mac", systemImage: "arrow.up.doc")
+            Label("Send Clipboard", systemImage: "arrow.up.doc")
                 .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
         }
         .buttonStyle(.bordered)
@@ -1120,12 +1142,22 @@ struct PadContentView: View {
         Button {
             showingFileImporter = true
         } label: {
-            Label("Send File", systemImage: "paperplane.fill")
+            Label("Send Files", systemImage: "paperplane.fill")
                 .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
         }
         .buttonStyle(.borderedProminent)
         .tint(.cyan)
-        .disabled(!model.isConnected || model.isFileTransferring)
+        .disabled(!model.isConnected)
+
+        if model.isFileTransferring || model.queuedFileCount > 0 {
+            Button(role: .destructive) {
+                model.cancelFileTransfer()
+            } label: {
+                Label("Cancel Transfer", systemImage: "xmark.circle")
+                    .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
+            }
+            .buttonStyle(.bordered)
+        }
     }
 
     private var streamingView: some View {
@@ -1394,11 +1426,11 @@ struct PadContentView: View {
                             .foregroundStyle(.white.opacity(0.78))
                         HStack(spacing: 8) {
                             Button { model.requestMacClipboard() } label: {
-                                Label("Mac → iPad", systemImage: "arrow.down.doc")
+                                Label("Receive Clipboard", systemImage: "arrow.down.doc")
                                     .frame(maxWidth: .infinity)
                             }
                             Button { model.sendClipboardToMac() } label: {
-                                Label("iPad → Mac", systemImage: "arrow.up.doc")
+                                Label("Send Clipboard", systemImage: "arrow.up.doc")
                                     .frame(maxWidth: .infinity)
                             }
                         }
@@ -2536,7 +2568,7 @@ private struct PadSettingsPanel: View {
             Button {
                 showingFileImporter = true
             } label: {
-                Label("Send file to Mac", systemImage: "paperplane.fill")
+                Label("Send files to Mac", systemImage: "paperplane.fill")
             }
             .disabled(!model.isConnected)
 
@@ -2550,7 +2582,7 @@ private struct PadSettingsPanel: View {
                 Button {
                     model.requestMacClipboard()
                 } label: {
-                    Label("Mac → iPad", systemImage: "arrow.down.doc")
+                        Label("Receive Clipboard", systemImage: "arrow.down.doc")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -2559,12 +2591,14 @@ private struct PadSettingsPanel: View {
                 Button {
                     model.sendClipboardToMac()
                 } label: {
-                    Label("iPad → Mac", systemImage: "arrow.up.doc")
+                        Label("Send Clipboard", systemImage: "arrow.up.doc")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
             }
             .disabled(!model.isConnected)
+
+            Toggle("Automatic text and file sync", isOn: $model.automaticClipboardSyncEnabled)
 
             if let transfer = model.fileTransferSnapshot {
                 Text("\(transfer.message): \(transfer.fileName)")
@@ -2582,7 +2616,7 @@ private struct PadSettingsPanel: View {
         } header: {
             Text("Transfers")
         } footer: {
-            Text("Files and clipboard text use the encrypted connection and are transferred only when you tap an action.")
+            Text("Clipboard sync is automatic while connected unless disabled above. iPadOS may suspend background apps; changes are reconciled when SidecarBridge becomes active again.")
         }
     }
 

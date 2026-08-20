@@ -28,6 +28,14 @@ final class MacConnectionModel: ObservableObject {
     @Published var fileTransferError: String?
     @Published var queuedFileCount = 0
     @Published var clipboardTransferStatus = "Clipboard transfer ready."
+    @Published var automaticClipboardSyncEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(automaticClipboardSyncEnabled, forKey: Self.automaticClipboardSyncDefaultsKey)
+            if automaticClipboardSyncEnabled {
+                reconcileClipboardAfterConnection()
+            }
+        }
+    }
     @Published var pairingCode = MacPairingSecurity.shared.currentDisplayCode()
     @Published var localSystemInformation = SystemInformation.current()
     @Published var remoteSystemInformation: SystemInformation?
@@ -95,9 +103,19 @@ final class MacConnectionModel: ObservableObject {
     private var streamResumeRetentionTask: Task<Void, Never>?
     private var remoteViewerIsBackgrounded = false
     private var pendingFileURLs: [URL] = []
+    private var clipboardMonitorTask: Task<Void, Never>?
+    private var lastObservedClipboardChangeCount: Int?
+    private var lastObservedClipboardSignature: String?
+    private var pendingClipboardSignature: String?
+    private var suppressedClipboardSignature: String?
+    private var automaticReceivedFileURLs: [URL] = []
     private let shutdownProtectionDefaultsKey = "shutdownProtectionEnabled"
+    private static let automaticClipboardSyncDefaultsKey = "automaticClipboardSyncEnabled"
 
     init() {
+        automaticClipboardSyncEnabled = UserDefaults.standard.object(
+            forKey: Self.automaticClipboardSyncDefaultsKey
+        ) as? Bool ?? true
         if UserDefaults.standard.object(forKey: shutdownProtectionDefaultsKey) == nil {
             UserDefaults.standard.set(true, forKey: shutdownProtectionDefaultsKey)
         }
@@ -137,6 +155,12 @@ final class MacConnectionModel: ObservableObject {
             guard let self else { return }
             self.hasPadPeer = connected
             if connected {
+                self.lastObservedClipboardChangeCount = NSPasteboard.general.changeCount
+                if self.lastObservedClipboardSignature == nil,
+                   self.pendingClipboardSignature == nil {
+                    self.lastObservedClipboardSignature = self.clipboardSignature()
+                }
+                self.suppressedClipboardSignature = nil
                 self.cancelStreamResumeRetention()
                 let isDirectLAN = peerOrError?.hasPrefix("LAN:") == true
                 self.streamer.setTransportProfile(isDirectLAN ? .direct : .nearbyP2P)
@@ -149,6 +173,7 @@ final class MacConnectionModel: ObservableObject {
                 self.pairedPeer = MacAuthorizedDeviceStore.shared.displaySummary
                 self.sendRemoteInputPermissionStatus()
                 self.exchangeSystemInformation()
+                self.reconcileClipboardAfterConnection()
             } else if let peerOrError {
                 self.connectionHealthDetail = "Recovering connection"
                 self.connectionLatencyMS = nil
@@ -205,26 +230,62 @@ final class MacConnectionModel: ObservableObject {
         streamer.onFrame = { [weak peers] frame in peers?.sendVideoFrame(frame) }
         peers.onKeyFrameNeeded = { [weak self] in self?.streamer.requestKeyFrame() }
         configureFileTransfer()
+        startClipboardMonitoring()
     }
 
     var isFileTransferring: Bool { fileTransfer.isBusy }
 
     func chooseFileToSend() {
         guard hasPadPeer else {
-            fileTransferError = "Connect the iPad before sending a file."
+            fileTransferError = "Connect the iPad before sending files."
             return
         }
         let panel = NSOpenPanel()
-        panel.title = "Send a File to iPad"
+        panel.title = "Send Files to iPad"
         panel.prompt = "Send"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        pendingFileURLs.append(contentsOf: panel.urls)
+        sendFiles(at: panel.urls)
+    }
+
+    func sendFiles(at urls: [URL]) {
+        guard hasPadPeer else {
+            fileTransferError = "Connect the iPad before sending files."
+            return
+        }
+        let files = urls.filter { $0.isFileURL }
+        guard !files.isEmpty else {
+            fileTransferError = "No local files were found to send."
+            return
+        }
+        pendingFileURLs.append(contentsOf: files)
         queuedFileCount = pendingFileURLs.count
         fileTransferError = nil
         startNextQueuedFileIfNeeded()
+    }
+
+    func acceptDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
+        guard hasPadPeer else {
+            fileTransferError = "Connect the iPad before dropping files."
+            return false
+        }
+        var accepted = false
+        for provider in providers where provider.canLoadObject(ofClass: URL.self) {
+            accepted = true
+            _ = provider.loadObject(ofClass: URL.self) { [weak self] object, error in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if let url = object {
+                        self.sendFiles(at: [url])
+                    } else if let error {
+                        self.fileTransferError = error.localizedDescription
+                    }
+                }
+            }
+        }
+        return accepted
     }
 
     func cancelFileTransfer() {
@@ -268,8 +329,10 @@ final class MacConnectionModel: ObservableObject {
             }
         }
         fileTransfer.onReceived = { [weak self] url in
-            self?.lastReceivedFile = url
-            self?.fileTransferError = nil
+            guard let self else { return }
+            self.lastReceivedFile = url
+            self.fileTransferError = nil
+            self.placeReceivedFileOnClipboard(url)
         }
         fileTransfer.onError = { [weak self] message in
             self?.pendingFileURLs.removeAll(keepingCapacity: false)
@@ -296,6 +359,7 @@ final class MacConnectionModel: ObservableObject {
         refreshPermissions()
         peers.start()
         refreshDevices()
+        startClipboardMonitoring()
         status = "Waiting for iPad"
         detail = "Open SidecarBridge on the iPad. Its selected mode decides whether to use the app stream or Apple Sidecar."
     }
@@ -335,6 +399,8 @@ final class MacConnectionModel: ObservableObject {
         screenRecordingPollTask = nil
         streamResumeRetentionTask?.cancel()
         streamResumeRetentionTask = nil
+        clipboardMonitorTask?.cancel()
+        clipboardMonitorTask = nil
         attemptID = UUID()
         pendingFileURLs.removeAll(keepingCapacity: false)
         queuedFileCount = 0
@@ -578,11 +644,19 @@ final class MacConnectionModel: ObservableObject {
 
     func sendClipboardToPad() {
         guard hasPadPeer else {
-            clipboardTransferStatus = "Connect the iPad before sending clipboard text."
+            clipboardTransferStatus = "Connect the iPad before sending the clipboard."
+            return
+        }
+        let files = clipboardFileURLs()
+        if !files.isEmpty {
+            sendFiles(at: files)
+            clipboardTransferStatus = files.count == 1
+                ? "Sending the copied file to the iPad…"
+                : "Sending \(files.count) copied files to the iPad…"
             return
         }
         guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
-            clipboardTransferStatus = "The Mac clipboard has no text to send."
+            clipboardTransferStatus = "The Mac clipboard has no text or files to send."
             return
         }
         let prepared = ClipboardTransfer.prepare(text)
@@ -590,6 +664,134 @@ final class MacConnectionModel: ObservableObject {
         clipboardTransferStatus = prepared == text
             ? "Mac clipboard sent to iPad."
             : "Mac clipboard sent (truncated to 48 KB)."
+    }
+
+    private func clipboardFileURLs() -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true
+        ]
+        let objects = NSPasteboard.general.readObjects(
+            forClasses: [NSURL.self],
+            options: options
+        ) ?? []
+        return objects.compactMap { object in
+            if let url = object as? URL { return url }
+            return (object as? NSURL)?.filePathURL
+        }.filter { $0.isFileURL }
+    }
+
+    private func placeReceivedFileOnClipboard(_ url: URL) {
+        guard automaticClipboardSyncEnabled else { return }
+        let currentFiles = clipboardFileURLs()
+        let currentSignature = ClipboardTransfer.fileSignature(currentFiles)
+        let receivedSignature = ClipboardTransfer.fileSignature(automaticReceivedFileURLs)
+        let isAppending = currentSignature == receivedSignature
+            || lastObservedClipboardSignature == receivedSignature
+        let baseFiles = currentSignature == receivedSignature
+            ? currentFiles
+            : automaticReceivedFileURLs
+        let nextFiles = isAppending
+            ? ClipboardTransfer.uniqueFileURLs(baseFiles + [url])
+            : [url]
+        automaticReceivedFileURLs = nextFiles
+        let signature = ClipboardTransfer.fileSignature(nextFiles)
+        suppressedClipboardSignature = signature
+        pendingClipboardSignature = nil
+        NSPasteboard.general.clearContents()
+        _ = NSPasteboard.general.writeObjects(nextFiles.map { $0 as NSURL })
+        lastObservedClipboardChangeCount = NSPasteboard.general.changeCount
+        lastObservedClipboardSignature = signature
+        clipboardTransferStatus = nextFiles.count == 1
+            ? "Received \(url.lastPathComponent) and copied it to the Mac clipboard."
+            : "Received \(nextFiles.count) files and copied them to the Mac clipboard."
+    }
+
+    private func clipboardSignature() -> String? {
+        let files = clipboardFileURLs()
+        if !files.isEmpty {
+            return ClipboardTransfer.fileSignature(files)
+        }
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            return nil
+        }
+        return "text:\(text)"
+    }
+
+    private func startClipboardMonitoring() {
+        guard clipboardMonitorTask == nil else { return }
+        lastObservedClipboardChangeCount = NSPasteboard.general.changeCount
+        lastObservedClipboardSignature = clipboardSignature()
+        clipboardMonitorTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.observeClipboardChange()
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
+    /// Preserve a local copy made while the peer was reconnecting or the
+    /// viewer was suspended. The initial connection establishes a baseline;
+    /// later connections only transmit a value that differs from the last
+    /// value this model observed locally.
+    private func reconcileClipboardAfterConnection() {
+        guard hasPadPeer, automaticClipboardSyncEnabled else { return }
+        let signature = clipboardSignature()
+        guard let signature else {
+            pendingClipboardSignature = nil
+            return
+        }
+        guard pendingClipboardSignature != nil || signature != lastObservedClipboardSignature else {
+            pendingClipboardSignature = nil
+            return
+        }
+        if signature == suppressedClipboardSignature {
+            suppressedClipboardSignature = nil
+            pendingClipboardSignature = nil
+            lastObservedClipboardSignature = signature
+            return
+        }
+        suppressedClipboardSignature = nil
+        pendingClipboardSignature = nil
+        lastObservedClipboardSignature = signature
+        sendClipboardToPad()
+    }
+
+    private func observeClipboardChange() {
+        let changeCount = NSPasteboard.general.changeCount
+        guard changeCount != lastObservedClipboardChangeCount else { return }
+        lastObservedClipboardChangeCount = changeCount
+        let signature = clipboardSignature()
+
+        if signature == suppressedClipboardSignature {
+            suppressedClipboardSignature = nil
+            lastObservedClipboardSignature = signature
+            return
+        }
+        if signature != ClipboardTransfer.fileSignature(automaticReceivedFileURLs) {
+            automaticReceivedFileURLs.removeAll(keepingCapacity: false)
+        }
+        if suppressedClipboardSignature != nil {
+            suppressedClipboardSignature = nil
+        }
+        guard let signature else {
+            pendingClipboardSignature = nil
+            return
+        }
+        guard signature != lastObservedClipboardSignature else {
+            pendingClipboardSignature = nil
+            return
+        }
+        guard hasPadPeer, automaticClipboardSyncEnabled else {
+            // Keep a copy made while the peer is reconnecting or automatic
+            // sync is paused. The next connection/toggle flushes the current
+            // value instead of treating it as already delivered.
+            pendingClipboardSignature = signature
+            return
+        }
+        lastObservedClipboardSignature = signature
+        pendingClipboardSignature = nil
+        sendClipboardToPad()
     }
 
     var diagnosticReport: String {
@@ -856,18 +1058,19 @@ final class MacConnectionModel: ObservableObject {
             remoteSystemInformation = information
             diagnosticActionDetail = "Connected device information updated."
         case .requestClipboard:
-            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
-                peers.send(ControlMessage(.clipboardError, detail: "The Mac clipboard has no text."))
-                return
-            }
-            peers.send(.clipboardText(text))
+            sendClipboardToPad()
         case .clipboardText:
             guard let text = command.clipboardTextPayload else {
                 clipboardTransferStatus = "The received clipboard text was invalid or too large."
                 return
             }
+            suppressedClipboardSignature = "text:\(text)"
+            pendingClipboardSignature = nil
+            automaticReceivedFileURLs.removeAll(keepingCapacity: false)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
+            lastObservedClipboardChangeCount = NSPasteboard.general.changeCount
+            lastObservedClipboardSignature = "text:\(text)"
             clipboardTransferStatus = "Copied iPad clipboard to the Mac."
         case .clipboardError:
             clipboardTransferStatus = command.detail ?? "Clipboard transfer failed."

@@ -3,8 +3,8 @@ import UIKit
 
 @MainActor
 final class PadConnectionModel: ObservableObject {
-    @Published var status = "Looking for your Mac…"
-    @Published var detail = "Keep SidecarBridge open on the Mac."
+    @Published var status = "Ready to connect"
+    @Published var detail = "Choose a Mac card or enter its 16-digit pairing code below."
     @Published var frame: UIImage?
     @Published var isConnected = false
     @Published private(set) var isConnecting = false
@@ -51,7 +51,16 @@ final class PadConnectionModel: ObservableObject {
     @Published var fileTransferSnapshot: FileTransferSnapshot?
     @Published var lastReceivedFile: URL?
     @Published var fileTransferError: String?
+    @Published var queuedFileCount = 0
     @Published var clipboardTransferStatus = "Clipboard transfer ready."
+    @Published var automaticClipboardSyncEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(automaticClipboardSyncEnabled, forKey: Self.automaticClipboardSyncDefaultsKey)
+            if automaticClipboardSyncEnabled {
+                reconcileClipboardAfterConnection()
+            }
+        }
+    }
     @Published var pairingCode = ""
     @Published var pairingRequired = false
     @Published var pairingMacName = "Mac"
@@ -97,6 +106,15 @@ final class PadConnectionModel: ObservableObject {
     private var isResumingFromBackground = false
     private var foregroundResumeTask: Task<Void, Never>?
     private var connectionTimeoutTask: Task<Void, Never>?
+    private var pendingFileURLs: [URL] = []
+    private var lastObservedClipboardChangeCount: Int?
+    private var lastObservedClipboardSignature: String?
+    private var pendingClipboardSignature: String?
+    private var suppressedClipboardSignature: String?
+    private var automaticReceivedFileURLs: [URL] = []
+    private var clipboardMonitorTask: Task<Void, Never>?
+    private var clipboardChangeObserver: NSObjectProtocol?
+    private static let automaticClipboardSyncDefaultsKey = "automaticClipboardSyncEnabled"
 
     var isDiscoveryTakingLonger: Bool {
         !isConnected && discoveryElapsedSeconds >= 8
@@ -119,6 +137,15 @@ final class PadConnectionModel: ObservableObject {
     }
 
     init() {
+        automaticClipboardSyncEnabled = UserDefaults.standard.object(
+            forKey: Self.automaticClipboardSyncDefaultsKey
+        ) as? Bool ?? true
+        // Establish the baseline only after a peer connects. Reading the
+        // general pasteboard on launch can trigger an unnecessary iPadOS
+        // privacy prompt before SidecarBridge can transfer anything.
+        lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
+        lastObservedClipboardSignature = nil
+        startClipboardMonitoring()
         videoDisplay.onPictureInPictureStateChanged = { [weak self] possible, active, suspended in
             guard let self else { return }
             self.isPictureInPicturePossible = possible
@@ -218,6 +245,12 @@ final class PadConnectionModel: ObservableObject {
             guard let self else { return }
             self.isConnected = connected
             if connected {
+                self.lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
+                if self.lastObservedClipboardSignature == nil,
+                   self.pendingClipboardSignature == nil {
+                    self.lastObservedClipboardSignature = self.clipboardSignature()
+                }
+                self.suppressedClipboardSignature = nil
                 self.isConnecting = false
                 self.connectionTimeoutTask?.cancel()
                 self.connectionTimeoutTask = nil
@@ -249,7 +282,9 @@ final class PadConnectionModel: ObservableObject {
                         ? "Direct local link ready. System Sidecar requires an explicit button press."
                         : "Mac found. Tap Open System Sidecar only if you want to leave this app."
                 }
+                self.reconcileClipboardAfterConnection()
             } else {
+                self.lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
                 // Network/browser failures can be reported while the selected
                 // connection is still being retried. Keep the UI in the
                 // explicit Connecting state until the handshake succeeds,
@@ -299,6 +334,8 @@ final class PadConnectionModel: ObservableObject {
                     }
                 }
                 self.connectionTransport = "Searching direct P2P"
+                self.pendingFileURLs.removeAll(keepingCapacity: false)
+                self.queuedFileCount = 0
                 self.fileTransfer.cancelAll(reason: "Connection ended.")
             }
         }
@@ -353,7 +390,6 @@ final class PadConnectionModel: ObservableObject {
         UserDefaults.standard.set(name, forKey: "selectedMacName")
         userRequestedConnection = false
         pairingRequired = false
-        pairingCode = ""
         pairingError = nil
         status = "Ready to connect"
         detail = "Tap Connect to start the encrypted session with \(name)."
@@ -388,7 +424,6 @@ final class PadConnectionModel: ObservableObject {
         connectionAttemptedMacName = name
         UserDefaults.standard.set(name, forKey: "selectedMacName")
         pairingRequired = false
-        pairingCode = ""
         pairingError = nil
         status = "Connecting to \(name)…"
         detail = connectionDetail
@@ -414,12 +449,53 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func sendFile(at url: URL) {
+        sendFiles(at: [url])
+    }
+
+    func sendFiles(at urls: [URL]) {
         guard isConnected else {
-            fileTransferError = "Connect the Mac before sending a file."
+            fileTransferError = "Connect the Mac before sending files."
             return
         }
+        let files = urls.filter { $0.isFileURL }
+        guard !files.isEmpty else {
+            fileTransferError = "No local files were found to send."
+            return
+        }
+        pendingFileURLs.append(contentsOf: files)
+        queuedFileCount = pendingFileURLs.count
         fileTransferError = nil
-        fileTransfer.sendFile(at: url)
+        startNextQueuedFileIfNeeded()
+    }
+
+    func acceptDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
+        guard isConnected else {
+            fileTransferError = "Connect the Mac before dropping files."
+            return false
+        }
+        var accepted = false
+        for provider in providers where provider.canLoadObject(ofClass: URL.self) {
+            accepted = true
+            _ = provider.loadObject(ofClass: URL.self) { [weak self] object, error in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if let url = object {
+                        self.sendFiles(at: [url])
+                    } else if let error {
+                        self.fileTransferError = error.localizedDescription
+                    }
+                }
+            }
+        }
+        return accepted
+    }
+
+    func cancelFileTransfer() {
+        pendingFileURLs.removeAll(keepingCapacity: false)
+        queuedFileCount = 0
+        guard fileTransfer.isBusy else { return }
+        fileTransfer.cancelAll(reason: "Transfer canceled from the iPad.")
+        fileTransferError = "Transfer canceled."
     }
 
     func submitPairingCode() {
@@ -428,7 +504,28 @@ final class PadConnectionModel: ObservableObject {
             pairingError = "Enter all 16 digits shown in the Mac app."
             return
         }
+
+        // A pairing code is an authentication secret, not a network address.
+        // Use the selected/remembered Mac (or the sole discovered Mac) as the
+        // route, then submit the code before the handshake arrives. This makes
+        // code-first pairing reliable without silently connecting when a Mac
+        // is merely discovered.
+        let targetName = selectedMacName ?? (discoveredMacs.count == 1 ? discoveredMacs[0] : nil)
+        guard isConnected || targetName != nil else {
+            pairingError = "Select a Mac card first; the code authenticates that Mac."
+            return
+        }
+
         pairingError = nil
+        pairingRequired = true
+        if !isConnected, !isConnecting, let targetName {
+            userRequestedConnection = true
+            isConnecting = true
+            armConnectionTimeout()
+            connect(to: targetName, detail: "Connecting with your 16-digit pairing code…")
+        } else if let targetName {
+            pairingMacName = targetName
+        }
         detail = "Verifying the one-time code over the encrypted local link…"
         peers.submitPairingCode(normalized)
     }
@@ -455,12 +552,37 @@ final class PadConnectionModel: ObservableObject {
 
     private func configureFileTransfer() {
         fileTransfer.sendPacket = { [weak self] packet in self?.peers.sendFilePacket(packet) }
-        fileTransfer.onSnapshot = { [weak self] snapshot in self?.fileTransferSnapshot = snapshot }
-        fileTransfer.onReceived = { [weak self] url in
-            self?.lastReceivedFile = url
-            self?.fileTransferError = nil
+        fileTransfer.onSnapshot = { [weak self] snapshot in
+            guard let self else { return }
+            self.fileTransferSnapshot = snapshot
+            if snapshot?.direction == .sending, snapshot?.message == "Sent" {
+                Task { @MainActor [weak self] in
+                    self?.startNextQueuedFileIfNeeded()
+                }
+            }
         }
-        fileTransfer.onError = { [weak self] message in self?.fileTransferError = message }
+        fileTransfer.onReceived = { [weak self] url in
+            guard let self else { return }
+            self.lastReceivedFile = url
+            self.fileTransferError = nil
+            self.placeReceivedFileOnClipboard(url)
+        }
+        fileTransfer.onError = { [weak self] message in
+            self?.pendingFileURLs.removeAll(keepingCapacity: false)
+            self?.queuedFileCount = 0
+            self?.fileTransferError = message
+        }
+    }
+
+    private func startNextQueuedFileIfNeeded() {
+        guard isConnected, !fileTransfer.isBusy, let next = pendingFileURLs.first else {
+            queuedFileCount = pendingFileURLs.count
+            return
+        }
+        pendingFileURLs.removeFirst()
+        queuedFileCount = pendingFileURLs.count
+        fileTransferError = nil
+        fileTransfer.sendFile(at: next)
     }
 
     func start() {
@@ -472,8 +594,11 @@ final class PadConnectionModel: ObservableObject {
             if !discoveredMacs.contains(rememberedMac) {
                 discoveredMacs = [rememberedMac]
             }
-            status = "Choose a Mac to connect"
-            detail = "Remembered Mac: \(rememberedMac). Tap Connect when you are ready."
+            status = "Ready — enter the code or tap Connect"
+            detail = "Remembered Mac: \(rememberedMac). The code field stays available for first-time pairing."
+        } else {
+            status = "Enter a code or choose a Mac"
+            detail = "Discovery runs passively. Enter the Mac's 16-digit code below, or select a device card when it appears."
         }
     }
 
@@ -481,8 +606,8 @@ final class PadConnectionModel: ObservableObject {
         connectionTimeoutTask?.cancel()
         connectionTimeoutTask = nil
         isConnecting = false
-        status = "Looking for your Mac…"
-        detail = "Restarting direct local-network, AWDL, and nearby discovery."
+        status = "Ready to connect"
+        detail = "Refreshing the device list in the background. The 16-digit code remains available below."
         lastDiscoveryIssue = nil
         if !isConnected {
             userRequestedConnection = false
@@ -579,6 +704,7 @@ final class PadConnectionModel: ObservableObject {
             }
             if isConnected {
                 peers.send(ControlMessage(.status, detail: "viewer-foreground"))
+                reconcileClipboardAfterForeground()
             }
             endBackgroundTask()
         case .background:
@@ -595,15 +721,106 @@ final class PadConnectionModel: ObservableObject {
     /// iPadOS has started the suspension transition, which is too late for a
     /// reliable automatic PiP handoff on some iPadOS versions.
     func appWillResignActive() {
+        // Flush a copy made immediately before the app switch before iPadOS
+        // begins suspending the process.
+        if isConnected { observeClipboardChange(force: false) }
         beginBackgroundTransition()
+    }
+
+    /// Reconcile clipboard changes made while the app was in another scene or
+    /// briefly suspended. The monitor also polls while the process is kept
+    /// alive by Picture in Picture; this active-transition path covers the
+    /// case where iPadOS suspended the process before the copy notification.
+    func clipboardDidChange() {
+        observeClipboardChange(force: false)
+    }
+
+    private func startClipboardMonitoring() {
+        guard clipboardMonitorTask == nil else { return }
+
+        clipboardChangeObserver = NotificationCenter.default.addObserver(
+            forName: UIPasteboard.changedNotification,
+            object: UIPasteboard.general,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.clipboardDidChange()
+            }
+        }
+
+        // UIPasteboard notifications are delivered reliably while the app is
+        // active, but a PiP-backed process can also remain alive while the
+        // scene is backgrounded. Polling closes that gap without introducing
+        // another foreground-only UI dependency. If iPadOS fully suspends the
+        // process, scenePhaseChanged() reconciles the latest value on return.
+        clipboardMonitorTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.isConnected, self.automaticClipboardSyncEnabled {
+                    self.observeClipboardChange(force: false)
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(350))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    /// If the iPad pasteboard did not change while it was away, pull the Mac's
+    /// latest value. If it did change, the normal observer sends the iPad's
+    /// value instead. This recovers a Mac copy whose packet arrived while the
+    /// iPad process was suspended without blindly overwriting a local copy.
+    private func reconcileClipboardAfterForeground() {
+        guard isConnected else { return }
+        let before = lastObservedClipboardSignature
+        observeClipboardChange(force: false)
+        guard clipboardSignature() == before else { return }
+        peers.send(ControlMessage(.requestClipboard))
+    }
+
+    /// Preserve a local copy made while the peer was reconnecting or the app
+    /// was suspended. The initial connection establishes a baseline; later
+    /// connections retransmit only a value that changed locally.
+    private func reconcileClipboardAfterConnection() {
+        guard isConnected, automaticClipboardSyncEnabled else { return }
+        let signature = clipboardSignature()
+        guard let signature else {
+            pendingClipboardSignature = nil
+            return
+        }
+        guard pendingClipboardSignature != nil || signature != lastObservedClipboardSignature else {
+            pendingClipboardSignature = nil
+            return
+        }
+        if signature == suppressedClipboardSignature {
+            suppressedClipboardSignature = nil
+            pendingClipboardSignature = nil
+            lastObservedClipboardSignature = signature
+            return
+        }
+        suppressedClipboardSignature = nil
+        pendingClipboardSignature = nil
+        lastObservedClipboardSignature = signature
+        sendClipboardToMac()
     }
 
     private func beginBackgroundTransition() {
         prepareConnectionForBackgroundIfNeeded()
+        let hasTransferWork = fileTransfer.isBusy || !pendingFileURLs.isEmpty
+        let shouldProtectClipboard = isConnected && automaticClipboardSyncEnabled
+        // A short iPadOS background task protects an active file transfer and
+        // gives a copy made during the app-switch transition time to cross the
+        // link. PiP remains the only supported way to keep an open-ended
+        // background session alive.
+        if hasTransferWork || shouldProtectClipboard { beginBackgroundGracePeriod() }
         guard isStreaming, keepRunningInBackground else {
             backgroundViewerDetail = isStreaming
                 ? "Automatic background viewing is off. Return here to keep controlling the Mac."
-                : "Connect to a Mac first; the background viewer will be ready after the first frame."
+                : hasTransferWork
+                    ? "Finishing the current automatic transfer before iPadOS suspends the app."
+                    : "Connect to a Mac first; the background viewer will be ready after the first frame."
             return
         }
 
@@ -779,11 +996,19 @@ final class PadConnectionModel: ObservableObject {
 
     func sendClipboardToMac() {
         guard isConnected else {
-            clipboardTransferStatus = "Connect to the Mac before sending clipboard text."
+            clipboardTransferStatus = "Connect to the Mac before sending the clipboard."
+            return
+        }
+        let files = clipboardFileURLs()
+        if !files.isEmpty {
+            sendFiles(at: files)
+            clipboardTransferStatus = files.count == 1
+                ? "Sending the copied file to the Mac…"
+                : "Sending \(files.count) copied files to the Mac…"
             return
         }
         guard let text = UIPasteboard.general.string, !text.isEmpty else {
-            clipboardTransferStatus = "The iPad clipboard has no text to send."
+            clipboardTransferStatus = "The iPad clipboard has no text or files to send."
             return
         }
         let prepared = ClipboardTransfer.prepare(text)
@@ -791,6 +1016,84 @@ final class PadConnectionModel: ObservableObject {
         clipboardTransferStatus = prepared == text
             ? "iPad clipboard sent to Mac."
             : "iPad clipboard sent (truncated to 48 KB)."
+    }
+
+    private func clipboardFileURLs() -> [URL] {
+        (UIPasteboard.general.urls ?? []).filter { $0.isFileURL }
+    }
+
+    private func clipboardSignature() -> String? {
+        let files = clipboardFileURLs()
+        if !files.isEmpty {
+            return ClipboardTransfer.fileSignature(files)
+        }
+        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+            return nil
+        }
+        return "text:\(text)"
+    }
+
+    private func placeReceivedFileOnClipboard(_ url: URL) {
+        guard automaticClipboardSyncEnabled else { return }
+        let currentFiles = clipboardFileURLs()
+        let currentSignature = ClipboardTransfer.fileSignature(currentFiles)
+        let receivedSignature = ClipboardTransfer.fileSignature(automaticReceivedFileURLs)
+        let isAppending = currentSignature == receivedSignature
+            || lastObservedClipboardSignature == receivedSignature
+        let baseFiles = currentSignature == receivedSignature
+            ? currentFiles
+            : automaticReceivedFileURLs
+        let nextFiles = isAppending
+            ? ClipboardTransfer.uniqueFileURLs(baseFiles + [url])
+            : [url]
+        automaticReceivedFileURLs = nextFiles
+        let signature = ClipboardTransfer.fileSignature(nextFiles)
+        suppressedClipboardSignature = signature
+        pendingClipboardSignature = nil
+        UIPasteboard.general.urls = nextFiles
+        lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
+        lastObservedClipboardSignature = signature
+        clipboardTransferStatus = nextFiles.count == 1
+            ? "Received \(url.lastPathComponent) and copied it to the iPad clipboard."
+            : "Received \(nextFiles.count) files and copied them to the iPad clipboard."
+    }
+
+    private func observeClipboardChange(force: Bool) {
+        let changeCount = UIPasteboard.general.changeCount
+        guard force || changeCount != lastObservedClipboardChangeCount else { return }
+        lastObservedClipboardChangeCount = changeCount
+        let signature = clipboardSignature()
+
+        if signature == suppressedClipboardSignature {
+            suppressedClipboardSignature = nil
+            pendingClipboardSignature = nil
+            lastObservedClipboardSignature = signature
+            return
+        }
+        if signature != ClipboardTransfer.fileSignature(automaticReceivedFileURLs) {
+            automaticReceivedFileURLs.removeAll(keepingCapacity: false)
+        }
+        if suppressedClipboardSignature != nil {
+            suppressedClipboardSignature = nil
+        }
+        guard let signature else {
+            pendingClipboardSignature = nil
+            return
+        }
+        guard force || signature != lastObservedClipboardSignature else {
+            pendingClipboardSignature = nil
+            return
+        }
+        guard isConnected, automaticClipboardSyncEnabled else {
+            // iPadOS may deliver a pasteboard change just before the app is
+            // backgrounded, or while the encrypted link is reconnecting. Keep
+            // it pending so the next active connection transfers it.
+            pendingClipboardSignature = signature
+            return
+        }
+        lastObservedClipboardSignature = signature
+        pendingClipboardSignature = nil
+        sendClipboardToMac()
     }
 
     private func updatePointerFeedback(for input: RemoteInputEvent) {
@@ -971,11 +1274,7 @@ final class PadConnectionModel: ObservableObject {
             return
         }
         if command.kind == .requestClipboard {
-            guard let text = UIPasteboard.general.string, !text.isEmpty else {
-                peers.send(ControlMessage(.clipboardError, detail: "The iPad clipboard has no text."))
-                return
-            }
-            peers.send(.clipboardText(text))
+            sendClipboardToMac()
             return
         }
         if command.kind == .clipboardText {
@@ -983,7 +1282,12 @@ final class PadConnectionModel: ObservableObject {
                 clipboardTransferStatus = "The received clipboard text was invalid or too large."
                 return
             }
+            suppressedClipboardSignature = "text:\(text)"
+            pendingClipboardSignature = nil
+            automaticReceivedFileURLs.removeAll(keepingCapacity: false)
             UIPasteboard.general.string = text
+            lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
+            lastObservedClipboardSignature = "text:\(text)"
             clipboardTransferStatus = "Copied Mac clipboard to the iPad."
             return
         }
