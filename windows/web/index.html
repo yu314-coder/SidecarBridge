@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>SidecarBridge — Windows companion</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="background-glow background-glow-one"></div>
+    <div class="background-glow background-glow-two"></div>
+
+    <main class="app-shell">
+      <header class="app-header">
+        <div class="brand-lockup">
+          <div class="brand-icon" aria-hidden="true">
+            <span class="brand-screen brand-screen-back"></span>
+            <span class="brand-screen brand-screen-front"></span>
+            <span class="brand-bridge"></span>
+          </div>
+          <div>
+            <p class="eyebrow">Windows companion</p>
+            <h1>SidecarBridge</h1>
+            <p class="subtitle">A secure remote window into your computer</p>
+          </div>
+        </div>
+        <div class="header-badges">
+          <span class="badge badge-cyan"><span class="badge-dot"></span> LOCAL + ENCRYPTED</span>
+          <span class="badge badge-muted">WINDOWS SHELL</span>
+        </div>
+      </header>
+
+      <section class="status-card" id="statusCard" data-state="idle" aria-live="polite">
+        <div class="status-icon" id="statusIcon">↗</div>
+        <div class="status-copy">
+          <p class="section-kicker">Session status</p>
+          <h2 id="statusHeadline">Windows companion shell is ready</h2>
+          <p id="statusDetail">The WebView dashboard loaded successfully. Enter a pairing code to continue.</p>
+        </div>
+        <span class="status-pill" id="statusPill">READY</span>
+      </section>
+
+      <section class="content-grid">
+        <div class="main-column">
+          <section class="panel pairing-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="section-kicker">Connect to a Mac or iPad</p>
+                <h2>Pair a device</h2>
+              </div>
+              <span class="panel-icon" aria-hidden="true">⌁</span>
+            </div>
+            <p class="panel-description">
+              Enter the one-time 16-digit code shown by SidecarBridge. Dashes and spaces are accepted.
+            </p>
+            <label class="field-label" for="pairingCode">Pairing code</label>
+            <div class="pairing-row">
+              <input
+                id="pairingCode"
+                class="pairing-input"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                maxlength="19"
+                placeholder="1234-5678-9012-3456"
+                aria-describedby="pairingHint"
+              />
+              <button class="button button-primary" id="connectButton" type="button">
+                <span aria-hidden="true">↗</span> Connect
+              </button>
+              <button class="button button-secondary" id="disconnectButton" type="button" hidden>
+                Disconnect
+              </button>
+            </div>
+            <p class="field-hint" id="pairingHint">The code is validated locally in this first Windows shell.</p>
+            <p class="inline-error" id="inlineError" role="alert" hidden></p>
+          </section>
+
+          <section class="panel devices-panel">
+            <div class="panel-heading compact-heading">
+              <div>
+                <p class="section-kicker">Transport readiness</p>
+                <h2>Connection paths</h2>
+              </div>
+              <span class="live-indicator"><span class="live-dot"></span> LOCAL ONLY</span>
+            </div>
+            <div class="transport-list">
+              <article class="transport-card transport-ready">
+                <div class="transport-symbol">⌁</div>
+                <div>
+                  <h3>Direct LAN</h3>
+                  <p>Reserved for the Windows encrypted stream and input channel.</p>
+                </div>
+                <span class="transport-state">NEXT</span>
+              </article>
+              <article class="transport-card">
+                <div class="transport-symbol">◌</div>
+                <div>
+                  <h3>Nearby P2P</h3>
+                  <p>Fallback discovery will be added after the direct LAN path.</p>
+                </div>
+                <span class="transport-state planned">PLANNED</span>
+              </article>
+              <article class="transport-card">
+                <div class="transport-symbol">▣</div>
+                <div>
+                  <h3>Screen capture</h3>
+                  <p>Windows Graphics Capture and a hardware-friendly encoder are planned.</p>
+                </div>
+                <span class="transport-state planned">PLANNED</span>
+              </article>
+              <article class="transport-card">
+                <div class="transport-symbol">⌨</div>
+                <div>
+                  <h3>Keyboard and trackpad</h3>
+                  <p>Input injection will use an explicit, consent-based Windows backend.</p>
+                </div>
+                <span class="transport-state planned">PLANNED</span>
+              </article>
+            </div>
+          </section>
+        </div>
+
+        <aside class="side-column">
+          <section class="panel side-panel transfer-panel">
+            <div class="panel-heading compact-heading">
+              <div>
+                <p class="section-kicker">Shared protocol</p>
+                <h2>File transfer</h2>
+              </div>
+              <span class="panel-icon" aria-hidden="true">↕</span>
+            </div>
+            <div class="empty-state">
+              <div class="empty-state-icon">⇄</div>
+              <h3>Transfer UI is ready</h3>
+              <p>Encrypted transfer hooks will use the same pairing session as the viewer.</p>
+            </div>
+            <button class="button button-tertiary" type="button" disabled>Choose a file <span>Coming next</span></button>
+          </section>
+
+          <section class="panel side-panel notes-panel">
+            <div class="panel-heading compact-heading">
+              <div>
+                <p class="section-kicker">Build note</p>
+                <h2>Windows first slice</h2>
+              </div>
+              <span class="panel-icon" aria-hidden="true">i</span>
+            </div>
+            <p class="note-copy">
+              This shell proves the native WebView2 boundary and keeps the UI honest while the Windows capture,
+              LAN, input, and background-service backends are implemented.
+            </p>
+            <div class="note-rule"></div>
+            <p class="note-foot">No connection is reported until a real transport is attached.</p>
+          </section>
+        </aside>
+      </section>
+
+      <footer class="app-footer">
+        <span><span class="footer-dot"></span> Ready for a Windows backend</span>
+        <span>SidecarBridge Windows companion · 0.1.0 shell</span>
+      </footer>
+    </main>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
