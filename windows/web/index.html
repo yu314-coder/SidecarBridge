@@ -46,33 +46,24 @@
           <section class="panel pairing-panel">
             <div class="panel-heading">
               <div>
-                <p class="section-kicker">Connect to a Mac or iPad</p>
-                <h2>Pair a device</h2>
+                <p class="section-kicker">Windows host</p>
+                <h2>Ready for your iPad</h2>
               </div>
               <span class="panel-icon" aria-hidden="true">⌁</span>
             </div>
             <p class="panel-description">
-              Enter the one-time 16-digit code shown by SidecarBridge. Dashes and spaces are accepted.
+              Open SidecarBridge on the iPad, select this Windows device, and enter the one-time code below.
+              The encrypted session stays alive while this window is minimized.
             </p>
-            <label class="field-label" for="pairingCode">Pairing code</label>
-            <div class="pairing-row">
-              <input
-                id="pairingCode"
-                class="pairing-input"
-                inputmode="numeric"
-                autocomplete="one-time-code"
-                maxlength="19"
-                placeholder="1234-5678-9012-3456"
-                aria-describedby="pairingHint"
-              />
-              <button class="button button-primary" id="connectButton" type="button">
-                <span aria-hidden="true">↗</span> Connect
-              </button>
-              <button class="button button-secondary" id="disconnectButton" type="button" hidden>
-                Disconnect
-              </button>
+            <div class="pairing-code-card">
+              <div>
+                <span class="field-label">One-time pairing code</span>
+                <strong id="pairingCodeValue">----</strong>
+              </div>
+              <button class="button button-primary" id="copyCodeButton" type="button">Copy code</button>
             </div>
-            <p class="field-hint" id="pairingHint">The code is validated locally in this first Windows shell.</p>
+            <p class="field-hint" id="pairingHint">A saved credential is used after the first successful pairing.</p>
+            <button class="button button-secondary" id="disconnectButton" type="button" hidden>Disconnect iPad</button>
             <p class="inline-error" id="inlineError" role="alert" hidden></p>
           </section>
 
@@ -89,33 +80,33 @@
                 <div class="transport-symbol">⌁</div>
                 <div>
                   <h3>Direct LAN</h3>
-                  <p>Reserved for the Windows encrypted stream and input channel.</p>
+                  <p>Encrypted TCP 45454 host for the iPad screen, keyboard, pointer, and scroll input.</p>
                 </div>
-                <span class="transport-state">NEXT</span>
+                <span class="transport-state">ACTIVE</span>
               </article>
               <article class="transport-card">
                 <div class="transport-symbol">◌</div>
                 <div>
                   <h3>Nearby P2P</h3>
-                  <p>Fallback discovery will be added after the direct LAN path.</p>
+                  <p>Use the iPad's direct-address fallback when Bonjour is filtered by the access point.</p>
                 </div>
-                <span class="transport-state planned">PLANNED</span>
+                <span class="transport-state planned">IPAD FALLBACK</span>
               </article>
               <article class="transport-card">
                 <div class="transport-symbol">▣</div>
                 <div>
                   <h3>Screen capture</h3>
-                  <p>Windows Graphics Capture and a hardware-friendly encoder are planned.</p>
+                  <p>Low-overhead desktop capture is encoded to JPEG at up to 60 FPS.</p>
                 </div>
-                <span class="transport-state planned">PLANNED</span>
+                <span class="transport-state planned">ACTIVE</span>
               </article>
               <article class="transport-card">
                 <div class="transport-symbol">⌨</div>
                 <div>
                   <h3>Keyboard and trackpad</h3>
-                  <p>Input injection will use an explicit, consent-based Windows backend.</p>
+                  <p>SendInput handles pointer, drag, scroll, clicks, modifiers, and committed text.</p>
                 </div>
-                <span class="transport-state planned">PLANNED</span>
+                <span class="transport-state planned">ACTIVE</span>
               </article>
             </div>
           </section>
@@ -132,33 +123,32 @@
             </div>
             <div class="empty-state">
               <div class="empty-state-icon">⇄</div>
-              <h3>Transfer UI is ready</h3>
-              <p>Encrypted transfer hooks will use the same pairing session as the viewer.</p>
+              <h3>Encrypted transfer</h3>
+              <p>Files sent from iPad are written to Downloads/SidecarBridge Transfers using the same pairing session.</p>
             </div>
-            <button class="button button-tertiary" type="button" disabled>Choose a file <span>Coming next</span></button>
           </section>
 
           <section class="panel side-panel notes-panel">
             <div class="panel-heading compact-heading">
               <div>
                 <p class="section-kicker">Build note</p>
-                <h2>Windows first slice</h2>
+              <h2>Windows host</h2>
               </div>
               <span class="panel-icon" aria-hidden="true">i</span>
             </div>
             <p class="note-copy">
-              This shell proves the native WebView2 boundary and keeps the UI honest while the Windows capture,
-              LAN, input, and background-service backends are implemented.
+              The native host keeps listening when this dashboard is minimized. Pairing, capture, input, clipboard
+              text, and file receive all stay on the authenticated local connection.
             </p>
             <div class="note-rule"></div>
-            <p class="note-foot">No connection is reported until a real transport is attached.</p>
+            <p class="note-foot">No public relay is used; both devices must be on the same reachable network.</p>
           </section>
         </aside>
       </section>
 
       <footer class="app-footer">
-        <span><span class="footer-dot"></span> Ready for a Windows backend</span>
-        <span>SidecarBridge Windows companion · 0.1.0 shell</span>
+        <span><span class="footer-dot"></span> Listening for SidecarBridge iPad</span>
+        <span>SidecarBridge Windows companion · encrypted LAN host</span>
       </footer>
     </main>
 

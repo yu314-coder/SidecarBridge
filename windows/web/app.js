@@ -7,8 +7,8 @@
     statusHeadline: document.getElementById("statusHeadline"),
     statusDetail: document.getElementById("statusDetail"),
     statusPill: document.getElementById("statusPill"),
-    pairingCode: document.getElementById("pairingCode"),
-    connectButton: document.getElementById("connectButton"),
+    pairingCodeValue: document.getElementById("pairingCodeValue"),
+    copyCodeButton: document.getElementById("copyCodeButton"),
     disconnectButton: document.getElementById("disconnectButton"),
     inlineError: document.getElementById("inlineError")
   };
@@ -57,32 +57,19 @@
     elements.statusIcon.textContent = payload.connected ? "✓" : payload.state === "ready" ? "⌁" : "↗";
     elements.statusPill.textContent = payload.connected ? "CONNECTED" : payload.state === "ready" ? "READY" : "READY";
     elements.disconnectButton.hidden = !payload.connected;
-    elements.connectButton.disabled = Boolean(payload.connected);
+    if (payload.pairingCode) {
+      elements.pairingCodeValue.textContent = payload.pairingCode;
+    }
   }
 
-  elements.pairingCode.addEventListener("input", function () {
-    const formatted = formatPairingCode(elements.pairingCode.value);
-    elements.pairingCode.value = formatted;
-    setError("");
-  });
-
-  elements.connectButton.addEventListener("click", function () {
-    const digits = elements.pairingCode.value.replace(/[^0-9]/g, "");
-    if (digits.length !== 16) {
-      setError("Enter all 16 digits before connecting.");
-      elements.pairingCode.focus();
-      return;
-    }
-    setError("");
-    post({ type: "connect", pairingCode: digits });
-    if (!hasNativeWebView) {
-      applyState({
-        type: "state",
-        state: "ready",
-        headline: "Preview pairing accepted",
-        detail: "The native Windows transport is not attached in this browser preview.",
-        connected: false
-      });
+  elements.copyCodeButton.addEventListener("click", async function () {
+    const code = elements.pairingCodeValue.textContent || "";
+    try {
+      await navigator.clipboard.writeText(code);
+      elements.copyCodeButton.textContent = "Copied";
+      setTimeout(() => { elements.copyCodeButton.textContent = "Copy code"; }, 1400);
+    } catch (error) {
+      setError("Copy is unavailable; enter the code shown here on the iPad.");
     }
   });
 
@@ -92,8 +79,9 @@
       applyState({
         type: "state",
         state: "idle",
-        headline: "Ready for a Windows transport",
-        detail: "Choose Connect after entering the 16-digit pairing code.",
+        headline: "Windows host preview",
+        detail: "The native host listens on TCP 45454 and shows a one-time code here.",
+        pairingCode: "1234-5678-9012-3456",
         connected: false
       });
     }
@@ -116,7 +104,8 @@
       type: "state",
       state: "idle",
       headline: "Web preview — native host not attached",
-      detail: "Open the copied web folder through the Windows WebView2 host to enable pairing messages.",
+      detail: "Open the copied web folder through the Windows WebView2 host to enable the encrypted LAN listener.",
+      pairingCode: "1234-5678-9012-3456",
       connected: false
     });
   }

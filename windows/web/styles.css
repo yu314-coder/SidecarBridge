@@ -356,6 +356,26 @@ h3 {
   gap: 9px;
 }
 
+.pairing-code-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 10px 0 14px;
+  padding: 18px 20px;
+  border: 1px solid rgba(88, 217, 255, 0.32);
+  border-radius: 16px;
+  background: linear-gradient(110deg, rgba(33, 144, 211, 0.18), rgba(109, 74, 208, 0.18));
+}
+
+.pairing-code-card strong {
+  display: block;
+  color: var(--text);
+  font-size: clamp(22px, 4vw, 32px);
+  letter-spacing: 0.12em;
+  line-height: 1;
+}
+
 .pairing-input {
   min-width: 0;
   flex: 1;

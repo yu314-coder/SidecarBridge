@@ -4,64 +4,49 @@
 #include <sstream>
 #include <utility>
 
-BridgeSession::BridgeSession(EventHandler eventHandler)
-    : eventHandler_(std::move(eventHandler)) {}
+BridgeSession::BridgeSession(EventHandler eventHandler, WindowsTransport& transport)
+    : eventHandler_(std::move(eventHandler)), transport_(transport) {}
 
 void BridgeSession::handleMessage(const std::string& message) {
     const std::string type = jsonStringValue(message, "type");
 
     if (type == "ready") {
+        transport_.start();
         sendInitialState();
         return;
     }
 
     if (type == "disconnect") {
+        transport_.disconnect();
         sendState(
             "idle",
-            "Ready for a Windows transport",
-            "Choose Connect after entering the 16-digit pairing code.",
+            "Waiting for iPad",
+            "The Windows host is listening on TCP 45454. Select this device in SidecarBridge on your iPad.",
             false,
-            true
+            false
         );
         return;
     }
 
-    if (type != "connect") {
-        return;
+    if (type == "connect") {
+        sendState("pairing", "Waiting for iPad", "The pairing code is shown in this host window. Select this Windows device from the iPad app to connect.", false, false);
     }
-
-    const std::string pairingCode = normalizePairingCode(jsonStringValue(message, "pairingCode"));
-    if (pairingCode.size() != 16) {
-        sendError("Enter the 16-digit pairing code. Dashes are accepted.");
-        return;
-    }
-
-    // This is intentionally a ready-to-wire state, not a false connection.
-    // The next slice will attach LAN discovery, capture, input, and file
-    // transfer to this same protocol boundary.
-    sendState(
-        "ready",
-        "Pairing code accepted",
-        "The Windows transport backend is not connected yet. LAN discovery is next.",
-        false,
-        false
-    );
 }
 
 void BridgeSession::sendInitialState() const {
     sendState(
         "idle",
-        "Windows companion shell is ready",
-        "The WebView dashboard loaded successfully. Enter a pairing code to continue.",
+        "Waiting for iPad",
+        std::string("The encrypted Windows host is listening on TCP 45454. Pairing code: ") + transport_.pairingCode(),
         false,
-        true
+        false
     );
 }
 
 void BridgeSession::sendState(
     const char* state,
     const char* headline,
-    const char* detail,
+    const std::string& detail,
     bool connected,
     bool pairingRequired
 ) const {

@@ -4,6 +4,7 @@
 #include <string>
 
 #include "bridge_session.h"
+#include "bridge_transport.h"
 #include "webview.h"
 
 namespace {
@@ -49,9 +50,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     WebViewHost host;
-    BridgeSession session([&host](const std::string& event) {
+    WindowsTransport transport([&host](const std::string& event) {
         host.postJson(event);
     });
+    BridgeSession session([&host](const std::string& event) {
+        host.postJson(event);
+    }, transport);
 
     const bool created = host.create(
         instance,
