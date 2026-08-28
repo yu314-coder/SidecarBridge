@@ -60,10 +60,15 @@ jobs:
           $env:WEBVIEW2_SDK_DIR = Join-Path $env:GITHUB_WORKSPACE '.deps\webview2'
           $openssl = Join-Path $env:VCPKG_INSTALLATION_ROOT 'installed\x86-windows'
           $toolchain = Join-Path $env:VCPKG_INSTALLATION_ROOT 'scripts\buildsystems\vcpkg.cmake'
-          cmake --preset windows-x86 `
-            "-DCMAKE_TOOLCHAIN_FILE=$toolchain" `
-            "-DOPENSSL_ROOT_DIR=$openssl" `
-            '-DOPENSSL_USE_STATIC_LIBS=OFF'
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE 'windows')
+          try {
+            cmake --preset windows-x86 `
+              "-DCMAKE_TOOLCHAIN_FILE=$toolchain" `
+              "-DOPENSSL_ROOT_DIR=$openssl" `
+              '-DOPENSSL_USE_STATIC_LIBS=OFF'
+          } finally {
+            Pop-Location
+          }
 
       - name: Build x86 release
         shell: pwsh
