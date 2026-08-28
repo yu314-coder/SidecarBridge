@@ -1,0 +1,112 @@
+name: Windows x86 bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - windows
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows-x86.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x86:
+    name: Build SidecarBridge Windows x86
+    runs-on: windows-2022
+    env:
+      WEBVIEW2_VERSION: 1.0.2903.40
+
+    steps:
+      - name: Check out Windows branch
+        uses: actions/checkout@v4
+
+      - name: Enable the x86 MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Install x86 OpenSSL
+        shell: pwsh
+        run: |
+          vcpkg install openssl:x86-windows --triplet x86-windows --clean-after-build
+
+      - name: Download WebView2 SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # NuGet packages are ZIP archives; use a .zip suffix so the built-in
+          # Expand-Archive cmdlet accepts the download on Windows PowerShell.
+          $download = Join-Path $env:RUNNER_TEMP "Microsoft.Web.WebView2.$env:WEBVIEW2_VERSION.zip"
+          $sdk = Join-Path $env:GITHUB_WORKSPACE '.deps\webview2'
+          New-Item -ItemType Directory -Force -Path $sdk | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/$env:WEBVIEW2_VERSION" `
+            -OutFile $download
+          Expand-Archive -Path $download -DestinationPath $sdk -Force
+          if (-not (Test-Path (Join-Path $sdk 'build\native\include\WebView2.h'))) {
+            throw 'WebView2.h was not found in the downloaded SDK.'
+          }
+          if (-not (Test-Path (Join-Path $sdk 'build\native\x86\WebView2LoaderStatic.lib'))) {
+            throw 'The x86 WebView2 loader library was not found in the downloaded SDK.'
+          }
+
+      - name: Configure x86 release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:WEBVIEW2_SDK_DIR = Join-Path $env:GITHUB_WORKSPACE '.deps\webview2'
+          $openssl = Join-Path $env:VCPKG_INSTALLATION_ROOT 'installed\x86-windows'
+          $toolchain = Join-Path $env:VCPKG_INSTALLATION_ROOT 'scripts\buildsystems\vcpkg.cmake'
+          cmake --preset windows-x86 `
+            "-DCMAKE_TOOLCHAIN_FILE=$toolchain" `
+            "-DOPENSSL_ROOT_DIR=$openssl" `
+            '-DOPENSSL_USE_STATIC_LIBS=OFF'
+
+      - name: Build x86 release
+        shell: pwsh
+        run: cmake --build windows\build\x86 --config Release --parallel
+
+      - name: Assemble portable x86 bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'windows\build\x86\Release'
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'out\SidecarBridgeWindows-x86'
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item (Join-Path $source 'SidecarBridgeWindows.exe') $bundle
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE '.deps\webview2\build\native\x86\WebView2Loader.dll') $bundle
+          $crypto = Get-ChildItem `
+            (Join-Path $env:VCPKG_INSTALLATION_ROOT 'installed\x86-windows\bin') `
+            -Filter 'libcrypto-*.dll' | Select-Object -First 1
+          if ($null -eq $crypto) { throw 'The x86 OpenSSL libcrypto DLL was not found.' }
+          Copy-Item $crypto.FullName $bundle
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'windows\build\x86\Release\web') `
+            (Join-Path $bundle 'web') -Recurse
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'windows\README.md') $bundle
+          $runtime = (Get-Item (Join-Path $bundle 'SidecarBridgeWindows.exe')).VersionInfo
+          "SidecarBridgeWindows.exe: $($runtime.FileVersion)" | Out-File (Join-Path $bundle 'BUILD.txt') -Encoding utf8
+          Compress-Archive -Path (Join-Path $bundle '*') `
+            -DestinationPath (Join-Path $env:GITHUB_WORKSPACE 'out\SidecarBridgeWindows-x86.zip') -Force
+
+      - name: Verify PE architecture and required files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'out\SidecarBridgeWindows-x86\SidecarBridgeWindows.exe'
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'Output is not a PE executable.' }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0x014c) { throw "Expected x86 PE machine 0x014c, got 0x$('{0:X4}' -f $machine)." }
+          Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE 'out\SidecarBridgeWindows-x86') -Recurse | Format-Table FullName,Length
+
+      - name: Upload x86 executable and bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: SidecarBridgeWindows-x86
+          path: out/SidecarBridgeWindows-x86.zip
+          if-no-files-found: error
+          compression-level: 0
