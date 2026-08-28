@@ -656,7 +656,10 @@ Bytes captureJpeg() {
     Bytes result;
     if (memoryStream && SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER,
                                                    IID_PPV_ARGS(&factory))) &&
-        SUCCEEDED(factory->CreateBitmapFromHBITMAP(bitmap, nullptr, WICBitmapUseBGRA, &wicBitmap)) &&
+        // GDI returns a premultiplied BGRA-compatible bitmap.  The Windows
+        // SDK exposes this conversion through the alpha-channel option; the
+        // old WICBitmapUseBGRA name is not present in current SDKs.
+        SUCCEEDED(factory->CreateBitmapFromHBITMAP(bitmap, nullptr, WICBitmapUsePremultipliedAlpha, &wicBitmap)) &&
         SUCCEEDED(factory->CreateStream(&stream)) && SUCCEEDED(stream->InitializeFromIStream(memoryStream))) {
         IWICBitmapEncoder* encoder = nullptr;
         IWICBitmapFrameEncode* frame = nullptr;
