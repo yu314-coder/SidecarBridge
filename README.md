@@ -17,22 +17,24 @@ For the full architecture, protocol, permission, distribution, testing, and trou
 
 SidecarBridge is a paired macOS + iOS/iPadOS app that turns an iPhone or iPad into an encrypted local Mac display and input surface.
 
-## Windows companion (scaffold)
+## Windows companion
 
-The Windows starting point lives in [`windows/`](windows/). It is a native
-Win32 C++ host using WebView2 (`src/webview.h` and `src/webview.cpp`) with a
-separate HTML/CSS/JavaScript dashboard in `windows/web/`. The first slice
-validates the 16-digit pairing-code UI and native message boundary without
-pretending that a Windows transport is connected. Build prerequisites and the
-planned Windows capture, LAN, input, and file-transfer backends are documented
-in [`windows/README.md`](windows/README.md).
+The Windows host is maintained on the separate [`windows` branch](https://github.com/yu314-coder/SidecarBridge/tree/windows).
+It is a native Win32 C++ shell using WebView2 with the same public
+SidecarBridge v3 LAN protocol used by the Apple clients. The host advertises
+`_sb-direct._tcp`, accepts the iPad's 16-digit first pairing, stores the trusted
+credential with Windows DPAPI, streams a bounded desktop JPEG, and translates
+keyboard, modifier-click, pointer, scroll, clipboard, and acknowledged file
+transfer messages. Read the branch's [`windows/README.md`](https://github.com/yu314-coder/SidecarBridge/blob/windows/windows/README.md)
+for Windows build prerequisites and the runtime boundary. It is a local
+display stream for iPad control, not Apple's private Sidecar virtual monitor.
 
 ## App Store
 
 - **macOS:** [Download SidecarBridge from the Mac App Store](https://apps.apple.com/app/sidecarbridge/id6792298083)
 - **iOS/iPadOS:** [Download SidecarBridge from the App Store](https://apps.apple.com/app/sidecarbridge/id6792298083)
 
-The universal iOS/iPadOS app has passed App Store review and is available from the same multi-platform listing. Version 1.2 builds 84 (macOS) and 96 (iOS/iPadOS) are uploaded, selected on the editable 1.2 records, and App Store Connect has marked both `VALID` and App Store-eligible; the iOS/iPadOS review resubmission is waiting for review and the macOS review remains waiting for review. This update includes the in-viewer and connection-screen top-bar file-transfer progress banner and iPad File Manager, alongside the foreground decoder reset plus a fresh ScreenCaptureKit capture-source rebuild and keyframe request, so returning from another app cannot leave the screen layer stale while input remains connected. The manual **Start In-App Display** recovery action uses the same media-session boundary when the encrypted socket survives an app switch: it flushes the old iPad decoder, gates delivery until a new IDR, and asks the Mac for a fresh capture source.
+The universal iOS/iPadOS app is available from the same multi-platform listing. The 1.3 update is uploaded to App Store Connect as iPadOS/iOS build 7 and macOS build 89; App Store Connect reports both uploads as `VALID`. This upload has not been submitted for review. The update includes the in-viewer and connection-screen top-bar file-transfer progress banner and iPad File Manager, alongside the foreground decoder reset plus a fresh ScreenCaptureKit capture-source rebuild and keyframe request, so returning from another app cannot leave the screen layer stale while input remains connected. The manual **Start In-App Display** recovery action uses the same media-session boundary when the encrypted socket survives an app switch: it flushes the old iPad decoder, gates delivery until a new IDR, and asks the Mac for a fresh capture source.
 
 On macOS, optional **Shutdown Handoff** keeps an active remote-control session alive while other user apps close during logout, restart, or shutdown. If another app still needs attention, or the remote connection is lost, SidecarBridge cancels the termination request instead of disappearing and leaving the Mac uncontrollable. macOS limits graceful termination delays to under two minutes, so the hold is capped at 105 seconds.
 
