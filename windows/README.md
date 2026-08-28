@@ -7,7 +7,9 @@ by the macOS app, and implements the public SidecarBridge v3 wire protocol:
 X25519 key agreement, HKDF-SHA256 direction keys, ChaCha20-Poly1305 records,
 16-digit first pairing, saved DPAPI-protected credentials, JPEG desktop
 frames, SendInput pointer/keyboard events, committed Unicode text, scroll, and
-incoming file transfer.
+incoming file transfer. Modifier arrays (Control/Option/Shift/Command), the
+iPad 中/英 input-source key, and current-pointer drag events are translated by
+the host instead of being treated as plain clicks.
 
 ## Project shape
 
@@ -88,9 +90,12 @@ for the code again. Files received from the iPad are written to
 `%USERPROFILE%\\Downloads\\SidecarBridge Transfers`.
 
 The capture path intentionally uses a bounded GDI/WIC JPEG frame so it has no
-unbounded queue under RAM pressure. It is a local display stream, not a Windows
-virtual monitor; adding a true virtual display would require a separately
-signed [Indirect Display Driver](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/indirect-display-driver-model-overview).
+unbounded queue under RAM pressure. Clipboard text is exchanged through the
+authenticated control channel and is capped at 48 KiB. Incoming files use a
+bounded 512 MiB transfer, sanitized leaf names, chunk acknowledgements, and a
+Downloads/SidecarBridge Transfers destination. It is a local display stream,
+not a Windows virtual monitor; adding a true virtual display would require a
+separately signed [Indirect Display Driver](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/indirect-display-driver-model-overview).
 
 The Windows version cannot use Apple's private Sidecar transport. A virtual
 display driver and a local authenticated stream are separate Windows features

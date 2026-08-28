@@ -61,6 +61,11 @@ void BridgeSession::sendState(
             << ",\"detail\":\"" << escapeJson(detail) << "\""
             << ",\"connected\":" << (connected ? "true" : "false")
             << ",\"pairingRequired\":" << (pairingRequired ? "true" : "false")
+            // Keep the code as a first-class field as well as in the detail
+            // text.  The WebView renders this field in the copyable pairing
+            // card, so it remains visible after a state update.
+            << ",\"pairingCode\":\"" << escapeJson(transport_.pairingCode()) << "\""
+            << ",\"localAddress\":\"" << escapeJson(transport_.localAddress()) << "\""
             << "}";
     eventHandler_(payload.str());
 }

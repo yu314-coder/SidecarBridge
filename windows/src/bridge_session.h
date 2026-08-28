@@ -5,10 +5,9 @@
 
 #include "bridge_transport.h"
 
-// Transport-agnostic state model for the Windows companion.  The first
-// Windows slice deliberately keeps connection state honest: a pairing code can
-// be validated locally, but no network session is reported until a Windows
-// transport backend is implemented.
+// Transport-agnostic state model for the Windows companion.  The native
+// transport owns the listener and pairing state; this class only bridges those
+// events to the WebView dashboard and keeps the pairing code copyable.
 class BridgeSession final {
 public:
     using EventHandler = std::function<void(const std::string&)>;

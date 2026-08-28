@@ -48,6 +48,7 @@ constexpr uint8_t kJpegPacket = 2;
 constexpr uint8_t kFilePacket = 4;
 constexpr uint8_t kAuthenticationPacket = 5;
 constexpr size_t kMaximumPayload = 12 * 1024 * 1024;
+constexpr size_t kMaximumClipboardBytes = 48 * 1024;
 constexpr char kBindingContext[] = "SidecarBridge-LAN-binding-v2\0";
 constexpr char kPairingContext[] = "SidecarBridge-Pairing-v2\0";
 constexpr char kSecureContext[] = "SidecarBridge-secure-packet-v3\0";
@@ -113,6 +114,42 @@ double jsonNumber(const std::string& json, const char* key, double fallback = 0.
     char* end = nullptr;
     const double value = std::strtod(json.c_str() + colon + 1, &end);
     return end == json.c_str() + colon + 1 ? fallback : value;
+}
+
+bool jsonHasNumber(const std::string& json, const char* key) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const size_t keyPos = json.find(needle);
+    if (keyPos == std::string::npos) return false;
+    const size_t colon = json.find(':', keyPos + needle.size());
+    if (colon == std::string::npos) return false;
+    const char* begin = json.c_str() + colon + 1;
+    char* end = nullptr;
+    std::strtod(begin, &end);
+    return end != begin;
+}
+
+bool jsonArrayContains(const std::string& json, const char* key, const char* value) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const size_t keyPos = json.find(needle);
+    if (keyPos == std::string::npos) return false;
+    const size_t colon = json.find(':', keyPos + needle.size());
+    if (colon == std::string::npos) return false;
+    const size_t start = json.find('[', colon + 1);
+    const size_t end = start == std::string::npos ? std::string::npos : json.find(']', start + 1);
+    if (start == std::string::npos || end == std::string::npos) return false;
+    const std::string token = std::string("\"") + value + "\"";
+    return json.find(token, start + 1) < end;
+}
+
+std::string truncateUtf8(std::string value, size_t maximumBytes) {
+    if (value.size() <= maximumBytes) return value;
+    value.resize(maximumBytes);
+    // Never leave a partial UTF-8 scalar in a JSON string.  Continuation
+    // bytes begin with 10xxxxxx; remove them until the scalar boundary.
+    while (!value.empty() && (static_cast<unsigned char>(value.back()) & 0xC0) == 0x80) {
+        value.pop_back();
+    }
+    return value;
 }
 
 std::string normalizeCode(const std::string& value) {
@@ -544,6 +581,57 @@ std::wstring wideFromUtf8(const std::string& value) {
     return result;
 }
 
+bool writeClipboardText(const std::string& value) {
+    const std::wstring wide = wideFromUtf8(truncateUtf8(value, kMaximumClipboardBytes));
+    if (wide.empty() && !value.empty()) return false;
+    if (!OpenClipboard(nullptr)) return false;
+    if (!EmptyClipboard()) {
+        CloseClipboard();
+        return false;
+    }
+
+    const SIZE_T bytes = (wide.size() + 1) * sizeof(wchar_t);
+    HGLOBAL storage = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!storage) {
+        CloseClipboard();
+        return false;
+    }
+    void* destination = GlobalLock(storage);
+    if (!destination) {
+        GlobalFree(storage);
+        CloseClipboard();
+        return false;
+    }
+    std::memcpy(destination, wide.c_str(), bytes);
+    GlobalUnlock(storage);
+    if (SetClipboardData(CF_UNICODETEXT, storage) == nullptr) {
+        GlobalFree(storage);
+        CloseClipboard();
+        return false;
+    }
+    // The clipboard owns `storage` after SetClipboardData succeeds.
+    CloseClipboard();
+    return true;
+}
+
+std::string readClipboardText() {
+    if (!OpenClipboard(nullptr)) return {};
+    HANDLE handle = GetClipboardData(CF_UNICODETEXT);
+    if (!handle) {
+        CloseClipboard();
+        return {};
+    }
+    const auto* value = static_cast<const wchar_t*>(GlobalLock(handle));
+    if (!value) {
+        CloseClipboard();
+        return {};
+    }
+    const std::wstring wide(value);
+    GlobalUnlock(handle);
+    CloseClipboard();
+    return truncateUtf8(utf8FromWide(wide), kMaximumClipboardBytes);
+}
+
 Bytes captureJpeg() {
     const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -633,8 +721,40 @@ void sendKey(WORD key, DWORD flags = 0) {
     SendInput(1, &input, sizeof(input));
 }
 
+std::vector<WORD> pressModifierKeys(const std::string& inputJson) {
+    // RemoteInputEvent.modifiers is a JSON array, so searching the whole
+    // message for a quoted string is not sufficient (and was why modifier
+    // shortcuts silently became plain key presses in the Windows prototype).
+    const std::pair<const char*, WORD> values[] = {
+        {"control", VK_CONTROL},
+        {"shift", VK_SHIFT},
+        {"option", VK_MENU},
+        {"alt", VK_MENU},
+        {"command", VK_LWIN},
+        {"meta", VK_LWIN}
+    };
+    std::vector<WORD> held;
+    for (const auto& value : values) {
+        if (!jsonArrayContains(inputJson, "modifiers", value.first) ||
+            std::find(held.begin(), held.end(), value.second) != held.end()) {
+            continue;
+        }
+        sendKey(value.second);
+        held.push_back(value.second);
+    }
+    return held;
+}
+
+void releaseModifierKeys(const std::vector<WORD>& held) {
+    for (auto it = held.rbegin(); it != held.rend(); ++it) {
+        sendKey(*it, KEYEVENTF_KEYUP);
+    }
+}
+
 void executeInput(const std::string& inputJson) {
     const std::string kind = jsonString(inputJson, "kind");
+    const bool hasX = jsonHasNumber(inputJson, "x");
+    const bool hasY = jsonHasNumber(inputJson, "y");
     const double x = std::clamp(jsonNumber(inputJson, "x", 0.5), 0.0, 1.0);
     const double y = std::clamp(jsonNumber(inputJson, "y", 0.5), 0.0, 1.0);
     const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -650,8 +770,9 @@ void executeInput(const std::string& inputJson) {
         SendInput(1, &event, sizeof(event));
         SetCursorPos(left + static_cast<int>(x * std::max(width - 1, 0)), top + static_cast<int>(y * std::max(height - 1, 0)));
     };
-    if (kind == "pointerMove" || kind == "primaryDown" || kind == "primaryDrag" || kind == "primaryUp" ||
-        kind == "primaryClick" || kind == "primaryDoubleClick" || kind == "secondaryClick" || kind == "secondaryDoubleClick") {
+    if ((kind == "pointerMove" || kind == "primaryDown" || kind == "primaryDrag" || kind == "primaryUp" ||
+         kind == "primaryClick" || kind == "primaryDoubleClick" || kind == "secondaryClick" || kind == "secondaryDoubleClick") &&
+        hasX && hasY) {
         moveAbsolute();
     }
     if (kind == "pointerDelta") {
@@ -662,19 +783,23 @@ void executeInput(const std::string& inputJson) {
         event.mi.dwFlags = MOUSEEVENTF_MOVE;
         SendInput(1, &event, sizeof(event));
     } else if (kind == "primaryDown" || kind == "primaryClick" || kind == "primaryDoubleClick") {
+        const std::vector<WORD> held = pressModifierKeys(inputJson);
         const int count = kind == "primaryDoubleClick" ? 2 : 1;
         for (int i = 0; i < count; ++i) {
             INPUT event{}; event.type = INPUT_MOUSE; event.mi.dwFlags = MOUSEEVENTF_LEFTDOWN; SendInput(1, &event, sizeof(event));
             if (kind != "primaryDown") { event.mi.dwFlags = MOUSEEVENTF_LEFTUP; SendInput(1, &event, sizeof(event)); }
         }
+        releaseModifierKeys(held);
     } else if (kind == "primaryUp") {
         INPUT event{}; event.type = INPUT_MOUSE; event.mi.dwFlags = MOUSEEVENTF_LEFTUP; SendInput(1, &event, sizeof(event));
     } else if (kind == "secondaryClick" || kind == "secondaryDoubleClick") {
+        const std::vector<WORD> held = pressModifierKeys(inputJson);
         const int count = kind == "secondaryDoubleClick" ? 2 : 1;
         for (int i = 0; i < count; ++i) {
             INPUT event{}; event.type = INPUT_MOUSE; event.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN; SendInput(1, &event, sizeof(event));
             event.mi.dwFlags = MOUSEEVENTF_RIGHTUP; SendInput(1, &event, sizeof(event));
         }
+        releaseModifierKeys(held);
     } else if (kind == "releaseButtons") {
         INPUT event{}; event.type = INPUT_MOUSE; event.mi.dwFlags = MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTUP; SendInput(1, &event, sizeof(event));
     } else if (kind == "scroll") {
@@ -693,24 +818,32 @@ void executeInput(const std::string& inputJson) {
         const int usage = static_cast<int>(jsonNumber(inputJson, "hidUsage", 0));
         WORD key = virtualKeyForHID(usage);
         if (!key) {
-            const std::string name = jsonString(inputJson, "key");
-            if (name == "Enter") key = VK_RETURN; else if (name == "Backspace") key = VK_BACK; else if (name == "Tab") key = VK_TAB;
-            else if (name == "Escape") key = VK_ESCAPE; else if (name == "ArrowUp") key = VK_UP; else if (name == "ArrowDown") key = VK_DOWN;
-            else if (name == "ArrowLeft") key = VK_LEFT; else if (name == "ArrowRight") key = VK_RIGHT;
+            std::string name = jsonString(inputJson, "key");
+            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (name == "enter" || name == "return") key = VK_RETURN;
+            else if (name == "backspace" || name == "delete") key = VK_BACK;
+            else if (name == "tab") key = VK_TAB;
+            else if (name == "escape" || name == "esc") key = VK_ESCAPE;
+            else if (name == "arrowup" || name == "up") key = VK_UP;
+            else if (name == "arrowdown" || name == "down") key = VK_DOWN;
+            else if (name == "arrowleft" || name == "left") key = VK_LEFT;
+            else if (name == "arrowright" || name == "right") key = VK_RIGHT;
         }
         if (key) {
-            const std::string modifiers = jsonString(inputJson, "modifiers");
-            const std::pair<const char*, WORD> values[] = {
-                {"control", VK_CONTROL}, {"ctrl", VK_CONTROL}, {"shift", VK_SHIFT},
-                {"option", VK_MENU}, {"alt", VK_MENU}, {"command", VK_LWIN}, {"meta", VK_LWIN}
-            };
-            std::vector<WORD> held;
-            for (const auto& value : values) {
-                if (modifiers.find(value.first) != std::string::npos && std::find(held.begin(), held.end(), value.second) == held.end()) { sendKey(value.second); held.push_back(value.second); }
-            }
+            const std::vector<WORD> held = pressModifierKeys(inputJson);
             sendKey(key); sendKey(key, KEYEVENTF_KEYUP);
-            for (auto it = held.rbegin(); it != held.rend(); ++it) sendKey(*it, KEYEVENTF_KEYUP);
+            releaseModifierKeys(held);
         }
+    } else if (kind == "cycleInputMode" || kind == "toggleChineseEnglishInputMode") {
+        // Windows exposes the input-source switch as Win+Space.  Keep this
+        // mapping local to the host so the iPad's 中/英 key and control-space
+        // shortcut work without sending an unsupported macOS key code.
+        sendKey(VK_LWIN);
+        sendKey(VK_SPACE);
+        sendKey(VK_SPACE, KEYEVENTF_KEYUP);
+        sendKey(VK_LWIN, KEYEVENTF_KEYUP);
     }
 }
 
@@ -734,8 +867,18 @@ std::string fileTransferDirectory() {
 } // namespace
 
 struct WindowsTransport::Session {
+    struct TransferState {
+        std::filesystem::path path;
+        int64_t expectedSize = 0;
+        int64_t offset = 0;
+    };
+
     SOCKET socket = INVALID_SOCKET;
     std::mutex sendMutex;
+    // Capture and control responses can be produced by different threads.
+    // Serialize counter allocation so every encrypted record has a unique
+    // nonce even when a clipboard response races a video frame.
+    std::mutex counterMutex;
     Bytes sendKey;
     Bytes receiveKey;
     uint64_t sendCounter = 0;
@@ -744,7 +887,12 @@ struct WindowsTransport::Session {
     std::atomic<bool> authenticated{false};
     std::atomic<bool> closed{false};
     std::atomic<bool> socketClosed{false};
-    std::map<std::string, std::filesystem::path> transfers;
+    std::map<std::string, TransferState> transfers;
+
+    Bytes encrypted(const Bytes& packet) {
+        std::lock_guard lock(counterMutex);
+        return encryptedFrame(sendKey, sendCounter, packet);
+    }
 };
 
 WindowsTransport::WindowsTransport(EventHandler eventHandler)
@@ -925,6 +1073,34 @@ void WindowsTransport::handleClient(uintptr_t rawSocket) {
 
     bool authenticated = false;
     Bytes savedCredential = loadCredential();
+    auto sendControlMessage = [&](const std::string& kind, const std::string& detail) {
+        std::ostringstream message;
+        message << "{\"kind\":\"" << escapeJson(kind) << "\"";
+        if (!detail.empty()) {
+            message << ",\"detail\":\"" << escapeJson(truncateUtf8(detail, kMaximumClipboardBytes)) << "\"";
+        }
+        message << "}";
+        const std::string encoded = message.str();
+        Bytes packet{kControlPacket};
+        packet.insert(packet.end(), encoded.begin(), encoded.end());
+        const Bytes frame = session->encrypted(packet);
+        return !frame.empty() && sendFrame(socket, frame, session->sendMutex);
+    };
+    auto sendFileMessage = [&](const std::string& kind, const std::string& transferID,
+                               int64_t offset, const std::string& message = {},
+                               const std::string& digest = {}) {
+        std::ostringstream payload;
+        payload << "{\"kind\":\"" << escapeJson(kind) << "\",\"transferID\":\""
+                << escapeJson(transferID) << "\",\"offset\":" << offset;
+        if (!message.empty()) payload << ",\"message\":\"" << escapeJson(message) << "\"";
+        if (!digest.empty()) payload << ",\"sha256\":\"" << escapeJson(digest) << "\"";
+        payload << "}";
+        const std::string encoded = payload.str();
+        Bytes packet{kFilePacket};
+        packet.insert(packet.end(), encoded.begin(), encoded.end());
+        const Bytes frame = session->encrypted(packet);
+        return !frame.empty() && sendFrame(socket, frame, session->sendMutex);
+    };
     while (!stopRequested_ && !session->closed && receiveFrame(socket, hello)) {
         if (hello.empty() || hello[0] != kEncrypted) { closeSession(); return; }
         const Bytes plain = openPacket(session->receiveKey, 1, Bytes(hello.begin() + 1, hello.end()), session->highestReceivedCounter, session->receivedWindow);
@@ -943,7 +1119,7 @@ void WindowsTransport::handleClient(uintptr_t rawSocket) {
                 const std::string detail = "The pairing code or saved credential was rejected.";
                 const std::string rejected = "{\"kind\":\"rejected\",\"protocolVersion\":3,\"detail\":\"" + detail + "\"}";
                 Bytes packet{kAuthenticationPacket}; packet.insert(packet.end(), rejected.begin(), rejected.end());
-                sendFrame(socket, encryptedFrame(session->sendKey, session->sendCounter, packet), session->sendMutex);
+                sendFrame(socket, session->encrypted(packet), session->sendMutex);
                 closeSession(); return;
             }
             Bytes responseProof = hmacSha256(codeOK ? codeSecret : savedCredential,
@@ -955,7 +1131,7 @@ void WindowsTransport::handleClient(uintptr_t rawSocket) {
             if (!issued.empty()) accepted << ",\"credential\":\"" << base64Encode(issued) << "\"";
             accepted << ",\"detail\":\"Encrypted Windows host ready\"}";
             const std::string acceptedString = accepted.str(); Bytes packet{kAuthenticationPacket}; packet.insert(packet.end(), acceptedString.begin(), acceptedString.end());
-            if (!sendFrame(socket, encryptedFrame(session->sendKey, session->sendCounter, packet), session->sendMutex)) { closeSession(); return; }
+            if (!sendFrame(socket, session->encrypted(packet), session->sendMutex)) { closeSession(); return; }
             authenticated = true; session->authenticated = true;
             emitState("connected", "Connected to iPad", "Encrypted Windows screen, pointer, keyboard, scroll, clipboard text, and file transfer are active.", true);
             captureWorker_ = std::thread(&WindowsTransport::captureLoop, this, session);
@@ -963,22 +1139,71 @@ void WindowsTransport::handleClient(uintptr_t rawSocket) {
         }
         if (plain[0] == kControlPacket) {
             const std::string control(plain.begin() + 1, plain.end());
-            if (jsonString(control, "kind") == "input") executeInput(jsonString(control, "detail"));
+            const std::string kind = jsonString(control, "kind");
+            if (kind == "input") {
+                executeInput(jsonString(control, "detail"));
+            } else if (kind == "clipboardText") {
+                const std::string text = jsonString(control, "detail");
+                if (!writeClipboardText(text)) {
+                    sendControlMessage("clipboardError", "Windows could not write the clipboard.");
+                }
+            } else if (kind == "requestClipboard") {
+                const std::string text = readClipboardText();
+                if (!sendControlMessage(text.empty() ? "clipboardError" : "clipboardText",
+                                        text.empty() ? "Windows clipboard is empty or unavailable." : text)) {
+                    closeSession();
+                    return;
+                }
+            }
         } else if (plain[0] == kFilePacket) {
             const std::string transfer(plain.begin() + 1, plain.end());
             const std::string kind = jsonString(transfer, "kind");
             const std::string transferID = jsonString(transfer, "transferID");
             if (kind == "begin" && !transferID.empty()) {
-                std::filesystem::path path = std::filesystem::path(fileTransferDirectory()) / jsonString(transfer, "name");
-                session->transfers[transferID] = path;
-                std::ofstream(path, std::ios::binary | std::ios::trunc).close();
+                const std::string rawName = jsonString(transfer, "name");
+                const std::filesystem::path safeName = std::filesystem::path(wideFromUtf8(rawName)).filename();
+                const double declaredSize = jsonNumber(transfer, "totalSize", -1.0);
+                if (safeName.empty() || safeName == std::filesystem::path(L".") ||
+                    safeName == std::filesystem::path(L"..") || declaredSize < 0.0 ||
+                    declaredSize > 512.0 * 1024.0 * 1024.0 || std::floor(declaredSize) != declaredSize) {
+                    continue;
+                }
+                const std::filesystem::path directory = std::filesystem::path(fileTransferDirectory());
+                std::filesystem::path path = directory / safeName;
+                for (unsigned int suffix = 1; std::filesystem::exists(path); ++suffix) {
+                    const std::filesystem::path stem = path.stem();
+                    const std::filesystem::path extension = path.extension();
+                    path = directory / (stem.wstring() + L" (" + std::to_wstring(suffix) + L")" + extension.wstring());
+                }
+                std::ofstream file(path, std::ios::binary | std::ios::trunc);
+                if (!file) {
+                    continue;
+                }
+                session->transfers[transferID] = {path, static_cast<int64_t>(declaredSize), 0};
+                if (!sendFileMessage("acknowledgement", transferID, 0)) { closeSession(); return; }
             } else if (kind == "chunk" && session->transfers.count(transferID)) {
                 const Bytes chunk = base64Decode(jsonString(transfer, "payload"));
-                std::fstream file(session->transfers[transferID], std::ios::binary | std::ios::in | std::ios::out);
-                file.seekp(static_cast<std::streamoff>(jsonNumber(transfer, "offset")));
+                auto& state = session->transfers[transferID];
+                const double offset = jsonNumber(transfer, "offset", -1.0);
+                if (offset < 0.0 || std::floor(offset) != offset || static_cast<int64_t>(offset) != state.offset ||
+                    chunk.size() > 48 * 1024 || state.offset + static_cast<int64_t>(chunk.size()) > state.expectedSize) {
+                    continue;
+                }
+                std::fstream file(state.path, std::ios::binary | std::ios::in | std::ios::out);
+                file.seekp(static_cast<std::streamoff>(state.offset));
                 file.write(reinterpret_cast<const char*>(chunk.data()), static_cast<std::streamsize>(chunk.size()));
+                if (!file) continue;
+                state.offset += static_cast<int64_t>(chunk.size());
+                if (!sendFileMessage("acknowledgement", transferID, state.offset)) { closeSession(); return; }
             } else if (kind == "complete") {
+                auto found = session->transfers.find(transferID);
+                if (found == session->transfers.end() || found->second.offset != found->second.expectedSize) {
+                    continue;
+                }
+                const int64_t completedSize = found->second.expectedSize;
+                const std::string digest = jsonString(transfer, "sha256");
                 session->transfers.erase(transferID);
+                if (!sendFileMessage("complete", transferID, completedSize, "saved", digest)) { closeSession(); return; }
                 emit("{\"type\":\"transfer\",\"state\":\"complete\"}");
             }
         }
@@ -994,7 +1219,7 @@ void WindowsTransport::captureLoop(std::shared_ptr<Session> session) {
         const Bytes jpeg = captureJpeg();
         if (!jpeg.empty()) {
             Bytes packet{kJpegPacket}; packet.insert(packet.end(), jpeg.begin(), jpeg.end());
-            const Bytes frame = encryptedFrame(session->sendKey, session->sendCounter, packet);
+            const Bytes frame = session->encrypted(packet);
             if (frame.empty() || !sendFrame(session->socket, frame, session->sendMutex)) { session->closed = true; break; }
         }
         std::this_thread::sleep_until(nextFrame);
