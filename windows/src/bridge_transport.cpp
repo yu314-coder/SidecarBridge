@@ -751,6 +751,21 @@ void releaseModifierKeys(const std::vector<WORD>& held) {
     }
 }
 
+// A drag can arrive as primaryDown -> primaryDrag* -> primaryUp.  Keep the
+// modifiers pressed for that whole sequence so Shift-drag and Option-drag
+// retain their native Windows semantics instead of degrading to a plain drag.
+std::mutex pointerModifierMutex;
+std::vector<WORD> activePointerModifiers;
+
+void releaseActivePointerModifiers() {
+    std::vector<WORD> held;
+    {
+        std::lock_guard lock(pointerModifierMutex);
+        held.swap(activePointerModifiers);
+    }
+    releaseModifierKeys(held);
+}
+
 void executeInput(const std::string& inputJson) {
     const std::string kind = jsonString(inputJson, "kind");
     const bool hasX = jsonHasNumber(inputJson, "x");
@@ -789,9 +804,15 @@ void executeInput(const std::string& inputJson) {
             INPUT event{}; event.type = INPUT_MOUSE; event.mi.dwFlags = MOUSEEVENTF_LEFTDOWN; SendInput(1, &event, sizeof(event));
             if (kind != "primaryDown") { event.mi.dwFlags = MOUSEEVENTF_LEFTUP; SendInput(1, &event, sizeof(event)); }
         }
-        releaseModifierKeys(held);
+        if (kind == "primaryDown") {
+            std::lock_guard lock(pointerModifierMutex);
+            activePointerModifiers = held;
+        } else {
+            releaseModifierKeys(held);
+        }
     } else if (kind == "primaryUp") {
         INPUT event{}; event.type = INPUT_MOUSE; event.mi.dwFlags = MOUSEEVENTF_LEFTUP; SendInput(1, &event, sizeof(event));
+        releaseActivePointerModifiers();
     } else if (kind == "secondaryClick" || kind == "secondaryDoubleClick") {
         const std::vector<WORD> held = pressModifierKeys(inputJson);
         const int count = kind == "secondaryDoubleClick" ? 2 : 1;
@@ -802,6 +823,7 @@ void executeInput(const std::string& inputJson) {
         releaseModifierKeys(held);
     } else if (kind == "releaseButtons") {
         INPUT event{}; event.type = INPUT_MOUSE; event.mi.dwFlags = MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTUP; SendInput(1, &event, sizeof(event));
+        releaseActivePointerModifiers();
     } else if (kind == "scroll") {
         INPUT event{}; event.type = INPUT_MOUSE;
         event.mi.mouseData = static_cast<DWORD>(std::clamp(jsonNumber(inputJson, "deltaY") * -120.0, -12000.0, 12000.0));
@@ -1039,6 +1061,7 @@ void WindowsTransport::handleClient(uintptr_t rawSocket) {
     { std::lock_guard lock(sessionMutex_); session_ = session; }
     auto closeSession = [&] {
         session->closed = true;
+        releaseActivePointerModifiers();
         if (!session->socketClosed.exchange(true)) {
             shutdown(socket, SD_BOTH);
             closesocket(socket);
