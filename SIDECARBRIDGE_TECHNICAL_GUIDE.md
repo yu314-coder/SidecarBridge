@@ -1,6 +1,6 @@
 # SidecarBridge Technical Guide
 
-This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of **macOS build 63 and iOS/iPadOS build 73** on 2026-08-20.
+This document is the implementation, operation, testing, and troubleshooting reference for SidecarBridge. It describes the paired native macOS and universal iOS/iPadOS application as of the **macOS build 84 and iOS/iPadOS build 96** connection-screen transfer-status upload on 2026-08-24.
 
 ## App Store links
 
@@ -9,7 +9,7 @@ Both platform listings are approved and available through the same SidecarBridge
 - [Mac App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
 - [iOS/iPadOS App Store listing](https://apps.apple.com/app/sidecarbridge/id6792298083)
 
-Version 1.0 is approved and available on both platforms. Version 1.1 is approved for iOS/iPadOS; the Mac 1.1 record remains the active App Store submission. Version 1.2 is uploaded and valid as macOS build 63 and iOS/iPadOS build 73. The iOS/iPadOS 1.2 version record is prepared with build 73 attached; earlier 1.2 builds remain valid unselected pre-release builds. The Mac 1.2 build is available as a valid pre-release build until the active Mac 1.1 submission is cleared.
+Version 1.0 is approved and available on both platforms. Version 1.1 is approved for iOS/iPadOS and macOS. Version 1.2 builds macOS 84 and iOS/iPadOS 96 are uploaded, selected on the editable 1.2 records, and App Store Connect marks both `VALID` and App Store-eligible. The iOS/iPadOS review item was resubmitted after the archive's beta host stamp was normalized to public build `25F80`; both platform review submissions are now waiting for review.
 
 Apple controls regional redirects and listing propagation after approval.
 
@@ -44,8 +44,8 @@ The current project has the following identity:
 | Universal iOS/iPadOS target | `SidecarBridgePad` |
 | Shared bundle ID | `io.sidecarbridge.mac` |
 | Marketing version | `1.2` (uploaded; 1.0 and 1.1 are available/active by platform) |
-| Current macOS build | `63` |
-| Current iOS/iPadOS build | `73` |
+| Current macOS build | `84` |
+| Current iOS/iPadOS build | `96` |
 | macOS minimum | macOS 14 |
 | iOS/iPadOS minimum | iOS/iPadOS 17 |
 
@@ -53,7 +53,7 @@ The macOS and universal iOS/iPadOS targets intentionally use the same app name a
 
 ### Release-numbering smoke test
 
-Before the next marketing-version change, both targets were dry-built with Xcode 26.5 using the requested `MARKETING_VERSION=1.3 CURRENT_PROJECT_VERSION=1` overrides. The macOS and iOS/iPadOS projects compile successfully with that pair. The override is a compile test only: App Store Connect still validates build numbers per platform. In this app record the next Mac upload must continue from Mac build 63 (64 or higher), while the iOS/iPadOS 1.3 record can start at build 1. Do not upload macOS 1.3 (1) unless App Store Connect explicitly accepts a new platform sequence; the prior Mac 1.0/1.1/1.2 uploads make that number non-monotonic.
+The current 1.2 upload was archived with Xcode 26.5 and the platform-specific overrides `CURRENT_PROJECT_VERSION=84` (macOS) and `CURRENT_PROJECT_VERSION=96` (iOS/iPadOS). The Mac and iPad archives' beta host stamps were normalized to the public `25F80` build before export; the iPad archive contains the shared Documents/Files-app keys for received-file management. For a future 1.3 record, both platform sequences can start at build 1.
 
 The latest live verification confirmed:
 
@@ -65,7 +65,7 @@ The latest live verification confirmed:
 - when Bonjour results were absent on the iPad, its fixed-port probe reached both Mac interfaces;
 - the Mac preserved the first handshake, rejected the duplicate interface arrival, and established the encrypted stream;
 - the iPad displayed the live Mac screen over the same-Wi-Fi direct path;
-- all 83 protocol, input, clipboard, and chunked-transfer tests pass in the current Mac test run.
+- all 91 protocol, input, clipboard, and chunked-transfer tests pass in the current Mac test run.
 
 ## 3. High-level architecture
 
@@ -220,29 +220,66 @@ Encryption protects packet confidentiality and integrity. The one-time-code proo
 `H264Encoder` uses VideoToolbox hardware encoding. The target profile is designed for an iPad display:
 
 - native-width-aware HiDPI output;
-- width clamped to a practical 1440–2880-pixel range;
-- up to 60 frames per second on direct LAN/AWDL and 30 on nearby fallback;
-- transport-specific bitrate and frame pacing (direct quality is bounded at 20 Mbps; nearby at 8 Mbps);
-- automatic 15 fps pacing while the iPad viewer is in background PiP, restored on foreground return;
-- one periodic keyframe per second, plus an immediate keyframe request when a transport drops a dependent frame chain.
+- user-selectable Adaptive, 1080p, or 2K width targets plus 30/60/90/120-FPS targets;
+- the direct target is clamped to the highest available refresh mode of the connected display, while foreground nearby fallback can target up to 1920 pixels and 120 FPS;
+- transport-specific bitrate and frame pacing (direct bitrate scales with pixel rate and cadence up to 40 Mbps; nearby remains at 8 Mbps);
+- a 60-FPS software target while the iPad viewer is in background PiP or the
+  short resume grace period; the app does not deliberately switch to a 2/15
+  FPS power-saving mode;
+- macOS memory-pressure events reduce the encoder and transport working set
+  while keeping the live stream at up to 60 FPS during warning pressure.
+  Warning pressure caps the capture surface at 1920 pixels; critical pressure
+  caps it at 1280 pixels while preserving the 60-FPS target.
+  Each change is applied through one debounced media boundary without dropping
+  the authenticated input session. Pressure transitions are debounced, so
+  yellow/normal oscillation cannot repeatedly invalidate the ScreenCaptureKit
+  source. The saved user target is restored automatically when pressure
+  returns to normal. A forced keyframe request stays armed until VideoToolbox
+  emits a valid IDR, so a dropped pressure-period submission cannot leave the
+  receiver showing only the one-second periodic recovery frames;
+- recovery keyframes about once per second, plus an immediate keyframe
+  request when a transport or decoder detects a dependent-frame gap.
 
 ### 6.3 Flow control
 
 The Mac never allows old frames to create an ever-growing latency queue:
 
-- ScreenCaptureKit queue depth is two surfaces;
-- at most three encrypted video sends are in flight, with a four-frame pending cap;
+- ScreenCaptureKit queue depth is two IOSurfaces at every cadence;
+- two encrypted video sends are in flight at 30–90 FPS and three at 120 FPS,
+  with a pending cap one frame above each in-flight window;
 - direct LAN/AWDL uses the bounded send window so a large frame does not serialize the capture path or impose a round-trip frame-rate limit;
-- nearby Multipeer video does not send a reliable receipt for every frame, avoiding reverse-path congestion and round-trip gating;
-- if the queue saturates, dependent frames are discarded;
-- transmission resumes at the next keyframe;
+- nearby Multipeer video does not send a reliable receipt for every frame, avoiding reverse-path congestion and round-trip gating; its latest-frame unreliable queue can target 120 FPS while remaining bounded;
+- if the queue saturates, the already-ordered burst drains while new P-frames
+  are shed; transmission resumes at the next keyframe without growing RAM;
+- the iPad keeps a 4–6-frame cadence-aware queue, rejects stale or gapped
+  dependent frames, flushes only to a keyframe, and asks the Mac for an IDR
+  immediately when a gap is observed;
+- when the iPad returns from another app, it discards queued pre-background
+  frames, resets the sample-buffer decoder and local presentation timeline,
+  gates H.264 delivery until a fresh IDR arrives, and asks the Mac for that
+  keyframe over the existing encrypted control channel;
+- `NWConnection.SendCompletion.contentProcessed` is used only as local
+  Network.framework progress. A four-second no-progress watchdog requests a
+  fresh IDR without clearing outstanding sends, so one slow local send cannot
+  repeatedly force the viewer into a periodic-keyframe (~1 FPS) loop;
+- if the encrypted socket survives and the user taps **Start In-App Display**
+  to recover manually, the action creates the same video-session boundary:
+  the iPad flushes its old decoder and waits for an IDR while the Mac refreshes
+  ScreenCaptureKit instead of continuing to present the retained surface;
+- when the Mac receives the foreground signal, it stops the old
+  `SCStream`, drains queued callbacks, creates a new ScreenCaptureKit source,
+  retargets input to the active display, and requests an IDR synchronously;
+  callbacks from the retired source are ignored so a retained pre-background
+  surface cannot overwrite the fresh stream;
 - initial keyframes are retried after the iPad display layer becomes ready.
 
 ### 6.4 Decoding and display
 
-The iPad uses a hardware-backed H.264 display path. It tracks stream dimensions, frame rate, current transport, Picture in Picture availability, and whether a usable first frame has arrived.
+The iPad uses a hardware-backed H.264 display path. It tracks stream dimensions, frame rate, current transport, Picture in Picture availability, and whether a usable first frame has arrived. The delivery queue is intentionally bounded at 10 frames below 90 FPS, 18 frames at 90 FPS, and 20 frames at 120 FPS; the display layer itself keeps a 12-sample queue at 60–89 FPS and 16 samples at 120 FPS so it can absorb a brief render hiccup without accumulating unbounded latency.
 
-The fallback mirrors the Mac's main display. It does not create a virtual extended desktop. Native Sidecar is still required for a true extra Retina display.
+The iPad Settings panel persists the selected quality and frame-rate target and sends them as a version-tolerant hello extension after authentication. Changing a profile during a live session schedules a short, keyframe-safe capture restart on the Mac. The displayed FPS remains measured from decoded frames; a 120-FPS target is therefore reported lower on a 60 Hz display or a congested link instead of being presented as a false guarantee.
+
+The fallback mirrors the Mac's main display. It does not create a virtual extended desktop. Native Sidecar is still required for a true extra Retina display. The 60-FPS target is a capture/queue policy, not a guarantee that a saturated network, slow display, thermal throttling, or iPadOS suspension can physically present 60 decoded frames every second.
 
 ## 7. Remote input
 
@@ -294,7 +331,7 @@ The iPad UI includes an AnyDesk-style right-edge control drawer for:
 
 ### 7.1 File transfer
 
-`FileTransferEngine` sends files in either direction over the active paired transport. Each 128 KB chunk is acknowledged before the next chunk is read, bounding memory and preventing a large transfer queue from starving video or input. Transfers are limited to 512 MB, validate offsets and sizes, sanitize destination names, and use the existing authenticated encryption layer. The Mac UI can queue multiple selected files, cancel the active transfer, open the transfer folder, and show live byte progress, rate, and ETA. An idle transfer has a 45-second recovery window. The Mac saves received files in its private `Application Support/SidecarBridge/Transfers` folder; the iPad stores them in its Documents container and exposes the system share sheet. A file copied to either device's clipboard follows this same verified path and is installed as a clipboard file URL only after the receiver has validated and atomically saved it. With automatic text/file sync enabled, the copied file is queued directly from the pasteboard, so the user does not need to open the transfer picker.
+`FileTransferEngine` sends files in either direction over the active paired transport. Each 48 KB chunk is acknowledged before the next chunk is read, keeping the JSON/base64/encrypted packet below MultipeerConnectivity's reliable-message budget while bounding memory and preventing a large transfer queue from starving video or input. Transfers are limited to 512 MB, validate offsets and sizes, sanitize destination names, and use the existing authenticated encryption layer. The Mac UI can queue multiple selected files, cancel the active transfer, open the transfer folder, and show live byte progress, rate, and ETA. While the iPad viewer is live, and while the connection dashboard is visible, its top-bar banner reports whether the file is being received from or sent to the Mac, names the file, shows progress, and links directly to the file manager. The iPad file manager lists verified files with refresh, share, and delete actions. An idle transfer has a 45-second recovery window. The Mac saves received files in its private `Application Support/SidecarBridge/Transfers` folder; the iPad stores received files in `Files > On My iPad > SidecarBridge > SidecarBridge Transfers` using the app's shared Documents container and exposes the system share sheet. A file copied to either device's clipboard follows this same verified path and is installed as a clipboard file URL only after the receiver has validated and atomically saved it. With automatic text/file sync enabled, the copied file is queued directly from the pasteboard, so the user does not need to open the transfer picker.
 
 ## 8. Permission model
 
@@ -331,15 +368,19 @@ On macOS, closing the main window does not terminate SidecarBridge. It remains a
 
 On iPadOS:
 
+- the target declares a UIKit `UIApplicationSceneManifest`/`UIWindowScene`
+  configuration so the scene-based lifecycle remains explicit on iPadOS 27;
+  `willResignActive` arms the PiP handoff while the scene is still active,
+  while `didEnterBackground` performs the one-time background transition;
 - Picture in Picture is available for the live viewer when supported by iPadOS;
 - the app is a silent screen viewer and does not request the audio background mode or provide persistent background audio;
 - the app invalidates PiP playback state and reports ready, starting, active, suspended, and failed states in the control drawer;
 - a short system background task protects the connection while PiP is starting;
-- a three-second PiP start watchdog clears a stuck start, and the model retries up to three times;
+- an eight-second PiP start watchdog clears a stuck start, and the model makes up to five foreground-safe retries;
 - the encrypted connection is validated when the app becomes active, with discovery rebuilt only if the route is stale;
-- clipboard monitoring is owned by the connection model: change notifications plus pasteboard change-count polling run while the process is alive, including PiP; local changes are retained across reconnects, and the foreground transition checks the latest clipboard after suspension and requests the Mac value only when the iPad pasteboard did not change;
+- clipboard monitoring is an explicit opt-in owned by the connection model: iPadOS uses change notifications while active, does not poll or read pasteboard contents during H.264 streaming/background transitions, and reconciles the latest value after foreground return only when the local pasteboard did not change;
 - an iPadOS background task protects a copy made during the app-switch grace period and an active file transfer; unrestricted real-time clipboard monitoring is not possible after iPadOS fully suspends a third-party app, so the latest value is reconciled on foreground return;
-- the Mac lowers capture pacing to 15 fps during PiP and restores the transport's foreground rate on return;
+- the Mac keeps capture pacing at a 60-FPS target during PiP/resume retention and restores the selected foreground rate on return;
 - if PiP is unavailable, disabled, or dismissed, iPadOS can suspend the ordinary app after the grace period.
 
 ## 10. Project layout

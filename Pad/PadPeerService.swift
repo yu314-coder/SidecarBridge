@@ -38,6 +38,7 @@ final class PadPeerService: NSObject {
     private var mcConnectionWatchdog: DispatchWorkItem?
     private var heartbeatTimer: DispatchSourceTimer?
     private var heartbeatSentAt: [String: TimeInterval] = [:]
+    private let activityLock = NSLock()
     private var lastPeerActivity = ProcessInfo.processInfo.systemUptime
     private var validationWorkItem: DispatchWorkItem?
     private var peerSupportsHeartbeat = false
@@ -56,6 +57,25 @@ final class PadPeerService: NSObject {
     // explicit Connect action in PadConnectionModel.
     private var userRequestedConnection = false
 
+    // Video callbacks arrive on the LAN/Multipeer queues while the display
+    // layer is main-thread bound. JPEG fallback frames are independent and
+    // can safely be coalesced, but H.264 P-frames must stay ordered: dropping
+    // an arbitrary P-frame breaks the decoder dependency chain and causes a
+    // visible flash until the next IDR. Keep a small ordered H.264 window and
+    // schedule one main-actor drain.
+    private enum PendingVideoDelivery {
+        case jpeg(Data)
+        case h264(VideoFrame)
+    }
+    private let videoDeliveryLock = NSLock()
+    private var pendingVideoDeliveries: [PendingVideoDelivery] = []
+    // Avoid shifting every retained frame with removeFirst(). The queue is
+    // bounded, but at 60/120 FPS that copy still runs on every delivery burst.
+    private var pendingVideoDeliveryHead = 0
+    private var waitingForH264KeyFrame = false
+    private var videoDeliveryScheduled = false
+    private var videoDeliveryGeneration: UInt64 = 0
+
     override init() {
         session = MCSession(
             peer: peerID,
@@ -66,11 +86,11 @@ final class PadPeerService: NSObject {
         session.delegate = self
         lan.onFrame = { [weak self] frame in
             self?.notePeerActivity()
-            self?.onFrame?(frame)
+            self?.enqueueVideoDelivery(.jpeg(frame))
         }
         lan.onVideoFrame = { [weak self] frame in
             self?.notePeerActivity()
-            self?.onVideoFrame?(frame)
+            self?.enqueueVideoDelivery(.h264(frame))
         }
         lan.onCommand = { [weak self] command in self?.route(command) }
         lan.onFilePacket = { [weak self] transfer in
@@ -92,6 +112,10 @@ final class PadPeerService: NSObject {
         }
         lan.onConnectionChanged = { [weak self] connected, value in
             guard let self else { return }
+            // A queued main-actor delivery belongs to the old route. Drop it
+            // before publishing the new state so a late callback cannot paint
+            // a stale frame after the viewer has been flushed.
+            self.discardPendingVideoDelivery()
             self.lanConnected = connected
             if connected {
                 self.pendingMultipeerInput.removeAll()
@@ -122,6 +146,7 @@ final class PadPeerService: NSObject {
         // discovered Mac must remain passive until the user taps Connect.
         userRequestedConnection = false
         selectedMacName = nil
+        discardPendingVideoDelivery()
         fallbackWorkItem?.cancel()
         stopMultipeerFallback()
         invitedPeers.removeAll()
@@ -156,7 +181,154 @@ final class PadPeerService: NSObject {
         }
         mcConnected = false
         mcPeerName = nil
+        discardPendingVideoDelivery()
         clearPendingMultipeerAuthentication()
+    }
+
+    private func enqueueVideoDelivery(_ delivery: PendingVideoDelivery) {
+        videoDeliveryLock.lock()
+        switch delivery {
+        case .jpeg:
+            // JPEG frames do not depend on one another. Keep only the newest
+            // fallback image and reset any H.264 recovery gate if the route
+            // changes back to the legacy transport.
+            pendingVideoDeliveries.removeAll(keepingCapacity: true)
+            pendingVideoDeliveryHead = 0
+            waitingForH264KeyFrame = false
+            pendingVideoDeliveries.append(delivery)
+
+        case .h264(let frame):
+            if waitingForH264KeyFrame {
+                // The queue was forced to recover after an overflow. Do not
+                // feed another P-frame into a decoder with a missing parent.
+                guard frame.isKeyFrame else {
+                    videoDeliveryLock.unlock()
+                    return
+                }
+                waitingForH264KeyFrame = false
+                pendingVideoDeliveries.removeAll(keepingCapacity: true)
+                pendingVideoDeliveryHead = 0
+            } else if pendingVideoDeliveryHead < pendingVideoDeliveries.count,
+                      pendingVideoDeliveries[pendingVideoDeliveryHead...].contains(where: {
+                          if case .jpeg = $0 { return true }
+                          return false
+                      }) {
+                // A fresh H.264 stream supersedes a stale JPEG fallback.
+                pendingVideoDeliveries.removeAll(keepingCapacity: true)
+                pendingVideoDeliveryHead = 0
+            }
+
+            pendingVideoDeliveries.append(.h264(frame))
+            let pendingCount = pendingVideoDeliveries.count - pendingVideoDeliveryHead
+            if pendingCount > StreamCadencePolicy.receiverPendingWindow(for: frame.frameRate) {
+                // Retain the newest IDR and everything after it. If no IDR is
+                // present, wait for the encoder's next periodic key frame.
+                if let keyIndex = pendingVideoDeliveries.lastIndex(where: {
+                    if case .h264(let candidate) = $0 { return candidate.isKeyFrame }
+                    return false
+                }), keyIndex >= pendingVideoDeliveryHead {
+                    pendingVideoDeliveryHead = keyIndex
+                } else {
+                    pendingVideoDeliveries.removeAll(keepingCapacity: true)
+                    pendingVideoDeliveryHead = 0
+                    waitingForH264KeyFrame = true
+                }
+            }
+        }
+
+        let generation = videoDeliveryGeneration
+        let shouldSchedule = !videoDeliveryScheduled &&
+            pendingVideoDeliveryHead < pendingVideoDeliveries.count
+        if shouldSchedule { videoDeliveryScheduled = true }
+        videoDeliveryLock.unlock()
+
+        guard shouldSchedule else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.drainVideoDelivery(generation: generation)
+        }
+    }
+
+    private func drainVideoDelivery(generation: UInt64) {
+        videoDeliveryLock.lock()
+        guard generation == videoDeliveryGeneration else {
+            videoDeliveryLock.unlock()
+            return
+        }
+        // Yield to input, SwiftUI, and the display layer between small video
+        // batches. Larger high-cadence batches cut main-queue scheduling
+        // overhead without allowing a burst to monopolize the actor.
+        let batchLimit: Int
+        let firstPending = pendingVideoDeliveryHead < pendingVideoDeliveries.count
+            ? pendingVideoDeliveries[pendingVideoDeliveryHead]
+            : nil
+        switch firstPending {
+        case .h264(let frame) where frame.frameRate >= 90:
+            batchLimit = 8
+        case .jpeg:
+            batchLimit = 1
+        default:
+            batchLimit = 4
+        }
+        let pendingCount = pendingVideoDeliveries.count - pendingVideoDeliveryHead
+        let deliveryCount = min(batchLimit, pendingCount)
+        let deliveryStart = pendingVideoDeliveryHead
+        let deliveryEnd = deliveryStart + deliveryCount
+        let deliveries = Array(pendingVideoDeliveries[deliveryStart..<deliveryEnd])
+        pendingVideoDeliveryHead = deliveryEnd
+        if pendingVideoDeliveryHead == pendingVideoDeliveries.count {
+            pendingVideoDeliveries.removeAll(keepingCapacity: true)
+            pendingVideoDeliveryHead = 0
+        } else if pendingVideoDeliveryHead >= 32 {
+            pendingVideoDeliveries.removeSubrange(0..<pendingVideoDeliveryHead)
+            pendingVideoDeliveryHead = 0
+        }
+        videoDeliveryScheduled = false
+        let shouldReschedule = pendingVideoDeliveryHead < pendingVideoDeliveries.count
+        if shouldReschedule { videoDeliveryScheduled = true }
+        videoDeliveryLock.unlock()
+
+        for delivery in deliveries {
+            videoDeliveryLock.lock()
+            let stillCurrent = generation == videoDeliveryGeneration
+            videoDeliveryLock.unlock()
+            guard stillCurrent else { return }
+            switch delivery {
+            case .jpeg(let frame):
+                onFrame?(frame)
+            case .h264(let frame):
+                onVideoFrame?(frame)
+            }
+        }
+
+        guard shouldReschedule else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.drainVideoDelivery(generation: generation)
+        }
+    }
+
+    private func discardPendingVideoDelivery() {
+        videoDeliveryLock.lock()
+        pendingVideoDeliveries.removeAll(keepingCapacity: true)
+        pendingVideoDeliveryHead = 0
+        waitingForH264KeyFrame = false
+        videoDeliveryGeneration &+= 1
+        videoDeliveryScheduled = false
+        videoDeliveryLock.unlock()
+    }
+
+    /// Drop packets queued before the app returned to the foreground. They
+    /// can be valid network packets but still be unusable after iPadOS/PiP
+    /// recreated the display layer. Gate H.264 delivery until the Mac answers
+    /// the foreground keyframe request; an independent JPEG frame clears the
+    /// gate when the legacy fallback is active.
+    func prepareForForegroundResume() {
+        videoDeliveryLock.lock()
+        pendingVideoDeliveries.removeAll(keepingCapacity: true)
+        pendingVideoDeliveryHead = 0
+        waitingForH264KeyFrame = true
+        videoDeliveryGeneration &+= 1
+        videoDeliveryScheduled = false
+        videoDeliveryLock.unlock()
     }
 
     func prepareForBackground() {
@@ -197,7 +369,7 @@ final class PadPeerService: NSObject {
         guard userRequestedConnection else { return }
         applicationIsBackgrounded = false
         let now = ProcessInfo.processInfo.systemUptime
-        lastPeerActivity = now
+        setLastPeerActivity(now)
         resumeGraceUntil = now + 15
         guard lanConnected || mcConnected else {
             onConnectionHealthChanged?("Restoring remembered Mac session", nil)
@@ -218,7 +390,7 @@ final class PadPeerService: NSObject {
             // because `peerSupportsHeartbeat` is still false. Rebuilding the
             // selected direct/P2P path here is what makes swipe-away/return
             // reliable after iPadOS has suspended the socket.
-            if self.lastPeerActivity <= sentAt {
+            if self.peerActivityTimestamp() <= sentAt {
                 self.recoverStaleConnection(reason: "No encrypted traffic after returning from background.")
             } else {
                 self.resumeGraceUntil = 0
@@ -338,7 +510,7 @@ final class PadPeerService: NSObject {
 
     private func startHeartbeat() {
         guard heartbeatTimer == nil else { return }
-        lastPeerActivity = ProcessInfo.processInfo.systemUptime
+        setLastPeerActivity(ProcessInfo.processInfo.systemUptime)
         peerSupportsHeartbeat = false
         onConnectionHealthChanged?("Verifying encrypted link", nil)
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -372,7 +544,7 @@ final class PadPeerService: NSObject {
         if RemoteSessionLifecyclePolicy.shouldRecoverStaleConnection(
             isViewerBackgrounded: applicationIsBackgrounded,
             peerSupportsHeartbeat: peerSupportsHeartbeat,
-            secondsSinceActivity: now - lastPeerActivity
+            secondsSinceActivity: now - peerActivityTimestamp()
         ) {
             recoverStaleConnection(reason: "Encrypted link stopped responding.")
             return
@@ -391,7 +563,20 @@ final class PadPeerService: NSObject {
     }
 
     private func notePeerActivity() {
-        lastPeerActivity = ProcessInfo.processInfo.systemUptime
+        setLastPeerActivity(ProcessInfo.processInfo.systemUptime)
+    }
+
+    private func setLastPeerActivity(_ timestamp: TimeInterval) {
+        activityLock.lock()
+        lastPeerActivity = timestamp
+        activityLock.unlock()
+    }
+
+    private func peerActivityTimestamp() -> TimeInterval {
+        activityLock.lock()
+        let timestamp = lastPeerActivity
+        activityLock.unlock()
+        return timestamp
     }
 
     private func recoverStaleConnection(reason: String) {
@@ -736,6 +921,7 @@ extension PadPeerService: MCSessionDelegate {
             } else {
                 self.mcConnected = false
                 self.mcPeerName = nil
+                self.discardPendingVideoDelivery()
                 self.clearPendingMultipeerAuthentication()
                 self.mcConnectionWatchdog?.cancel()
                 self.mcConnectionWatchdog = nil
@@ -792,15 +978,11 @@ extension PadPeerService: MCSessionDelegate {
         case .control(let command):
             DispatchQueue.main.async { self.route(command) }
         case .jpeg(let frame):
-            DispatchQueue.main.async {
-                self.notePeerActivity()
-                self.onFrame?(frame)
-            }
+            self.notePeerActivity()
+            self.enqueueVideoDelivery(.jpeg(frame))
         case .video(let frame):
-            DispatchQueue.main.async {
-                self.notePeerActivity()
-                self.onVideoFrame?(frame)
-            }
+            self.notePeerActivity()
+            self.enqueueVideoDelivery(.h264(frame))
         case .authentication:
             break
         case .file(let transfer):

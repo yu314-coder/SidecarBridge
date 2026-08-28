@@ -3,6 +3,31 @@ import UIKit
 
 @MainActor
 final class PadConnectionModel: ObservableObject {
+    struct ReceivedFile: Identifiable, Equatable {
+        let url: URL
+        let size: Int64
+        let modifiedAt: Date?
+
+        var id: String { url.path }
+        var name: String { url.lastPathComponent }
+    }
+
+    /// A single pasteboard read. iPadOS can present its paste privacy alert
+    /// when an app reads the general pasteboard, so callers must not read the
+    /// same change once for its signature and again to transmit it.
+    private struct ClipboardPayload {
+        let files: [URL]
+        let text: String?
+
+        var signature: String? {
+            if !files.isEmpty {
+                return ClipboardTransfer.fileSignature(files)
+            }
+            guard let text, !text.isEmpty else { return nil }
+            return "text:\(text)"
+        }
+    }
+
     @Published var status = "Ready to connect"
     @Published var detail = "Choose a Mac card or enter its 16-digit pairing code below."
     @Published var frame: UIImage?
@@ -31,6 +56,25 @@ final class PadConnectionModel: ObservableObject {
     @Published var pointerIsPressed = false
     @Published var showClickIndicator = false
     @Published var streamFPS = 0
+    @Published var streamResolution: StreamResolutionPreference = {
+        let defaults = UserDefaults.standard
+        return defaults.string(forKey: StreamPreferenceStore.resolutionKey)
+            .flatMap(StreamResolutionPreference.init(rawValue:))
+            ?? StreamPreferences.defaults.resolution
+    }()
+    @Published var streamFrameRate: StreamFrameRatePreference = {
+        let storedFrameRate = StreamPreferenceStore.loadFrameRate()
+        return StreamPreferenceStore.loadUltraMode()
+            || storedFrameRate.rawValue <= StreamCadencePolicy.nearbyFrameRateCeiling
+            ? storedFrameRate
+            : .fps120
+    }()
+    /// Developer-only performance override. This is sent to the Mac with the
+    /// stream profile so the sender, rather than only the iPad picker, raises
+    /// its capture and encoder ceilings together.
+    @Published var ultraModeEnabled: Bool = {
+        StreamPreferenceStore.loadUltraMode()
+    }()
     @Published var isPictureInPicturePossible = false
     @Published var isPictureInPictureActive = false
     @Published var isPictureInPictureSuspended = false
@@ -50,6 +94,7 @@ final class PadConnectionModel: ObservableObject {
     @Published private(set) var connectedUsingDirectLAN = false
     @Published var fileTransferSnapshot: FileTransferSnapshot?
     @Published var lastReceivedFile: URL?
+    @Published private(set) var receivedFiles: [ReceivedFile] = []
     @Published var fileTransferError: String?
     @Published var queuedFileCount = 0
     @Published var clipboardTransferStatus = "Clipboard transfer ready."
@@ -57,7 +102,9 @@ final class PadConnectionModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(automaticClipboardSyncEnabled, forKey: Self.automaticClipboardSyncDefaultsKey)
             if automaticClipboardSyncEnabled {
-                reconcileClipboardAfterConnection()
+                startClipboardMonitoring()
+            } else {
+                stopClipboardMonitoring()
             }
         }
     }
@@ -83,7 +130,20 @@ final class PadConnectionModel: ObservableObject {
         guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             throw CocoaError(.fileNoSuchFile)
         }
-        return documents.appendingPathComponent("SidecarBridge Transfers", isDirectory: true)
+        return documents.appendingPathComponent(Self.transferDirectoryName, isDirectory: true)
+    }
+    private static let transferDirectoryName = "SidecarBridge Transfers"
+
+    /// Received files live in the app's Documents directory, which is exposed
+    /// to the Files app by UIFileSharingEnabled. Keep the exact path visible so
+    /// a user can find every received file, not only the most recent ShareLink.
+    var receivedFilesLocationDescription: String {
+        "Files > On My iPad > SidecarBridge > \(Self.transferDirectoryName)"
+    }
+
+    private var transferDirectoryURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent(Self.transferDirectoryName, isDirectory: true)
     }
     private var started = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
@@ -95,6 +155,9 @@ final class PadConnectionModel: ObservableObject {
     private var initialFrameRetryTask: Task<Void, Never>?
     private var frameWindowStart = ProcessInfo.processInfo.systemUptime
     private var frameWindowCount = 0
+    private var presentedStreamWidth = 0
+    private var presentedStreamHeight = 0
+    private var presentedStreamFormat = ""
     private var discoveryStartedAt = ProcessInfo.processInfo.systemUptime
     private var discoveryClockTask: Task<Void, Never>?
     private var connectionAttemptedMacName: String?
@@ -103,18 +166,31 @@ final class PadConnectionModel: ObservableObject {
     private var userRequestedConnection = false
     private var applicationIsBackgrounded = false
     private var restoreStreamAfterBackground = false
+    private var enteredBackground = false
     private var isResumingFromBackground = false
     private var foregroundResumeTask: Task<Void, Never>?
     private var connectionTimeoutTask: Task<Void, Never>?
     private var pendingFileURLs: [URL] = []
     private var lastObservedClipboardChangeCount: Int?
     private var lastObservedClipboardSignature: String?
-    private var pendingClipboardSignature: String?
     private var suppressedClipboardSignature: String?
     private var automaticReceivedFileURLs: [URL] = []
     private var clipboardMonitorTask: Task<Void, Never>?
     private var clipboardChangeObserver: NSObjectProtocol?
-    private static let automaticClipboardSyncDefaultsKey = "automaticClipboardSyncEnabled"
+    // Clipboard reads on iPadOS can display the system paste privacy alert and
+    // briefly take focus away from the live viewer.  Keep automatic sync as an
+    // explicit opt-in, with a new key so upgrades do not inherit the old
+    // always-on default.
+    private static let automaticClipboardSyncDefaultsKey = "automaticClipboardSyncEnabled.v2"
+
+    /// iPadOS may present its paste privacy alert when a foreground app reads
+    /// data from the general pasteboard.  Keep the connection and PiP viewer
+    /// alive in the background, but defer content reads until the scene is
+    /// active again.  This avoids repeatedly asking while the user is using a
+    /// different app or while a system transition is in progress.
+    private var canReadSystemPasteboard: Bool {
+        UIApplication.shared.applicationState == .active
+    }
 
     var isDiscoveryTakingLonger: Bool {
         !isConnected && discoveryElapsedSeconds >= 8
@@ -137,15 +213,24 @@ final class PadConnectionModel: ObservableObject {
     }
 
     init() {
-        automaticClipboardSyncEnabled = UserDefaults.standard.object(
-            forKey: Self.automaticClipboardSyncDefaultsKey
-        ) as? Bool ?? true
-        // Establish the baseline only after a peer connects. Reading the
-        // general pasteboard on launch can trigger an unnecessary iPadOS
-        // privacy prompt before SidecarBridge can transfer anything.
-        lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: Self.automaticClipboardSyncDefaultsKey) == nil {
+            defaults.set(false, forKey: Self.automaticClipboardSyncDefaultsKey)
+        }
+        automaticClipboardSyncEnabled = defaults.bool(forKey: Self.automaticClipboardSyncDefaultsKey)
+        // Do not touch the general pasteboard during launch.  The first read
+        // is performed only by an explicit clipboard action or after the user
+        // opts into automatic sync.
+        lastObservedClipboardChangeCount = nil
         lastObservedClipboardSignature = nil
         startClipboardMonitoring()
+        videoDisplay.onKeyFrameNeeded = { [weak self] in
+            guard let self, self.isConnected else { return }
+            // A decoder gap is recoverable without reconnecting the session.
+            // Ask the Mac for an IDR frame over the already-authenticated
+            // control channel and keep the live viewer at its cadence floor.
+            self.peers.send(ControlMessage(.status, detail: "video-keyframe-needed"))
+        }
         videoDisplay.onPictureInPictureStateChanged = { [weak self] possible, active, suspended in
             guard let self else { return }
             self.isPictureInPicturePossible = possible
@@ -243,12 +328,39 @@ final class PadConnectionModel: ObservableObject {
 
         peers.onConnectionChanged = { [weak self] connected, peerOrError in
             guard let self else { return }
+            let hadLiveVideoSession = self.isStreaming
+                || self.frame != nil
+                || self.videoDisplay.hasPictureInPictureContent
             self.isConnected = connected
             if connected {
-                self.lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
-                if self.lastObservedClipboardSignature == nil,
-                   self.pendingClipboardSignature == nil {
-                    self.lastObservedClipboardSignature = self.clipboardSignature()
+                if hadLiveVideoSession {
+                    // An explicit Connect after an app switch creates a new
+                    // encrypted route, but the old AVSampleBufferDisplayLayer
+                    // and H.264 dependency chain can still be present. Keep
+                    // input and video on the same session boundary: discard
+                    // queued packets, require an IDR, and let the Mac refresh
+                    // its ScreenCaptureKit source from the matching
+                    // `startFallback` request below. Without this reset the
+                    // control socket can be healthy while the viewer remains
+                    // on the last pre-background frame.
+                    self.peers.prepareForForegroundResume()
+                    self.videoDisplay.prepareForForegroundResume()
+                    self.frame = nil
+                    self.resetVideoRateWindow()
+                    self.connectionHealthDetail = "Reconnected — requesting a fresh Mac frame"
+                }
+                if self.canReadSystemPasteboard {
+                    // A connection itself is not a clipboard change.  Do not
+                    // read the current pasteboard merely to establish a
+                    // baseline; that would show iPadOS's prompt on every
+                    // reconnect.  Actual copies made while connected are
+                    // handled by the change observer.
+                    self.lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
+                } else {
+                    // Do not touch pasteboard contents during a background
+                    // reconnect.  The foreground reconciliation pass will
+                    // detect and transfer the latest local copy once the user
+                    // returns, without a prompt appearing over another app.
                 }
                 self.suppressedClipboardSignature = nil
                 self.isConnecting = false
@@ -282,7 +394,6 @@ final class PadConnectionModel: ObservableObject {
                         ? "Direct local link ready. System Sidecar requires an explicit button press."
                         : "Mac found. Tap Open System Sidecar only if you want to leave this app."
                 }
-                self.reconcileClipboardAfterConnection()
             } else {
                 self.lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
                 // Network/browser failures can be reported while the selected
@@ -307,6 +418,7 @@ final class PadConnectionModel: ObservableObject {
                 self.connectedUsingDirectLAN = false
                 self.startDiscoveryClockIfNeeded()
                 self.isStreaming = false
+                self.resetVideoRateWindow()
                 self.remoteInputAuthorized = false
                 self.remoteInputUnavailable = false
                 self.remotePointer = nil
@@ -350,6 +462,12 @@ final class PadConnectionModel: ObservableObject {
                 format: "JPEG",
                 detail: "Using the SidecarBridge fallback stream."
             )
+            // The legacy/local fallback delivers decoded JPEG frames through
+            // this callback rather than the H.264 callback below. Count the
+            // received frame independently from display-layer back-pressure;
+            // a healthy connection must not report 0 FPS merely because the
+            // decoder is waiting for room in its short queue.
+            self.recordVideoFrame()
             _ = self.videoDisplay.enqueueJPEG(image)
             self.frame = image
         }
@@ -363,13 +481,17 @@ final class PadConnectionModel: ObservableObject {
                 format: "H.264",
                 detail: "Hardware-decoded H.264 HiDPI stream."
             )
+            // Measure transport delivery rather than the return value of
+            // enqueue(_:). The latter can be false during an intentional
+            // keyframe recovery even while the encrypted stream is healthy.
+            self.recordVideoFrame()
             let displayed = self.videoDisplay.enqueue(frame)
-            if displayed { self.recordVideoFrame() }
             if !displayed, frame.isKeyFrame {
                 self.retryInitialKeyFrameAfterDisplayAppears(frame)
             }
         }
         configureFileTransfer()
+        refreshReceivedFiles()
     }
 
     var isFileTransferring: Bool { fileTransfer.isBusy }
@@ -498,6 +620,59 @@ final class PadConnectionModel: ObservableObject {
         fileTransferError = "Transfer canceled."
     }
 
+    /// Refreshes the app-owned Documents subfolder exposed in the Files app.
+    /// Partial files are intentionally hidden from the manager until the
+    /// transfer engine has verified and atomically renamed them.
+    func refreshReceivedFiles() {
+        guard let directory = transferDirectoryURL else {
+            receivedFiles = []
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            let urls = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+            receivedFiles = urls.compactMap { url in
+                guard let values = try? url.resourceValues(
+                    forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+                ), values.isRegularFile == true else { return nil }
+                return ReceivedFile(
+                    url: url,
+                    size: Int64(values.fileSize ?? 0),
+                    modifiedAt: values.contentModificationDate
+                )
+            }
+            .sorted { lhs, rhs in
+                (lhs.modifiedAt ?? .distantPast) > (rhs.modifiedAt ?? .distantPast)
+            }
+        } catch {
+            fileTransferError = "Could not read received files: \(error.localizedDescription)"
+        }
+    }
+
+    func deleteReceivedFile(_ file: ReceivedFile) {
+        guard let directory = transferDirectoryURL else { return }
+        let directoryPath = directory.standardizedFileURL.path
+        let fileURL = file.url.standardizedFileURL
+        guard fileURL.deletingLastPathComponent().path == directoryPath else { return }
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+            if lastReceivedFile?.standardizedFileURL == fileURL {
+                lastReceivedFile = nil
+            }
+            refreshReceivedFiles()
+            fileTransferError = nil
+        } catch {
+            fileTransferError = "Could not delete \(file.name): \(error.localizedDescription)"
+        }
+    }
+
     func submitPairingCode() {
         let normalized = PairingCode.normalize(pairingCode)
         guard normalized.count == PairingCode.characterCount else {
@@ -564,6 +739,7 @@ final class PadConnectionModel: ObservableObject {
         fileTransfer.onReceived = { [weak self] url in
             guard let self else { return }
             self.lastReceivedFile = url
+            self.refreshReceivedFiles()
             self.fileTransferError = nil
             self.placeReceivedFileOnClipboard(url)
         }
@@ -641,7 +817,7 @@ final class PadConnectionModel: ObservableObject {
                 DiagnosticField("Encrypted Mac", isConnected ? "Connected" : "Not connected"),
                 DiagnosticField("Streaming", isStreaming ? "Active" : "Inactive"),
                 DiagnosticField("Stream", streamDimensions),
-                DiagnosticField("Displayed frame rate", streamFPS > 0 ? "\(streamFPS) FPS" : "Not measured"),
+                DiagnosticField("Received frame rate", streamFPS > 0 ? "\(streamFPS) FPS" : "Not measured"),
                 DiagnosticField(
                     "Connection latency",
                     connectionLatencyMS.map { "\($0) ms" } ?? "Not measured"
@@ -678,8 +854,13 @@ final class PadConnectionModel: ObservableObject {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active:
-            let shouldRestoreStream = restoreStreamAfterBackground
+            let shouldRestoreStream = enteredBackground && restoreStreamAfterBackground
+            let wasBackgrounded = applicationIsBackgrounded
             applicationIsBackgrounded = false
+            enteredBackground = false
+            if !shouldRestoreStream {
+                restoreStreamAfterBackground = false
+            }
             // A foreground transition owns the sample-buffer layer again, so
             // cancel any pending PiP retry before stopping PiP. The separate
             // restore flags below keep the encrypted session alive until the
@@ -692,13 +873,19 @@ final class PadConnectionModel: ObservableObject {
                 : "Ready — PiP can keep the screen visible; return here for keyboard and trackpad control."
             if isPictureInPictureActive { videoDisplay.stopPictureInPicture() }
             if shouldRestoreStream {
+                // Reset both halves of the video pipeline before resuming the
+                // encrypted socket. This prevents stale H.264 P-frames from
+                // being delivered into a new AVSampleBufferDisplayLayer while
+                // the input channel appears healthy.
+                peers.prepareForForegroundResume()
+                videoDisplay.prepareForForegroundResume()
                 beginForegroundResumePresentation()
             }
             // Returning to the foreground may restore a session the user
             // already started, but the initial active transition must never
             // dial a remembered Mac just because the Remote Control tab is
             // visible. Discovery publishes cards; Connect is explicit.
-            if started, userRequestedConnection || restoreStreamAfterBackground || isStreaming {
+            if started, userRequestedConnection && (wasBackgrounded || shouldRestoreStream || !isConnected) {
                 if userRequestedConnection, !isConnected { isConnecting = true }
                 peers.resumeAfterBackground()
             }
@@ -708,9 +895,9 @@ final class PadConnectionModel: ObservableObject {
             }
             endBackgroundTask()
         case .background:
-            beginBackgroundTransition()
+            appDidEnterBackground()
         case .inactive:
-            beginBackgroundTransition()
+            appWillResignActive()
         @unknown default:
             break
         }
@@ -724,6 +911,34 @@ final class PadConnectionModel: ObservableObject {
         // Flush a copy made immediately before the app switch before iPadOS
         // begins suspending the process.
         if isConnected { observeClipboardChange(force: false) }
+        // Do not mark the peer as backgrounded yet: inactive is also emitted
+        // for Control Center, permission sheets, and transient scene changes.
+        // The actual did-enter-background callback owns that state transition
+        // so a quick return does not unnecessarily tear down or redial a live
+        // encrypted session.
+        if isConnected || isStreaming || fileTransfer.isBusy || !pendingFileURLs.isEmpty {
+            beginBackgroundGracePeriodIfNeeded()
+        }
+        // AVKit must see the automatic-start flag while the scene is still
+        // active. Calling startPictureInPicture() after the app has already
+        // entered the background is too late on current iPadOS releases.
+        if isStreaming, keepRunningInBackground {
+            videoDisplay.setAutomaticBackgroundStart(true)
+            backgroundViewerDetail = isPictureInPicturePossible
+                ? "Preparing Picture in Picture for the app switch…"
+                : "Preparing the background viewer; preserving the session for fast resume."
+        }
+    }
+
+    /// The inactive notification also fires for transient system UI such as
+    /// Control Center or a permission alert. Wait for the actual background
+    /// transition before asking AVKit to start PiP; doing that work too early
+    /// races iPadOS 26/27's scene handoff and leaves the viewer unavailable.
+    func appDidEnterBackground() {
+        if !enteredBackground {
+            enteredBackground = true
+            restoreStreamAfterBackground = isStreaming
+        }
         beginBackgroundTransition()
     }
 
@@ -736,7 +951,7 @@ final class PadConnectionModel: ObservableObject {
     }
 
     private func startClipboardMonitoring() {
-        guard clipboardMonitorTask == nil else { return }
+        guard automaticClipboardSyncEnabled, clipboardChangeObserver == nil else { return }
 
         clipboardChangeObserver = NotificationCenter.default.addObserver(
             forName: UIPasteboard.changedNotification,
@@ -748,23 +963,17 @@ final class PadConnectionModel: ObservableObject {
             }
         }
 
-        // UIPasteboard notifications are delivered reliably while the app is
-        // active, but a PiP-backed process can also remain alive while the
-        // scene is backgrounded. Polling closes that gap without introducing
-        // another foreground-only UI dependency. If iPadOS fully suspends the
-        // process, scenePhaseChanged() reconciles the latest value on return.
-        clipboardMonitorTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                if self.isConnected, self.automaticClipboardSyncEnabled {
-                    self.observeClipboardChange(force: false)
-                }
-                do {
-                    try await Task.sleep(for: .milliseconds(350))
-                } catch {
-                    return
-                }
-            }
+        // Do not poll the pasteboard.  Notifications are enough while the
+        // app is active, and scene transitions reconcile a missed change.
+        // Removing the timer keeps pasteboard work off the video cadence.
+    }
+
+    private func stopClipboardMonitoring() {
+        clipboardMonitorTask?.cancel()
+        clipboardMonitorTask = nil
+        if let clipboardChangeObserver {
+            NotificationCenter.default.removeObserver(clipboardChangeObserver)
+            self.clipboardChangeObserver = nil
         }
     }
 
@@ -773,37 +982,14 @@ final class PadConnectionModel: ObservableObject {
     /// value instead. This recovers a Mac copy whose packet arrived while the
     /// iPad process was suspended without blindly overwriting a local copy.
     private func reconcileClipboardAfterForeground() {
-        guard isConnected else { return }
-        let before = lastObservedClipboardSignature
+        guard isConnected, automaticClipboardSyncEnabled, !isStreaming else { return }
+        let before = lastObservedClipboardChangeCount
         observeClipboardChange(force: false)
-        guard clipboardSignature() == before else { return }
+        // observeClipboardChange has already performed the one permitted read
+        // for a changed pasteboard. Avoid a second read just to decide whether
+        // the Mac should be queried.
+        guard lastObservedClipboardChangeCount == before else { return }
         peers.send(ControlMessage(.requestClipboard))
-    }
-
-    /// Preserve a local copy made while the peer was reconnecting or the app
-    /// was suspended. The initial connection establishes a baseline; later
-    /// connections retransmit only a value that changed locally.
-    private func reconcileClipboardAfterConnection() {
-        guard isConnected, automaticClipboardSyncEnabled else { return }
-        let signature = clipboardSignature()
-        guard let signature else {
-            pendingClipboardSignature = nil
-            return
-        }
-        guard pendingClipboardSignature != nil || signature != lastObservedClipboardSignature else {
-            pendingClipboardSignature = nil
-            return
-        }
-        if signature == suppressedClipboardSignature {
-            suppressedClipboardSignature = nil
-            pendingClipboardSignature = nil
-            lastObservedClipboardSignature = signature
-            return
-        }
-        suppressedClipboardSignature = nil
-        pendingClipboardSignature = nil
-        lastObservedClipboardSignature = signature
-        sendClipboardToMac()
     }
 
     private func beginBackgroundTransition() {
@@ -814,7 +1000,7 @@ final class PadConnectionModel: ObservableObject {
         // gives a copy made during the app-switch transition time to cross the
         // link. PiP remains the only supported way to keep an open-ended
         // background session alive.
-        if hasTransferWork || shouldProtectClipboard { beginBackgroundGracePeriod() }
+        if hasTransferWork || shouldProtectClipboard { beginBackgroundGracePeriodIfNeeded() }
         guard isStreaming, keepRunningInBackground else {
             backgroundViewerDetail = isStreaming
                 ? "Automatic background viewing is off. Return here to keep controlling the Mac."
@@ -829,11 +1015,10 @@ final class PadConnectionModel: ObservableObject {
         // repeating them makes AVKit race its own transition.
         guard !backgroundRequested else { return }
         backgroundRequested = true
-        beginBackgroundGracePeriod()
+        beginBackgroundGracePeriodIfNeeded()
         backgroundViewerDetail = isPictureInPicturePossible
             ? "Starting Picture in Picture…"
             : "Preparing the background viewer; preserving the session for fast resume."
-        _ = videoDisplay.startPictureInPicture()
         verifyBackgroundActivation()
     }
 
@@ -891,9 +1076,31 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func requestFallback() {
+        guard isConnected else {
+            status = "Connect to a Mac first"
+            detail = "Select a Mac card and tap Connect before starting In-App Display."
+            return
+        }
+        let hasLiveVideoSession = isStreaming
+            || frame != nil
+            || videoDisplay.hasPictureInPictureContent
+        if hasLiveVideoSession {
+            // This button is also the manual recovery action after iPadOS
+            // returns from another app while the encrypted input channel is
+            // still alive. Treat it like a reconnect at the media layer: the
+            // old display-layer dependency chain must not survive into the
+            // new Mac capture/IDR requested by `startFallback`.
+            peers.prepareForForegroundResume()
+            videoDisplay.prepareForForegroundResume()
+            frame = nil
+            resetVideoRateWindow()
+            connectionHealthDetail = "Refreshing the Mac display"
+        }
         peers.send(ControlMessage(.startFallback))
         status = "Requesting app stream…"
-        detail = "Approve Screen Recording on the Mac if asked."
+        detail = hasLiveVideoSession
+            ? "Requesting a fresh Mac frame for the resumed encrypted stream."
+            : "Approve Screen Recording on the Mac if asked."
     }
 
     func requestSystemSidecar() {
@@ -915,6 +1122,37 @@ final class PadConnectionModel: ObservableObject {
         }
     }
 
+    func setStreamResolution(_ resolution: StreamResolutionPreference) {
+        streamResolution = resolution
+        UserDefaults.standard.set(resolution.rawValue, forKey: StreamPreferenceStore.resolutionKey)
+        if isConnected {
+            sendDisplayCapabilities()
+        }
+    }
+
+    func setStreamFrameRate(_ frameRate: StreamFrameRatePreference) {
+        let safeFrameRate = ultraModeEnabled
+            ? frameRate
+            : StreamFrameRatePreference(rawValue: min(frameRate.rawValue, StreamCadencePolicy.nearbyFrameRateCeiling)) ?? .fps120
+        streamFrameRate = safeFrameRate
+        StreamPreferenceStore.saveFrameRate(safeFrameRate)
+        if isConnected {
+            sendDisplayCapabilities()
+        }
+    }
+
+    func setUltraModeEnabled(_ enabled: Bool) {
+        ultraModeEnabled = enabled
+        StreamPreferenceStore.saveUltraMode(enabled)
+        if !enabled, streamFrameRate.rawValue > StreamCadencePolicy.nearbyFrameRateCeiling {
+            streamFrameRate = .fps120
+            StreamPreferenceStore.saveFrameRate(streamFrameRate)
+        }
+        if isConnected {
+            sendDisplayCapabilities()
+        }
+    }
+
     func stopStreaming() {
         peers.send(ControlMessage(.stopFallback))
         frame = nil
@@ -923,6 +1161,7 @@ final class PadConnectionModel: ObservableObject {
         backgroundActivationTask?.cancel()
         videoDisplay.flush()
         isStreaming = false
+        resetVideoRateWindow()
         remotePointer = nil
         pointerIsPressed = false
         showClickIndicator = false
@@ -995,11 +1234,19 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func sendClipboardToMac() {
+        guard canReadSystemPasteboard else {
+            clipboardTransferStatus = "Return to SidecarBridge to send the clipboard without a paste prompt."
+            return
+        }
+        sendClipboardToMac(readClipboardPayload())
+    }
+
+    private func sendClipboardToMac(_ payload: ClipboardPayload) {
         guard isConnected else {
             clipboardTransferStatus = "Connect to the Mac before sending the clipboard."
             return
         }
-        let files = clipboardFileURLs()
+        let files = payload.files
         if !files.isEmpty {
             sendFiles(at: files)
             clipboardTransferStatus = files.count == 1
@@ -1007,7 +1254,7 @@ final class PadConnectionModel: ObservableObject {
                 : "Sending \(files.count) copied files to the Mac…"
             return
         }
-        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+        guard let text = payload.text, !text.isEmpty else {
             clipboardTransferStatus = "The iPad clipboard has no text or files to send."
             return
         }
@@ -1022,20 +1269,31 @@ final class PadConnectionModel: ObservableObject {
         (UIPasteboard.general.urls ?? []).filter { $0.isFileURL }
     }
 
-    private func clipboardSignature() -> String? {
-        let files = clipboardFileURLs()
-        if !files.isEmpty {
-            return ClipboardTransfer.fileSignature(files)
+    private func readClipboardPayload() -> ClipboardPayload {
+        // Presence checks are metadata-only. Read text first so a copied web
+        // link needs one content read; only inspect URL representations when
+        // there is no text representation (the usual Files-app case). This
+        // avoids two privacy-sensitive reads for a single clipboard change.
+        if UIPasteboard.general.hasStrings {
+            let text = UIPasteboard.general.string
+            if let text, !text.isEmpty {
+                return ClipboardPayload(files: [], text: text)
+            }
         }
-        guard let text = UIPasteboard.general.string, !text.isEmpty else {
-            return nil
+        if UIPasteboard.general.hasURLs {
+            return ClipboardPayload(files: clipboardFileURLs(), text: nil)
         }
-        return "text:\(text)"
+        return ClipboardPayload(files: [], text: nil)
     }
 
     private func placeReceivedFileOnClipboard(_ url: URL) {
         guard automaticClipboardSyncEnabled else { return }
-        let currentFiles = clipboardFileURLs()
+        // Keep the app-owned received-file list instead of reading the
+        // existing general pasteboard.  The latter can trigger iPadOS's paste
+        // privacy alert for every incoming file; replacing the clipboard on
+        // the first received file and appending subsequent files gives the
+        // same transfer behavior without any extra prompt.
+        let currentFiles = automaticReceivedFileURLs
         let currentSignature = ClipboardTransfer.fileSignature(currentFiles)
         let receivedSignature = ClipboardTransfer.fileSignature(automaticReceivedFileURLs)
         let isAppending = currentSignature == receivedSignature
@@ -1049,7 +1307,6 @@ final class PadConnectionModel: ObservableObject {
         automaticReceivedFileURLs = nextFiles
         let signature = ClipboardTransfer.fileSignature(nextFiles)
         suppressedClipboardSignature = signature
-        pendingClipboardSignature = nil
         UIPasteboard.general.urls = nextFiles
         lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
         lastObservedClipboardSignature = signature
@@ -1059,14 +1316,25 @@ final class PadConnectionModel: ObservableObject {
     }
 
     private func observeClipboardChange(force: Bool) {
+        // Never let a paste privacy prompt interrupt the live screen.  Users
+        // can still use the explicit Send Clipboard button while streaming.
+        guard isConnected, automaticClipboardSyncEnabled, !isStreaming else { return }
         let changeCount = UIPasteboard.general.changeCount
         guard force || changeCount != lastObservedClipboardChangeCount else { return }
+        // Keep the connection alive while backgrounded, but do not read the
+        // general pasteboard over another app.  Reading there can make
+        // iPadOS show its paste privacy prompt repeatedly; leaving the change
+        // count untouched lets the foreground pass process it exactly once.
+        guard canReadSystemPasteboard else { return }
+        // A disabled sync setting must also be a hard privacy boundary: do
+        // not inspect the clipboard just to learn that it changed.  The next
+        // copy after the user re-enables sync will be transferred normally.
         lastObservedClipboardChangeCount = changeCount
-        let signature = clipboardSignature()
+        let payload = readClipboardPayload()
+        let signature = payload.signature
 
         if signature == suppressedClipboardSignature {
             suppressedClipboardSignature = nil
-            pendingClipboardSignature = nil
             lastObservedClipboardSignature = signature
             return
         }
@@ -1077,23 +1345,13 @@ final class PadConnectionModel: ObservableObject {
             suppressedClipboardSignature = nil
         }
         guard let signature else {
-            pendingClipboardSignature = nil
             return
         }
         guard force || signature != lastObservedClipboardSignature else {
-            pendingClipboardSignature = nil
-            return
-        }
-        guard isConnected, automaticClipboardSyncEnabled else {
-            // iPadOS may deliver a pasteboard change just before the app is
-            // backgrounded, or while the encrypted link is reconnecting. Keep
-            // it pending so the next active connection transfers it.
-            pendingClipboardSignature = signature
             return
         }
         lastObservedClipboardSignature = signature
-        pendingClipboardSignature = nil
-        sendClipboardToMac()
+        sendClipboardToMac(payload)
     }
 
     private func updatePointerFeedback(for input: RemoteInputEvent) {
@@ -1134,10 +1392,22 @@ final class PadConnectionModel: ObservableObject {
         frameWindowCount += 1
         let now = ProcessInfo.processInfo.systemUptime
         let duration = now - frameWindowStart
-        guard duration >= 0.5 else { return }
-        streamFPS = Int((Double(frameWindowCount) / duration).rounded())
+        guard duration >= 0.5 else {
+            // Do not publish a fabricated 1-FPS value while the first
+            // half-second measurement is still collecting samples. That value
+            // was routinely mistaken for the Mac's actual send cadence when
+            // the display layer had not presented its first burst yet.
+            return
+        }
+        streamFPS = max(0, Int((Double(frameWindowCount) / duration).rounded()))
         frameWindowCount = 0
         frameWindowStart = now
+    }
+
+    private func resetVideoRateWindow() {
+        frameWindowStart = ProcessInfo.processInfo.systemUptime
+        frameWindowCount = 0
+        streamFPS = 0
     }
 
     /// Publishes stream metadata only when it changes. H.264 frames arrive on
@@ -1152,6 +1422,18 @@ final class PadConnectionModel: ObservableObject {
     ) {
         let safeWidth = max(width, 1)
         let safeHeight = max(height, 1)
+        // Frame metadata is stable for the lifetime of a stream. Avoid
+        // rebuilding the aspect-ratio and dimensions strings on every H.264
+        // sample; at 120 FPS this otherwise creates needless main-actor work.
+        let metadataChanged = safeWidth != presentedStreamWidth
+            || safeHeight != presentedStreamHeight
+            || format != presentedStreamFormat
+        guard metadataChanged || !isStreaming else { return }
+        if metadataChanged {
+            presentedStreamWidth = safeWidth
+            presentedStreamHeight = safeHeight
+            presentedStreamFormat = format
+        }
         let ratio = CGFloat(safeWidth) / CGFloat(safeHeight)
         if abs(streamAspectRatio - ratio) > 0.0001 {
             streamAspectRatio = ratio
@@ -1161,6 +1443,7 @@ final class PadConnectionModel: ObservableObject {
             streamDimensions = dimensions
         }
         guard !isStreaming else { return }
+        resetVideoRateWindow()
         isStreaming = true
         status = "Mac screen"
         detail = streamDetail
@@ -1177,7 +1460,6 @@ final class PadConnectionModel: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(50))
                 guard !Task.isCancelled, let self, self.isStreaming else { return }
                 if self.videoDisplay.enqueue(frame) {
-                    self.recordVideoFrame()
                     return
                 }
             }
@@ -1198,6 +1480,11 @@ final class PadConnectionModel: ObservableObject {
         let nativeBounds = UIScreen.main.nativeBounds
         let nativeWidth = Int(max(nativeBounds.width, nativeBounds.height))
         peers.send(ControlMessage(.hello, detail: "display-width:\(nativeWidth)"))
+        peers.send(ControlMessage(.hello, detail: StreamPreferences(
+            resolution: streamResolution,
+            frameRate: streamFrameRate,
+            ultraModeEnabled: ultraModeEnabled
+        ).encodedDetail))
     }
 
     private func startDiscoveryClockIfNeeded() {
@@ -1227,7 +1514,7 @@ final class PadConnectionModel: ObservableObject {
         discoveryClockTask = nil
     }
 
-    private func beginBackgroundGracePeriod() {
+    private func beginBackgroundGracePeriodIfNeeded() {
         guard backgroundTask == .invalid else { return }
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "SidecarBridge connection") { [weak self] in
             Task { @MainActor in self?.endBackgroundTask() }
@@ -1241,7 +1528,12 @@ final class PadConnectionModel: ObservableObject {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled, let self, self.backgroundRequested else { return }
                 if self.isPictureInPictureActive { return }
-                if self.isPictureInPicturePossible {
+                // Automatic PiP is handed off by AVKit during the scene
+                // transition. Manual starts are only valid while the app is
+                // foreground; do not race the suspended scene by calling the
+                // API from the background.
+                if self.isPictureInPicturePossible,
+                   UIApplication.shared.applicationState == .active {
                     self.backgroundViewerDetail = "Background viewer retry \(attempt) of 5…"
                     _ = self.videoDisplay.startPictureInPicture()
                 }
@@ -1283,7 +1575,6 @@ final class PadConnectionModel: ObservableObject {
                 return
             }
             suppressedClipboardSignature = "text:\(text)"
-            pendingClipboardSignature = nil
             automaticReceivedFileURLs.removeAll(keepingCapacity: false)
             UIPasteboard.general.string = text
             lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
@@ -1309,6 +1600,15 @@ final class PadConnectionModel: ObservableObject {
         case "fallback-active":
             status = "App stream connected"
             detail = "Waiting for the first frame."
+        case StreamSessionSignal.videoRefresh:
+            // A quality change can rebuild the Mac encoder while the secure
+            // input socket stays healthy. Reset only the media decoder and
+            // keep the viewer mounted; the next monotonic keyframe resumes
+            // video without making the user reconnect.
+            videoDisplay.prepareForForegroundResume()
+            resetVideoRateWindow()
+            connectionHealthDetail = "Refreshing Mac video profile"
+            detail = "Applying the new video profile…"
         case "sidecar-connected":
             status = "System Sidecar connected"
             detail = "iPadOS is switching to Apple's separate Sidecar display app."

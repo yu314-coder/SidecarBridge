@@ -405,7 +405,7 @@ final class PadLANService {
     }
 
     private func receive(on activeConnection: NWConnection) {
-        activeConnection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self, weak activeConnection] data, _, complete, error in
+        activeConnection.receive(minimumIncompleteLength: 1, maximumLength: 512 * 1024) { [weak self, weak activeConnection] data, _, complete, error in
             guard let self, let activeConnection, self.connection === activeConnection else { return }
             if let data { self.receiveBuffer.append(data) }
             do {
@@ -463,10 +463,13 @@ final class PadLANService {
             DispatchQueue.main.async { self.onCommand?(command) }
         case .jpeg(let frame):
             guard isConnected else { return }
-            DispatchQueue.main.async { self.onFrame?(frame) }
+            // PadPeerService coalesces video delivery onto the main actor. Do
+            // not enqueue one main-queue block per packet while the renderer
+            // is busy; that would preserve old frames and show a stale screen.
+            self.onFrame?(frame)
         case .video(let frame):
             guard isConnected else { return }
-            DispatchQueue.main.async { self.onVideoFrame?(frame) }
+            self.onVideoFrame?(frame)
         case .file(let transfer):
             guard isConnected else { return }
             DispatchQueue.main.async { self.onFilePacket?(transfer) }

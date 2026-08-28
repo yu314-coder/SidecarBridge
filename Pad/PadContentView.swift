@@ -1,10 +1,25 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import Foundation
 
 private enum PadRootTab {
     case remoteControl
     case settings
+}
+
+private enum SoftwareKeyboardMode: String, CaseIterable, Identifiable {
+    case standard
+    case special
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .standard: return "Standard"
+        case .special: return "Special"
+        }
+    }
 }
 
 struct PadContentView: View {
@@ -14,6 +29,7 @@ struct PadContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var controlDrawerOpen = false
     @State private var showingFileImporter = false
+    @State private var showingFileManager = false
     @State private var viewerScale: CGFloat = 1
     @State private var viewerOffset: CGSize = .zero
     // The Mac cursor is embedded in the captured frame. Keeping a second
@@ -39,6 +55,8 @@ struct PadContentView: View {
     }()
     @State private var isCalibratingPointerButtons = false
     @State private var showsSoftwareKeyboard = false
+    @State private var softwareKeyboardMode: SoftwareKeyboardMode = .special
+    @State private var softwareKeyboardModifiers: Set<String> = []
     // These are retained for the streaming drawer's legacy actions; the
     // dashboard no longer exposes diagnostics or destructive actions.
     @State private var showingForgetConfirmation = false
@@ -46,45 +64,86 @@ struct PadContentView: View {
     @State private var selectedTab: PadRootTab = .remoteControl
 
     private var content: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.018, green: 0.025, blue: 0.09), Color(red: 0.06, green: 0.035, blue: 0.2)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
+        contentWithLifecycle
+    }
 
-            if model.isStreaming {
-                streamingView
-                // Keep the viewer mounted behind Settings so the same sample
-                // buffer layer remains the Picture-in-Picture source. The
-                // settings panel is drawn above it and does not start a new
-                // viewer coordinate space.
-                if selectedTab == .settings {
-                    settingsPanel
-                }
-            } else if selectedTab == .settings {
-                settingsPanel
-            } else {
-                dashboard
+    // Keep each small group of modifiers in its own expression.  The iPad
+    // view contains a large number of controls and Swift's result-builder
+    // type checker otherwise times out in Debug builds.
+    private var contentWithLifecycle: some View {
+        contentWithStreamingReset
+            .onChange(of: showTopStatusBar) { _, value in
+                UserDefaults.standard.set(value, forKey: "showTopStatusBar")
             }
+            .onChange(of: showBottomHint) { _, value in
+                UserDefaults.standard.set(value, forKey: "showBottomHint")
+            }
+    }
+
+    private var contentWithStreamingReset: some View {
+        contentWithPreferences
+            .onChange(of: model.isStreaming) { _, streaming in
+                if !streaming { resetViewerZoom() }
+            }
+    }
+
+    private var contentWithPreferences: some View {
+        contentWithPersistedPointers
+            .onChange(of: showClickFeedback) { _, value in
+                UserDefaults.standard.set(value, forKey: "showClickFeedback")
+            }
+    }
+
+    private var contentWithPersistedPointers: some View {
+        contentWithTheme
+            .onChange(of: showVirtualCursor) { _, value in
+                UserDefaults.standard.set(value, forKey: "showVirtualCursor")
+            }
+            .onChange(of: showMagicKeyboardPointer) { _, value in
+                UserDefaults.standard.set(value, forKey: "showMagicKeyboardPointer")
+            }
+    }
+
+    private var contentWithTheme: some View {
+        // Erase the dashboard/streaming conditional before applying root
+        // modifiers. This bounds type checking as the settings panel grows.
+        AnyView(contentRoot)
+            .preferredColorScheme(.dark)
+            .tint(.cyan)
+    }
+
+    @ViewBuilder
+    private var contentRoot: some View {
+        ZStack {
+            backgroundLayer
+            primaryLayer
         }
-        .preferredColorScheme(.dark)
-        .tint(.cyan)
-        .onChange(of: showVirtualCursor) { _, value in
-            UserDefaults.standard.set(value, forKey: "showVirtualCursor")
-        }
-        .onChange(of: showClickFeedback) { _, value in
-            UserDefaults.standard.set(value, forKey: "showClickFeedback")
-        }
-        .onChange(of: showTopStatusBar) { _, value in
-            UserDefaults.standard.set(value, forKey: "showTopStatusBar")
-        }
-        .onChange(of: showBottomHint) { _, value in
-            UserDefaults.standard.set(value, forKey: "showBottomHint")
-        }
-        .onChange(of: model.isStreaming) { _, streaming in
-            if !streaming { resetViewerZoom() }
+    }
+
+    private var backgroundLayer: some View {
+        LinearGradient(
+            colors: [Color(red: 0.018, green: 0.025, blue: 0.09), Color(red: 0.06, green: 0.035, blue: 0.2)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private var primaryLayer: some View {
+        if model.isStreaming {
+            streamingView
+            // Keep the viewer mounted behind Settings so the same sample
+            // buffer layer remains the Picture-in-Picture source. The
+            // settings panel is drawn above it and does not start a new
+            // viewer coordinate space.
+            if selectedTab == .settings {
+                settingsPanel
+            }
+        } else if selectedTab == .settings {
+            settingsPanel
+        } else {
+            dashboard
         }
     }
 
@@ -95,6 +154,9 @@ struct PadContentView: View {
             allowedContentTypes: [.item],
             allowsMultipleSelection: true
         ) { handleFileImport($0) }
+        .sheet(isPresented: $showingFileManager) {
+            PadFileManagerView(model: model)
+        }
     }
 
     private func handleFileImport(_ result: Result<[URL], Error>) {
@@ -110,6 +172,17 @@ struct PadContentView: View {
         GeometryReader { geometry in
             ScrollViewReader { scrollProxy in
                 VStack(spacing: 0) {
+                    // Keep an active file transfer visible while the user is
+                    // on the connection screen.  This sits outside the
+                    // scroll view so a long dashboard cannot hide progress;
+                    // tapping the folder button opens the same file manager
+                    // used by the viewer and Settings.
+                    if model.isFileTransferring, let transfer = model.fileTransferSnapshot {
+                        activeFileTransferBanner(transfer)
+                            .padding(.top, 10)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
                     ScrollView {
                         VStack(spacing: 24) {
                             Color.clear.frame(height: 1).id("dashboard-top")
@@ -200,6 +273,7 @@ struct PadContentView: View {
             PadSettingsPanel(
                 model: model,
                 showVirtualCursor: $showVirtualCursor,
+                showMagicKeyboardPointer: $showMagicKeyboardPointer,
                 showClickFeedback: $showClickFeedback,
                 showTopStatusBar: $showTopStatusBar,
                 showBottomHint: $showBottomHint,
@@ -207,6 +281,7 @@ struct PadContentView: View {
                 pointerButtonMapping: $pointerButtonMapping,
                 isCalibratingPointerButtons: $isCalibratingPointerButtons,
                 showingFileImporter: $showingFileImporter,
+                showingFileManager: $showingFileManager,
                 onOpenRemoteControl: { selectedTab = .remoteControl }
             )
             rootTabBar { selectedTab = .remoteControl }
@@ -1051,6 +1126,15 @@ struct PadContentView: View {
                             .foregroundStyle(.white.opacity(0.78))
                             .fixedSize(horizontal: false, vertical: true)
                     }
+
+                    Label {
+                        Text(model.receivedFilesLocationDescription)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "folder.badge.arrow.down")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.62))
                 }
             }
 
@@ -1084,20 +1168,23 @@ struct PadContentView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Clipboard transfer").font(.headline)
-                    Text("Copy on either device and it syncs automatically while connected. No send button is needed; the buttons below are a manual fallback.")
+                    Text("Manual clipboard actions never interrupt live video. Automatic sync is optional and may show iPadOS paste permission prompts.")
                         .font(.callout)
                         .foregroundStyle(.white.opacity(0.78))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            Toggle("Automatic text and file sync", isOn: $model.automaticClipboardSyncEnabled)
+            Toggle("Auto-send copied text and files", isOn: $model.automaticClipboardSyncEnabled)
                 .toggleStyle(.switch)
 
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) { clipboardButtons; Spacer() }
-                VStack(alignment: .leading, spacing: 10) { clipboardButtons }
+            DisclosureGroup("Manual clipboard actions") {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { clipboardButtons; Spacer() }
+                    VStack(alignment: .leading, spacing: 10) { clipboardButtons }
+                }
             }
+            .font(.caption.bold())
 
             Text(model.clipboardTransferStatus)
                 .font(.caption)
@@ -1132,6 +1219,14 @@ struct PadContentView: View {
 
     @ViewBuilder
     private var fileTransferButtons: some View {
+        Button {
+            showingFileManager = true
+        } label: {
+            Label("Manage Files", systemImage: "folder")
+                .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
+        }
+        .buttonStyle(.bordered)
+
         if let received = model.lastReceivedFile {
             ShareLink(item: received) {
                 Label("Share Received", systemImage: "square.and.arrow.up")
@@ -1224,6 +1319,10 @@ struct PadContentView: View {
             VStack {
                 if showTopStatusBar { streamTopStatusBar }
 
+                if model.isFileTransferring, let transfer = model.fileTransferSnapshot {
+                    activeFileTransferBanner(transfer)
+                }
+
                 if isCalibratingPointerButtons {
                     Label("Click the physical LEFT mouse or trackpad button once", systemImage: "cursorarrow.click")
                         .font(.headline)
@@ -1260,6 +1359,11 @@ struct PadContentView: View {
 
                 streamingControlDrawer(availableSize: geometry.size)
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if showsSoftwareKeyboard {
+                    onScreenKeyboardAccessory(availableSize: geometry.size)
+                }
+            }
             // The captured frame, video layer, and UIKit input surface now
             // share this full-screen coordinate space. Without it,
             // GeometryReader can report the safe-area size while the viewer
@@ -1268,6 +1372,46 @@ struct PadContentView: View {
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .ignoresSafeArea()
+    }
+
+    private func activeFileTransferBanner(_ transfer: FileTransferSnapshot) -> some View {
+        let title = transfer.direction == .receiving ? "Receiving from Mac" : "Sending to Mac"
+        return HStack(spacing: 10) {
+            Image(systemName: transfer.direction == .receiving ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                .font(.title3)
+                .foregroundStyle(.cyan)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.caption.bold())
+                Text(transfer.fileName)
+                    .font(.caption2)
+                    .lineLimit(1)
+                ProgressView(value: transfer.progress)
+                    .tint(.cyan)
+                    .frame(maxWidth: 210)
+            }
+            Spacer(minLength: 4)
+            Text("\(Int((transfer.progress * 100).rounded()))%")
+                .font(.caption.monospacedDigit().bold())
+                .foregroundStyle(.cyan)
+            Button {
+                showingFileManager = true
+            } label: {
+                Image(systemName: "folder")
+                    .font(.caption.bold())
+                    .padding(8)
+                    .background(.white.opacity(0.1), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open file manager")
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(.cyan.opacity(0.28)))
+        .padding(.horizontal)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(title), \(transfer.fileName), \(Int((transfer.progress * 100).rounded())) percent")
     }
 
     private var streamTopStatusBar: some View {
@@ -1349,273 +1493,123 @@ struct PadContentView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(controlDrawerOpen ? "Close viewer controls" : "Open viewer controls")
-            .accessibilityHint("Shows zoom, file transfer, background viewing, click, and display options.")
+            .accessibilityHint("Shows zoom, trackpad clicks, keyboard, and stop. Other options are in Settings.")
 
             if controlDrawerOpen {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Label("Viewer controls", systemImage: "slider.horizontal.3")
-                            .font(.headline)
-                        Spacer()
-                        Text("\(model.streamFPS) FPS")
-                            .font(.caption.bold())
-                            .foregroundStyle(.green)
-                    }
-                    .padding(12)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Label("Display zoom", systemImage: "magnifyingglass")
-                                .font(.caption.bold())
-                                .foregroundStyle(.white.opacity(0.78))
+                            Label("Quick controls", systemImage: "slider.horizontal.3")
+                                .font(.headline)
                             Spacer()
-                            Text("\(Int((viewerScale * 100).rounded()))%")
-                                .font(.caption.monospacedDigit().bold())
-                                .foregroundStyle(.cyan)
-                        }
-                        HStack(spacing: 8) {
-                            Button { zoomViewer(by: 0.8, size: availableSize) } label: { Image(systemName: "minus.magnifyingglass") }
-                                .accessibilityLabel("Zoom out")
-                            Button("Reset") { resetViewerZoom() }
-                                .frame(maxWidth: .infinity)
-                            Button { zoomViewer(by: 1.25, size: availableSize) } label: { Image(systemName: "plus.magnifyingglass") }
-                                .accessibilityLabel("Zoom in")
-                        }
-                        .buttonStyle(.bordered)
-                        Text("Pinch with two fingers to zoom. Drag with three fingers to pan; two-finger swipes still scroll the Mac.")
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.78))
-                    }
-                    .padding(12)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("File transfer", systemImage: "arrow.left.arrow.right.square")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white.opacity(0.78))
-                        if let transfer = model.fileTransferSnapshot {
-                            Text("\(transfer.message): \(transfer.fileName)")
-                                .font(.caption2)
-                                .fixedSize(horizontal: false, vertical: true)
-                            ProgressView(value: transfer.progress)
-                                .tint(.cyan)
-                                .accessibilityValue("\(Int(transfer.progress * 100)) percent")
-                        }
-                        Button {
-                            showingFileImporter = true
-                        } label: {
-                            Label("Send File to Mac", systemImage: "paperplane.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.cyan)
-                        .disabled(model.isFileTransferring)
-                    }
-                    .padding(12)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Clipboard", systemImage: "doc.on.clipboard")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white.opacity(0.78))
-                        HStack(spacing: 8) {
-                            Button { model.requestMacClipboard() } label: {
-                                Label("Receive Clipboard", systemImage: "arrow.down.doc")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            Button { model.sendClipboardToMac() } label: {
-                                Label("Send Clipboard", systemImage: "arrow.up.doc")
-                                    .frame(maxWidth: .infinity)
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.purple)
-                        .disabled(!model.isConnected)
-                        Text(model.clipboardTransferStatus)
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.62))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(12)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    VStack(alignment: .leading, spacing: 9) {
-                        HStack {
-                            Label("Background viewer", systemImage: "pip")
+                            Text("\(model.streamFPS) FPS")
                                 .font(.caption.bold())
-                                .foregroundStyle(.white.opacity(0.78))
-                            Spacer()
-                            Text(model.isPictureInPictureActive ? "ACTIVE" : model.keepRunningInBackground ? "AUTO" : "OFF")
-                                .font(.caption2.bold())
-                                .foregroundStyle(model.isPictureInPictureActive ? .green : .cyan)
+                                .foregroundStyle(.green)
                         }
+                        .padding(12)
+                        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                        Toggle(
-                            isOn: Binding(
-                                get: { model.keepRunningInBackground },
-                                set: model.setKeepRunningInBackground
-                            )
-                        ) {
-                            Text("Start PiP when switching apps")
-                        }
-
-                        if model.isPictureInPictureActive {
-                            Button {
-                                model.togglePictureInPicture()
-                            } label: {
-                                Label("Stop Picture in Picture", systemImage: "pip.exit")
-                                    .frame(maxWidth: .infinity)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Label("Display zoom", systemImage: "magnifyingglass")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.white.opacity(0.78))
+                                Spacer()
+                                Text("\(Int((viewerScale * 100).rounded()))%")
+                                    .font(.caption.monospacedDigit().bold())
+                                    .foregroundStyle(.cyan)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.orange)
-                        } else {
-                            Button {
-                                model.togglePictureInPicture()
-                            } label: {
-                                Label("Start PiP Now", systemImage: "pip.enter")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.cyan)
-                            .disabled(!model.isStreaming || !model.pictureInPictureSupported)
-                        }
-
-                        Text(model.backgroundViewerDetail)
-                            .font(.caption2)
-                            .foregroundStyle(
-                                model.isPictureInPictureActive || model.isPictureInPicturePossible
-                                    ? Color.white.opacity(0.78)
-                                    : model.pictureInPictureSupported ? Color.cyan : Color.orange
-                            )
-                    }
-                    .padding(12)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Keyboard", systemImage: "keyboard")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white.opacity(0.78))
-
-                        Button {
-                            showsSoftwareKeyboard.toggle()
-                            if showsSoftwareKeyboard {
-                                setControlDrawer(open: false)
-                            }
-                        } label: {
-                            Label(
-                                showsSoftwareKeyboard ? "Hide On-Screen Keyboard" : "Show On-Screen Keyboard",
-                                systemImage: showsSoftwareKeyboard
-                                    ? "keyboard.chevron.compact.down"
-                                    : "keyboard.chevron.compact.up"
-                            )
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(showsSoftwareKeyboard ? .orange : .cyan)
-
-                        Text("The software keyboard stays hidden until you select it here. Magic Keyboard and other hardware keyboards keep working.")
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.78))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(12)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("External pointer mapping", systemImage: "computermouse")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white.opacity(0.78))
-
-                        Picker("External pointer mapping", selection: Binding(
-                            get: { pointerButtonMapping },
-                            set: setPointerButtonMapping
-                        )) {
-                            Text("System").tag(RemotePointerButtonMapping.system)
-                            Text("Swapped").tag(RemotePointerButtonMapping.swapped)
-                        }
-                        .pickerStyle(.segmented)
-
-                        Button {
-                            if isCalibratingPointerButtons {
-                                isCalibratingPointerButtons = false
-                            } else {
-                                isCalibratingPointerButtons = true
-                                setControlDrawer(open: false)
-                            }
-                        } label: {
-                            Label(
-                                isCalibratingPointerButtons ? "Cancel Left-Click Calibration" : "Calibrate Physical Left Click",
-                                systemImage: isCalibratingPointerButtons ? "xmark.circle" : "scope"
-                            )
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-
-                        Text(pointerMappingDetail)
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.78))
-
-                        Text("If other apps are also reversed: iPad Settings → General → Trackpad & Mouse → Secondary Click → Right.")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(12)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Trackpad clicks", systemImage: "cursorarrow.click")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white.opacity(0.78))
-
-                        ViewThatFits(in: .horizontal) {
                             HStack(spacing: 8) {
-                                trackpadClickButtons
+                                Button { zoomViewer(by: 0.8, size: availableSize) } label: { Image(systemName: "minus.magnifyingglass") }
+                                    .accessibilityLabel("Zoom out")
+                                Button("Reset") { resetViewerZoom() }
+                                    .frame(maxWidth: .infinity)
+                                Button { zoomViewer(by: 1.25, size: availableSize) } label: { Image(systemName: "plus.magnifyingglass") }
+                                    .accessibilityLabel("Zoom in")
                             }
-                            VStack(spacing: 8) {
-                                trackpadClickButtons
-                            }
+                            .buttonStyle(.bordered)
+                            Text("Pinch with two fingers to zoom. Drag with three fingers to pan; two-finger swipes still scroll the Mac.")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.78))
                         }
+                        .padding(12)
+                        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Trackpad", systemImage: "cursorarrow.click")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white.opacity(0.78))
+                            ViewThatFits(in: .horizontal) {
+                                HStack(spacing: 8) { trackpadClickButtons }
+                                VStack(spacing: 8) { trackpadClickButtons }
+                            }
+                            Text(inputStatusText)
+                                .font(.caption2.bold())
+                                .foregroundStyle(model.remoteInputAuthorized ? .cyan : .orange)
+                        }
+                        .padding(12)
+                        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Label("Keyboard", systemImage: "keyboard")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.white.opacity(0.78))
+                                Spacer()
+                                Text(softwareKeyboardMode == .special ? "SPECIAL" : "STANDARD")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.cyan)
+                            }
+                            Button {
+                                showsSoftwareKeyboard.toggle()
+                                if !showsSoftwareKeyboard {
+                                    softwareKeyboardModifiers.removeAll()
+                                } else {
+                                    // The special-key controls live in the
+                                    // keyboard accessory above the system
+                                    // keyboard. Close the drawer so it cannot
+                                    // cover that accessory while typing.
+                                    setControlDrawer(open: false)
+                                }
+                            } label: {
+                                Label(
+                                    showsSoftwareKeyboard ? "Hide On-Screen Keyboard" : "Show On-Screen Keyboard",
+                                    systemImage: showsSoftwareKeyboard
+                                        ? "keyboard.chevron.compact.down"
+                                        : "keyboard.chevron.compact.up"
+                                )
+                                .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(showsSoftwareKeyboard ? .orange : .cyan)
+                            Text("The on-screen keyboard opens below. Its Special mode contains modifier, navigation, function, editing, input-source, and shortcut keys.")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.78))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(12)
+                        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                        Button { selectedTab = .settings } label: {
+                            Label("Open full Settings", systemImage: "gearshape.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(role: .destructive) {
+                            model.stopStreaming()
+                        } label: {
+                            Label("Stop stream", systemImage: "stop.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
-                    .padding(12)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    streamingDisplayOptions
-
-                    Divider()
-
-                    Button {
-                        selectedTab = .settings
-                    } label: {
-                        Label("More controls in Settings", systemImage: "gearshape")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-
-                    Label(inputStatusText, systemImage: inputStatusIcon)
-                        .font(.caption.bold())
-                        .foregroundStyle(model.remoteInputAuthorized ? .cyan : .orange)
-
-                    Button(role: .destructive) {
-                        model.stopStreaming()
-                    } label: {
-                        Label("Stop stream", systemImage: "stop.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
+                    .padding(16)
+                    .frame(width: drawerWidth)
+                    .background(.ultraThinMaterial)
+                    .overlay(alignment: .leading) { Divider() }
                 }
-                .padding(16)
-                .frame(width: drawerWidth)
-                .background(.ultraThinMaterial)
-                .overlay(alignment: .leading) { Divider() }
             }
-        }
         }
         .frame(height: drawerHeight)
         .clipShape(UnevenRoundedRectangle(
@@ -1634,6 +1628,39 @@ struct PadContentView: View {
                 }
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+    }
+
+    /// The special keys belong to the on-screen keyboard, not to the side
+    /// drawer. Keeping this as a safe-area inset places it directly above the
+    /// system keyboard while leaving the viewer/input coordinate space alone.
+    private func onScreenKeyboardAccessory(availableSize: CGSize) -> some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            RemoteKeyboardToolbar(
+                mode: $softwareKeyboardMode,
+                modifiers: $softwareKeyboardModifiers,
+                onKey: sendSoftwareKeyboardKey,
+                onShortcut: sendSoftwareKeyboardShortcut,
+                onInputMode: { model.sendInput(.toggleChineseEnglishInputMode()) },
+                onCycleInputMode: { model.sendInput(.cycleInputMode()) },
+                onClearModifiers: { softwareKeyboardModifiers.removeAll() },
+                onHide: {
+                    showsSoftwareKeyboard = false
+                    softwareKeyboardModifiers.removeAll()
+                }
+            )
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+        }
+        .frame(
+            maxWidth: min(760, max(280, availableSize.width - 24)),
+            maxHeight: min(360, max(170, availableSize.height * 0.42))
+        )
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(.white.opacity(0.12)))
+        .shadow(color: .black.opacity(0.36), radius: 18, y: -5)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder
@@ -1658,30 +1685,12 @@ struct PadContentView: View {
         )
     }
 
-    private var streamingDisplayOptions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label("Display options", systemImage: "slider.horizontal.2.square")
-                .font(.caption.bold())
-                .foregroundStyle(.white.opacity(0.78))
+    private func sendSoftwareKeyboardKey(_ key: String, modifiers: Set<String>) {
+        model.sendInput(.key(key, modifiers: Array(modifiers)))
+    }
 
-            Toggle(isOn: $showClickFeedback) {
-                Label("Click ripple", systemImage: "circle.circle")
-            }
-            Toggle(isOn: $showMagicKeyboardPointer) {
-                Label("Show iPad cursor", systemImage: "cursorarrow")
-            }
-            .onChange(of: showMagicKeyboardPointer) { _, value in
-                UserDefaults.standard.set(value, forKey: "showMagicKeyboardPointer")
-            }
-            Toggle(isOn: $showTopStatusBar) {
-                Label("Top status bar", systemImage: "rectangle.topthird.inset.filled")
-            }
-            Toggle(isOn: $showBottomHint) {
-                Label("Bottom help", systemImage: "text.bubble")
-            }
-        }
-        .padding(12)
-        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    private func sendSoftwareKeyboardShortcut(_ key: String, modifiers: [String]) {
+        model.sendInput(.key(key, modifiers: modifiers))
     }
 
     private struct TrackpadClickButton: View {
@@ -1904,6 +1913,232 @@ struct PadContentView: View {
             return "Enable Local Network for SidecarBridge, then return here; discovery restarts automatically."
         }
         return "Keep SidecarBridge open on the Mac. Confirm both devices use the same Wi-Fi, Bluetooth is enabled, and the Mac firewall allows local connections."
+    }
+}
+
+/// A compact remote keyboard accessory inspired by AnyDesk's iPad session
+/// menu. UIKit still owns normal text entry and IME composition; this view
+/// adds the keys that are difficult to reach from an iPad software keyboard.
+private struct RemoteKeyboardToolbar: View {
+    @Binding var mode: SoftwareKeyboardMode
+    @Binding var modifiers: Set<String>
+
+    let onKey: (String, Set<String>) -> Void
+    let onShortcut: (String, [String]) -> Void
+    let onInputMode: () -> Void
+    let onCycleInputMode: () -> Void
+    let onClearModifiers: () -> Void
+    let onHide: () -> Void
+
+    private let functionKeys = (1...12).map { "f\($0)" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label("Special input", systemImage: "command.square")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white.opacity(0.84))
+                Spacer(minLength: 4)
+                Picker("Keyboard mode", selection: $mode) {
+                    ForEach(SoftwareKeyboardMode.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 142)
+                .accessibilityLabel("Remote keyboard mode")
+            }
+
+            modifierRow
+
+            if mode == .special {
+                keyRow([
+                    ("Esc", "escape"),
+                    ("Tab", "tab"),
+                    ("Caps", "capslock"),
+                    ("Delete", "delete"),
+                    ("Forward", "forwarddelete"),
+                    ("Return", "return"),
+                    ("Space", "space")
+                ])
+
+                keyRow([
+                    ("Home", "home"),
+                    ("End", "end"),
+                    ("Pg Up", "pageup"),
+                    ("Pg Dn", "pagedown"),
+                    ("←", "left"),
+                    ("↑", "up"),
+                    ("↓", "down"),
+                    ("→", "right")
+                ])
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        ForEach(functionKeys, id: \.self) { key in
+                            keyButton(title: key.uppercased(), key: key, width: 42)
+                        }
+                    }
+                }
+
+                shortcutRow
+                inputModeRow
+            } else {
+                Text("Use the standard iPad keyboard for letters and numbers. Modifier buttons stay available for shortcuts.")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.72))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    onClearModifiers()
+                } label: {
+                    Label("Clear", systemImage: "xmark.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(modifiers.isEmpty)
+
+                Button {
+                    onHide()
+                } label: {
+                    Label("Hide", systemImage: "keyboard.chevron.compact.down")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+            }
+        }
+        .padding(10)
+        .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.08)))
+        .accessibilityElement(children: .contain)
+    }
+
+    private var modifierRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 5) {
+                modifierButton(title: "⌘", name: "Command", key: "command")
+                modifierButton(title: "⌥", name: "Option", key: "option")
+                modifierButton(title: "⌃", name: "Control", key: "control")
+                modifierButton(title: "⇧", name: "Shift", key: "shift")
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    modifierButton(title: "⌘", name: "Command", key: "command")
+                    modifierButton(title: "⌥", name: "Option", key: "option")
+                    modifierButton(title: "⌃", name: "Control", key: "control")
+                    modifierButton(title: "⇧", name: "Shift", key: "shift")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var shortcutRow: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Common shortcuts")
+                .font(.caption2.bold())
+                .foregroundStyle(.white.opacity(0.64))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    shortcutButton("⌘C", key: "c", modifiers: ["command"], description: "Copy")
+                    shortcutButton("⌘V", key: "v", modifiers: ["command"], description: "Paste")
+                    shortcutButton("⌘X", key: "x", modifiers: ["command"], description: "Cut")
+                    shortcutButton("⌘A", key: "a", modifiers: ["command"], description: "Select all")
+                    shortcutButton("⌘Z", key: "z", modifiers: ["command"], description: "Undo")
+                    shortcutButton("⇧⌘Z", key: "z", modifiers: ["command", "shift"], description: "Redo")
+                    shortcutButton("⌘Tab", key: "tab", modifiers: ["command"], description: "Switch app")
+                }
+            }
+        }
+    }
+
+    private var inputModeRow: some View {
+        HStack(spacing: 5) {
+            Button {
+                onInputMode()
+            } label: {
+                Label("中/英", systemImage: "character.cursor.ibeam")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.purple)
+            .accessibilityLabel("Toggle Chinese and English input")
+
+            Button {
+                onCycleInputMode()
+            } label: {
+                Label("Globe", systemImage: "globe")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Cycle Mac input source")
+        }
+    }
+
+    private func keyRow(_ keys: [(String, String)]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 5) {
+                ForEach(Array(keys.enumerated()), id: \.offset) { _, item in
+                    keyButton(title: item.0, key: item.1)
+                }
+            }
+        }
+    }
+
+    private func modifierButton(title: String, name: String, key: String) -> some View {
+        let isActive = modifiers.contains(key)
+        return Button {
+            if isActive {
+                modifiers.remove(key)
+            } else {
+                modifiers.insert(key)
+            }
+        } label: {
+            Text(title)
+                .font(.headline.bold())
+                .frame(maxWidth: .infinity, minHeight: 34)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(isActive ? .cyan : .white.opacity(0.18))
+        .accessibilityLabel("(name) modifier")
+        .accessibilityValue(isActive ? "Held" : "Not held")
+    }
+
+    private func keyButton(title: String, key: String, width: CGFloat = 58) -> some View {
+        Button {
+            onKey(key, modifiers)
+        } label: {
+            Text(title)
+                .font(.caption2.bold())
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(minWidth: width, minHeight: 34)
+        }
+        .buttonStyle(.bordered)
+        .tint(.white.opacity(0.86))
+        .accessibilityLabel(title)
+        .accessibilityHint(modifiers.isEmpty ? "Send key" : "Send key with held modifiers")
+    }
+
+    private func shortcutButton(
+        _ title: String,
+        key: String,
+        modifiers: [String],
+        description: String
+    ) -> some View {
+        Button {
+            onShortcut(key, modifiers)
+        } label: {
+            Text(title)
+                .font(.caption2.bold())
+                .frame(minWidth: 48, minHeight: 34)
+        }
+        .buttonStyle(.bordered)
+        .tint(.indigo)
+        .accessibilityLabel(description)
     }
 }
 
@@ -2165,7 +2400,7 @@ private struct PadSystemInformationSheet: View {
             diagnosticRow("Stream", model.streamDimensions)
             Divider()
             diagnosticRow(
-                "Displayed frame rate",
+                "Received frame rate",
                 model.streamFPS > 0 ? "\(model.streamFPS) FPS" : "Not measured"
             )
             Divider()
@@ -2192,9 +2427,125 @@ private struct PadSystemInformationSheet: View {
     }
 }
 
+private struct PadFileManagerView: View {
+    @ObservedObject var model: PadConnectionModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Received files", systemImage: "folder.badge.arrow.down")
+                            .font(.headline)
+                        Text("Files sent from the Mac are kept on the iPad and are also available in the Files app.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Text(model.receivedFilesLocationDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                if model.receivedFiles.isEmpty {
+                    ContentUnavailableView(
+                        "No received files",
+                        systemImage: "folder",
+                        description: Text("When the Mac sends a file, it will appear here and in the Files app.")
+                    )
+                    .listRowBackground(Color.clear)
+                } else {
+                    Section("On My iPad") {
+                        ForEach(model.receivedFiles) { file in
+                            receivedFileRow(file)
+                        }
+                        .onDelete { offsets in
+                            let files = offsets.map { model.receivedFiles[$0] }
+                            for file in files {
+                                model.deleteReceivedFile(file)
+                            }
+                        }
+                    }
+                }
+
+                if let error = model.fileTransferError {
+                    Section {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .font(.footnote)
+                    }
+                }
+            }
+            .navigationTitle("File Manager")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        model.refreshReceivedFiles()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .accessibilityLabel("Refresh files")
+                }
+            }
+            .task {
+                model.refreshReceivedFiles()
+            }
+            .refreshable {
+                model.refreshReceivedFiles()
+            }
+        }
+    }
+
+    private func receivedFileRow(_ file: PadConnectionModel.ReceivedFile) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "doc.fill")
+                .font(.title3)
+                .foregroundStyle(.cyan)
+                .frame(width: 38, height: 38)
+                .background(.cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(file.name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(2)
+                Text(fileDetails(for: file))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 4)
+
+            ShareLink(item: file.url) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.body.weight(.semibold))
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Share \(file.name)")
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(file.name), \(fileDetails(for: file))")
+    }
+
+    private func fileDetails(for file: PadConnectionModel.ReceivedFile) -> String {
+        let size = ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file)
+        guard let modifiedAt = file.modifiedAt else { return size }
+        return "\(size) · \(modifiedAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+}
+
 private struct PadSettingsPanel: View {
     @ObservedObject var model: PadConnectionModel
     @Binding var showVirtualCursor: Bool
+    @Binding var showMagicKeyboardPointer: Bool
     @Binding var showClickFeedback: Bool
     @Binding var showTopStatusBar: Bool
     @Binding var showBottomHint: Bool
@@ -2202,6 +2553,7 @@ private struct PadSettingsPanel: View {
     @Binding var pointerButtonMapping: RemotePointerButtonMapping
     @Binding var isCalibratingPointerButtons: Bool
     @Binding var showingFileImporter: Bool
+    @Binding var showingFileManager: Bool
     let onOpenRemoteControl: () -> Void
     // Android-style developer options stay hidden until the version row is
     // tapped seven times, then persist so the enabled state is reflected when
@@ -2289,12 +2641,44 @@ private struct PadSettingsPanel: View {
                     }
                 }
 
+                Section("Stream performance") {
+                    Picker("Quality", selection: Binding(
+                        get: { model.streamResolution },
+                        set: { model.setStreamResolution($0) }
+                    )) {
+                        ForEach(StreamResolutionPreference.allCases) { preference in
+                            Text(preference.title).tag(preference)
+                        }
+                    }
+                    Text(model.streamResolution.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("Frame-rate target", selection: Binding(
+                        get: { model.streamFrameRate },
+                        set: { model.setStreamFrameRate($0) }
+                    )) {
+                        ForEach(availableFrameRatePreferences) { preference in
+                            Text(preference.title).tag(preference)
+                        }
+                    }
+                    Text("90/120 FPS is available on capable direct or nearby links. Ultra FPS in Developer options adds higher targets for testing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 transfersSection
 
                 Section("Viewer") {
                     Toggle(isOn: $showClickFeedback) {
                         Label("Click feedback", systemImage: "circle.circle")
                     }
+                    Toggle(isOn: $showMagicKeyboardPointer) {
+                        Label("Show iPad pointer", systemImage: "cursorarrow")
+                    }
+                    Text("The captured Mac cursor remains the primary pointer. This optional iPad pointer is only a touch-location aid.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Toggle(isOn: $showTopStatusBar) {
                         Label("Top status bar", systemImage: "rectangle.topthird.inset.filled")
                     }
@@ -2352,7 +2736,7 @@ private struct PadSettingsPanel: View {
                 } header: {
                     Text("Background viewer")
                 } footer: {
-                    Text("Picture in Picture can keep the Mac screen visible. Keyboard and trackpad input resumes when SidecarBridge is foreground; if PiP is unavailable, iPadOS may suspend the app and SidecarBridge restores the encrypted link when you return.")
+                    Text("iPadOS suspends ordinary apps after its short background grace period. Picture in Picture is the supported way to keep the Mac screen visible; keyboard and trackpad control resumes when SidecarBridge is foreground. If PiP is unavailable, the encrypted link is restored when you return.")
                 }
 
                 Section {
@@ -2446,6 +2830,43 @@ private struct PadSettingsPanel: View {
                     } footer: {
                         Text("Developer diagnostics can contain device and connection details. Share them only with people you trust.")
                     }
+
+                    Section {
+                        Toggle(isOn: Binding(
+                            get: { model.ultraModeEnabled },
+                            set: model.setUltraModeEnabled
+                        )) {
+                            Label("Ultra FPS mode", systemImage: "bolt.fill")
+                        }
+
+                        Picker("FPS target", selection: Binding(
+                            get: { model.streamFrameRate },
+                            set: { model.setStreamFrameRate($0) }
+                        )) {
+                            ForEach(StreamFrameRatePreference.allCases) { preference in
+                                Text(preference.title).tag(preference)
+                            }
+                        }
+                        .disabled(!model.ultraModeEnabled)
+
+                        Picker("Capture quality", selection: Binding(
+                            get: { model.streamResolution },
+                            set: { model.setStreamResolution($0) }
+                        )) {
+                            ForEach(StreamResolutionPreference.allCases) { preference in
+                                Text(preference.title).tag(preference)
+                            }
+                        }
+                        .disabled(!model.ultraModeEnabled)
+
+                        Text("When enabled, this profile is sent to the Mac. Healthy foreground P2P can target up to 240 FPS and 2K capture. The display and link still determine the measured rate; OS-critical memory pressure and real congestion retain safety limits.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } header: {
+                        Text("Ultra performance")
+                    } footer: {
+                        Text("This is a developer stress mode with a larger bounded encoder pipeline. It does not disable macOS or iPadOS crash-protection safeguards.")
+                    }
                 }
             }
             .scrollContentBackground(.hidden)
@@ -2473,6 +2894,15 @@ private struct PadSettingsPanel: View {
 
     private var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1"
+    }
+
+    private var availableFrameRatePreferences: [StreamFrameRatePreference] {
+        if model.ultraModeEnabled {
+            return StreamFrameRatePreference.allCases
+        }
+        return StreamFrameRatePreference.allCases.filter {
+            $0.rawValue <= StreamCadencePolicy.nearbyFrameRateCeiling
+        }
     }
 
     private var settingsHeroCard: some View {
@@ -2566,6 +2996,12 @@ private struct PadSettingsPanel: View {
     private var transfersSection: some View {
         Section {
             Button {
+                showingFileManager = true
+            } label: {
+                Label("Manage received files", systemImage: "folder")
+            }
+
+            Button {
                 showingFileImporter = true
             } label: {
                 Label("Send files to Mac", systemImage: "paperplane.fill")
@@ -2578,27 +3014,33 @@ private struct PadSettingsPanel: View {
                 }
             }
 
-            HStack(spacing: 10) {
-                Button {
-                    model.requestMacClipboard()
-                } label: {
+            Label(model.receivedFilesLocationDescription, systemImage: "folder.badge.arrow.down")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            DisclosureGroup("Manual clipboard actions") {
+                HStack(spacing: 10) {
+                    Button {
+                        model.requestMacClipboard()
+                    } label: {
                         Label("Receive Clipboard", systemImage: "arrow.down.doc")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.purple)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.purple)
 
-                Button {
-                    model.sendClipboardToMac()
-                } label: {
+                    Button {
+                        model.sendClipboardToMac()
+                    } label: {
                         Label("Send Clipboard", systemImage: "arrow.up.doc")
-                        .frame(maxWidth: .infinity)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
+                .disabled(!model.isConnected)
             }
-            .disabled(!model.isConnected)
 
-            Toggle("Automatic text and file sync", isOn: $model.automaticClipboardSyncEnabled)
+            Toggle("Auto-send copied text and files", isOn: $model.automaticClipboardSyncEnabled)
 
             if let transfer = model.fileTransferSnapshot {
                 Text("\(transfer.message): \(transfer.fileName)")
@@ -2616,7 +3058,7 @@ private struct PadSettingsPanel: View {
         } header: {
             Text("Transfers")
         } footer: {
-            Text("Clipboard sync is automatic while connected unless disabled above. iPadOS may suspend background apps; changes are reconciled when SidecarBridge becomes active again.")
+            Text("Automatic clipboard sync is off by default to keep the live viewer smooth. Enable it only if you accept iPadOS paste permission prompts; manual send and receive buttons remain available.")
         }
     }
 

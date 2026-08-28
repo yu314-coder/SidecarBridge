@@ -22,6 +22,13 @@ struct SidecarBridgePadApp: App {
                 ) { _ in
                     model.appWillResignActive()
                 }
+                .onReceive(
+                    NotificationCenter.default.publisher(
+                        for: UIApplication.didEnterBackgroundNotification
+                    )
+                ) { _ in
+                    model.appDidEnterBackground()
+                }
                 .onChange(of: scenePhase) { _, phase in model.scenePhaseChanged(phase) }
         }
     }

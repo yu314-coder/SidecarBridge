@@ -232,8 +232,10 @@ enum LANWire {
     }
 
     static func encrypted(_ packet: Data, session: SecurePacketSession) throws -> Data {
-        var payload = Data([encryptedPacket])
-        payload.append(try session.seal(packet))
+        let sealed = try session.seal(packet)
+        var payload = Data(capacity: 1 + sealed.count)
+        payload.append(encryptedPacket)
+        payload.append(sealed)
         return framed(payload)
     }
 
@@ -287,7 +289,7 @@ enum LANWire {
     }
 
     static func framed(_ payload: Data) -> Data {
-        var result = Data()
+        var result = Data(capacity: 4 + payload.count)
         let length = UInt32(payload.count).bigEndian
         withUnsafeBytes(of: length) { result.append(contentsOf: $0) }
         result.append(payload)

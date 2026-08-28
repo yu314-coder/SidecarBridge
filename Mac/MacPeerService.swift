@@ -23,6 +23,8 @@ final class MacPeerService: NSObject {
     var onInput: ((RemoteInputEvent) -> Void)?
     var onFilePacket: ((FileTransferPacket) -> Void)?
     var onKeyFrameNeeded: (() -> Void)?
+    var onVideoBackpressureChanged: ((StreamBackpressureLevel) -> Void)?
+    var onVideoTelemetry: ((MacVideoSendTelemetry) -> Void)?
     var onConnectionChanged: ((Bool, String?) -> Void)?
     var onLocalNetworkStateChanged: ((LocalNetworkAccessState) -> Void)?
     var onListenerStateChanged: ((Bool, String) -> Void)?
@@ -51,6 +53,13 @@ final class MacPeerService: NSObject {
     private var mcVideoInFlight = Set<UInt64>()
     private var pendingMCVideo: [PendingMCVideo] = []
     private var mcWaitingForKeyFrame = false
+    // MultipeerConnectivity does not provide a per-message completion for
+    // `send(_:with: .reliable)`. Keep a small ordered queue and let its
+    // reliable transport preserve the H.264 dependency chain. The former
+    // latest-frame/unreliable path intentionally discarded P-frames, so the
+    // iPad saw sequence gaps, requested an IDR, and displayed only the
+    // periodic 1–2 FPS keyframes.
+    private let maximumMCVideoPending = 24
     private var heartbeatTimer: DispatchSourceTimer?
     private var heartbeatSentAt: [String: TimeInterval] = [:]
     private var lastPeerActivity = ProcessInfo.processInfo.systemUptime
@@ -75,6 +84,12 @@ final class MacPeerService: NSObject {
             self?.onFilePacket?(transfer)
         }
         lan.onKeyFrameNeeded = { [weak self] in self?.onKeyFrameNeeded?() }
+        lan.onVideoBackpressureChanged = { [weak self] level in
+            self?.onVideoBackpressureChanged?(level)
+        }
+        lan.onVideoTelemetry = { [weak self] telemetry in
+            self?.onVideoTelemetry?(telemetry)
+        }
         lan.onLocalNetworkStateChanged = { [weak self] state in
             self?.onLocalNetworkStateChanged?(state)
         }
@@ -200,34 +215,37 @@ final class MacPeerService: NSObject {
             return
         }
 
-        // Multipeer's reliable channel is also used for keyboard, pointer
-        // buttons, shortcuts, and pairing. Queuing H.264 frames there made a
-        // slow nearby link head-of-line-block input. Keep only the newest
-        // frame and send it unreliably; a dropped inter-frame is recovered by
-        // the encoder's periodic/requested key frame instead of blocking the
-        // reliable input channel.
-        if let pendingKeyFrame = pendingMCVideo.last?.isKeyFrame,
-           pendingKeyFrame,
-           !video.isKeyFrame {
+        guard pendingMCVideo.count < maximumMCVideoPending else {
+            // Do not discard an arbitrary P-frame and then continue sending
+            // its children. Clear the bounded tail and wait for one IDR so
+            // the next reliable burst starts a valid decoder chain.
+            pendingMCVideo.removeAll(keepingCapacity: true)
+            mcWaitingForKeyFrame = true
+            onKeyFrameNeeded?()
             return
         }
-        pendingMCVideo = [video]
+        pendingMCVideo.append(video)
         sendNextMCVideoIfPossible()
     }
 
     private func sendNextMCVideoIfPossible() {
         guard mcConnected, !session.connectedPeers.isEmpty else { return }
-        guard let video = pendingMCVideo.popLast() else { return }
+        guard let mcSecureSession else { return }
         do {
-            guard let mcSecureSession else {
-                throw SecurePacketSession.SecurePacketError.invalidEnvelope
+            // Send oldest first. Reliable MC delivery is deliberate here:
+            // dropping a P-frame on the unreliable channel makes every later
+            // P-frame undecodable and causes the visible keyframe-only stall.
+            while !pendingMCVideo.isEmpty,
+                  mcConnected,
+                  !session.connectedPeers.isEmpty {
+                let video = pendingMCVideo.removeFirst()
+                try session.send(
+                    mcSecureSession.seal(video.data),
+                    toPeers: session.connectedPeers,
+                    with: .reliable
+                )
+                mcVideoInFlight.remove(video.sequence)
             }
-            try session.send(
-                mcSecureSession.seal(video.data),
-                toPeers: session.connectedPeers,
-                with: .unreliable
-            )
-            mcVideoInFlight.remove(video.sequence)
         } catch {
             pendingMCVideo.removeAll(keepingCapacity: true)
             mcVideoInFlight.removeAll(keepingCapacity: true)

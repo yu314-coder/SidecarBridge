@@ -865,7 +865,7 @@ struct VideoFrame: Equatable {
         self.sequence = sequence
         self.width = width
         self.height = height
-        self.frameRate = min(max(frameRate, 1), 120)
+        self.frameRate = min(max(frameRate, 1), StreamCadencePolicy.maximumFrameRate)
         self.isKeyFrame = isKeyFrame
         self.parameterSets = parameterSets
         self.sampleData = sampleData
@@ -913,7 +913,8 @@ enum PacketCodec {
                 parameterSets: frame.parameterSets
             ))
             guard header.count <= Int(UInt32.max) else { throw PacketError.invalidVideoFrame }
-            var data = Data([videoMarker])
+            var data = Data(capacity: 1 + 4 + header.count + frame.sampleData.count)
+            data.append(videoMarker)
             let headerLength = UInt32(header.count).bigEndian
             withUnsafeBytes(of: headerLength) { data.append(contentsOf: $0) }
             data.append(header)
@@ -945,26 +946,36 @@ enum PacketCodec {
             guard !payload.isEmpty else { throw PacketError.emptyFrame }
             return .jpeg(Data(payload))
         case videoMarker:
-            let videoData = Data(payload)
+            // Keep the encrypted payload's storage borrowed while parsing the
+            // small header. The old eager copy duplicated every full H.264
+            // frame before the sample-data copy below, creating a large
+            // transient allocation at 60/120 FPS.
+            let videoData = payload
             guard videoData.count >= 5 else { throw PacketError.invalidVideoFrame }
             let headerLength = videoData.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-            let headerEnd = 4 + Int(headerLength)
-            guard headerLength > 0, videoData.count > headerEnd else { throw PacketError.invalidVideoFrame }
-            let header = try JSONDecoder().decode(VideoHeader.self, from: videoData[4..<headerEnd])
+            let headerStart = videoData.index(videoData.startIndex, offsetBy: 4)
+            let headerEnd = videoData.index(headerStart, offsetBy: Int(headerLength), limitedBy: videoData.endIndex)
+            guard headerLength > 0, let headerEnd, headerEnd < videoData.endIndex else {
+                throw PacketError.invalidVideoFrame
+            }
+            let header = try JSONDecoder().decode(
+                VideoHeader.self,
+                from: Data(videoData[headerStart..<headerEnd])
+            )
             guard (1...maximumVideoDimension).contains(header.width),
                   (1...maximumVideoDimension).contains(header.height),
                   header.parameterSets.count <= maximumVideoParameterSetCount,
                   header.parameterSets.allSatisfy({
                       !$0.isEmpty && $0.count <= maximumVideoParameterSetSize
                   }),
-                  videoData.count - headerEnd <= LANWire.maximumPayloadSize else {
+                  videoData.distance(from: headerEnd, to: videoData.endIndex) <= LANWire.maximumPayloadSize else {
                 throw PacketError.invalidVideoFrame
             }
             return .video(VideoFrame(
                 sequence: header.sequence,
                 width: header.width,
                 height: header.height,
-                frameRate: min(max(header.frameRate ?? 30, 1), 120),
+                frameRate: min(max(header.frameRate ?? 30, 1), StreamCadencePolicy.maximumFrameRate),
                 isKeyFrame: header.isKeyFrame,
                 parameterSets: header.parameterSets,
                 sampleData: Data(videoData[headerEnd...])

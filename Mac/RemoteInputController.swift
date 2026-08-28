@@ -798,8 +798,11 @@ final class RemoteInputController {
             "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "return": 36,
             "l": 37, "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43,
             "/": 44, "n": 45, "m": 46, ".": 47, "tab": 48, "space": 49,
-            "`": 50, "delete": 51, "escape": 53, "help": 114, "home": 115,
-            "pageup": 116, "forwarddelete": 117, "end": 119, "pagedown": 121,
+            "`": 50, "delete": 51, "escape": 53, "capslock": 57,
+            "help": 114, "home": 115, "pageup": 116, "forwarddelete": 117,
+            "end": 119, "pagedown": 121,
+            "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97,
+            "f7": 98, "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111,
             "left": 123, "right": 124, "down": 125, "up": 126
         ]
         return map[key.lowercased()]

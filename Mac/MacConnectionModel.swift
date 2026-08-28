@@ -22,6 +22,8 @@ final class MacConnectionModel: ObservableObject {
     @Published var connectionTransport = "Direct P2P preferred"
     @Published var connectionHealthDetail = "Waiting for encrypted link"
     @Published var connectionLatencyMS: Int?
+    @Published var streamMemoryPressure: StreamMemoryPressureLevel = .normal
+    @Published var senderVideoTelemetryDetail = "Not measured"
     @Published var p2pState: MacP2PState = .starting
     @Published var fileTransferSnapshot: FileTransferSnapshot?
     @Published var lastReceivedFile: URL?
@@ -32,7 +34,10 @@ final class MacConnectionModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(automaticClipboardSyncEnabled, forKey: Self.automaticClipboardSyncDefaultsKey)
             if automaticClipboardSyncEnabled {
+                startClipboardMonitoring()
                 reconcileClipboardAfterConnection()
+            } else {
+                stopClipboardMonitoring()
             }
         }
     }
@@ -43,6 +48,17 @@ final class MacConnectionModel: ObservableObject {
     @Published var shutdownProtectionEnabled = true
     @Published var shutdownProtectionActive = false
     @Published var shutdownProtectionDetail = "Ready to preserve remote control during system shutdown."
+    @Published var streamPreferences: StreamPreferences = MacConnectionModel.loadStreamPreferences() {
+        didSet {
+            UserDefaults.standard.set(
+                streamPreferences.resolution.rawValue,
+                forKey: StreamPreferenceStore.resolutionKey
+            )
+            StreamPreferenceStore.saveFrameRate(streamPreferences.frameRate)
+            StreamPreferenceStore.saveUltraMode(streamPreferences.ultraModeEnabled)
+            streamer.setStreamPreferences(streamPreferences)
+        }
+    }
 
     var localNetworkPermissionNeeded: Bool { localNetworkAccess.needsPermission }
 
@@ -101,6 +117,7 @@ final class MacConnectionModel: ObservableObject {
     private var accessibilityPollTask: Task<Void, Never>?
     private var screenRecordingPollTask: Task<Void, Never>?
     private var streamResumeRetentionTask: Task<Void, Never>?
+    private var streamPreferenceRestartTask: Task<Void, Never>?
     private var remoteViewerIsBackgrounded = false
     private var pendingFileURLs: [URL] = []
     private var clipboardMonitorTask: Task<Void, Never>?
@@ -110,16 +127,39 @@ final class MacConnectionModel: ObservableObject {
     private var suppressedClipboardSignature: String?
     private var automaticReceivedFileURLs: [URL] = []
     private let shutdownProtectionDefaultsKey = "shutdownProtectionEnabled"
-    private static let automaticClipboardSyncDefaultsKey = "automaticClipboardSyncEnabled"
+    // Keep clipboard synchronization opt-in.  The iPad counterpart can show
+    // a paste privacy alert for an automatic read, so the live screen must not
+    // inherit an old always-on preference after an upgrade.
+    private static let automaticClipboardSyncDefaultsKey = "automaticClipboardSyncEnabled.v2"
+
+    private static func loadStreamPreferences() -> StreamPreferences {
+        let defaults = UserDefaults.standard
+        let resolution = defaults.string(forKey: StreamPreferenceStore.resolutionKey)
+            .flatMap(StreamResolutionPreference.init(rawValue:))
+            ?? StreamPreferences.defaults.resolution
+        let storedFrameRate = StreamPreferenceStore.loadFrameRate(defaults: defaults)
+        let ultraModeEnabled = StreamPreferenceStore.loadUltraMode(defaults: defaults)
+        let frameRate = ultraModeEnabled || storedFrameRate.rawValue <= StreamCadencePolicy.nearbyFrameRateCeiling
+            ? storedFrameRate
+            : .fps120
+        return StreamPreferences(
+            resolution: resolution,
+            frameRate: frameRate,
+            ultraModeEnabled: ultraModeEnabled
+        )
+    }
 
     init() {
-        automaticClipboardSyncEnabled = UserDefaults.standard.object(
-            forKey: Self.automaticClipboardSyncDefaultsKey
-        ) as? Bool ?? true
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: Self.automaticClipboardSyncDefaultsKey) == nil {
+            defaults.set(false, forKey: Self.automaticClipboardSyncDefaultsKey)
+        }
+        automaticClipboardSyncEnabled = defaults.bool(forKey: Self.automaticClipboardSyncDefaultsKey)
         if UserDefaults.standard.object(forKey: shutdownProtectionDefaultsKey) == nil {
             UserDefaults.standard.set(true, forKey: shutdownProtectionDefaultsKey)
         }
         shutdownProtectionEnabled = UserDefaults.standard.bool(forKey: shutdownProtectionDefaultsKey)
+        streamer.setStreamPreferences(streamPreferences)
         MacPairingSecurity.shared.onPairingCodeChanged = { [weak self] code in
             self?.pairingCode = code
         }
@@ -151,9 +191,48 @@ final class MacConnectionModel: ObservableObject {
             self?.connectionLatencyMS = latency
         }
 
+        streamer.onCaptureRefreshCompleted = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // A monitor can be attached or removed while iPadOS is in the
+                // background. Keep remote input on the same display that the
+                // newly rebuilt ScreenCaptureKit stream is showing.
+                self.remoteInput.setTargetDisplayID(self.streamer.captureDisplayID)
+                self.connectionHealthDetail = "Viewer returned — fresh Mac display frame"
+            }
+        }
+        streamer.onCaptureRefreshFailed = { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.connectionHealthDetail = "Viewer returned — capture refresh delayed"
+                self.detail = "The Mac display is still recovering: \(error.localizedDescription)"
+            }
+        }
+        streamer.onMemoryPressureChanged = { [weak self] level in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.streamMemoryPressure = level
+                guard self.isStreaming,
+                      self.streamer.requiresMediaBoundaryForCurrentMemoryProfile,
+                      !self.streamer.isRefreshingCapture else { return }
+                // Do not gate the iPad on a pressure rebuild. The old gate
+                // waited for a fresh IDR before showing anything, so a busy
+                // encoder could leave the last image apparently frozen even
+                // though input packets were still working. The first keyframe
+                // from the new dimensions is already a decoder boundary; the
+                // viewer switches formats when it receives that frame.
+                self.streamer.refreshCaptureAfterForeground(force: true)
+            }
+        }
+
         peers.onConnectionChanged = { [weak self] connected, peerOrError in
             guard let self else { return }
             self.hasPadPeer = connected
+            if !connected {
+                self.senderVideoTelemetryDetail = "Not measured"
+            } else {
+                self.senderVideoTelemetryDetail = "Waiting for video frames"
+            }
             if connected {
                 self.lastObservedClipboardChangeCount = NSPasteboard.general.changeCount
                 if self.lastObservedClipboardSignature == nil,
@@ -229,6 +308,14 @@ final class MacConnectionModel: ObservableObject {
         peers.onFilePacket = { [weak self] transfer in self?.fileTransfer.handle(transfer) }
         streamer.onFrame = { [weak peers] frame in peers?.sendVideoFrame(frame) }
         peers.onKeyFrameNeeded = { [weak self] in self?.streamer.requestKeyFrame() }
+        peers.onVideoBackpressureChanged = { [weak self] level in
+            self?.streamer.setTransportBackpressure(level)
+        }
+        peers.onVideoTelemetry = { [weak self] telemetry in
+            Task { @MainActor [weak self] in
+                self?.senderVideoTelemetryDetail = telemetry.detail
+            }
+        }
         configureFileTransfer()
         startClipboardMonitoring()
     }
@@ -372,6 +459,53 @@ final class MacConnectionModel: ObservableObject {
             : "Off — SidecarBridge will quit when macOS asks it to."
     }
 
+    func setStreamResolution(_ resolution: StreamResolutionPreference) {
+        streamPreferences = StreamPreferences(
+            resolution: resolution,
+            frameRate: streamPreferences.frameRate,
+            ultraModeEnabled: streamPreferences.ultraModeEnabled
+        )
+        scheduleStreamPreferenceRestartIfNeeded()
+    }
+
+    func setStreamFrameRate(_ frameRate: StreamFrameRatePreference) {
+        streamPreferences = StreamPreferences(
+            resolution: streamPreferences.resolution,
+            frameRate: frameRate,
+            ultraModeEnabled: streamPreferences.ultraModeEnabled
+        )
+        scheduleStreamPreferenceRestartIfNeeded()
+    }
+
+    private func scheduleStreamPreferenceRestartIfNeeded() {
+        guard isStreaming, hasPadPeer, !isStartingFallback else { return }
+        streamPreferenceRestartTask?.cancel()
+        detail = "Applying the new display profile…"
+        streamPreferenceRestartTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, let self, self.isStreaming, self.hasPadPeer else { return }
+            self.streamPreferenceRestartTask = nil
+            if self.streamer.requiresMediaBoundaryForCurrentPreferences {
+                // Tell the iPad to discard the old decoder dependency chain
+                // before the resized capture source starts. The secure input
+                // session remains alive and the encoder sequence is preserved.
+                self.peers.send(ControlMessage(.status, detail: StreamSessionSignal.videoRefresh))
+            }
+            do {
+                try await self.streamer.applyStreamPreferences()
+                guard !Task.isCancelled, self.hasPadPeer else { return }
+                self.remoteInput.setTargetDisplayID(self.streamer.captureDisplayID)
+                self.status = "Streaming to iPad"
+                self.detail = "Display profile applied without reconnecting the control session."
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.status = "App stream needs attention"
+                self.detail = "The new display profile could not be applied: \(error.localizedDescription)"
+                self.peers.send(ControlMessage(.status, detail: "fallback-error:\(error.localizedDescription)"))
+            }
+        }
+    }
+
     func updateShutdownProtection(active: Bool, blockingApplications: [String]) {
         shutdownProtectionActive = active
         if blockingApplications.isEmpty {
@@ -399,6 +533,8 @@ final class MacConnectionModel: ObservableObject {
         screenRecordingPollTask = nil
         streamResumeRetentionTask?.cancel()
         streamResumeRetentionTask = nil
+        streamPreferenceRestartTask?.cancel()
+        streamPreferenceRestartTask = nil
         clipboardMonitorTask?.cancel()
         clipboardMonitorTask = nil
         attemptID = UUID()
@@ -468,11 +604,18 @@ final class MacConnectionModel: ObservableObject {
             remoteViewerIsBackgrounded = false
             streamer.setViewerBackgrounded(false)
             streamer.setWaitingForViewerResume(false)
-            streamer.requestKeyFrame()
+            // An explicit reconnect can arrive before (or without) the
+            // iPad's viewer-foreground status when the old socket was
+            // suspended. Recreate the Mac capture source here as well as in
+            // the lifecycle-status handler; otherwise input can recover
+            // while ScreenCaptureKit keeps encoding the pre-background
+            // surface. The refresh preserves the packet sequence and emits a
+            // fresh IDR from the new source.
+            streamer.refreshCaptureAfterForeground()
             refreshPermissions()
             sendRemoteInputPermissionStatus()
             status = "Streaming to iPad"
-            detail = "Resumed the retained encrypted app stream."
+            detail = "Refreshing the Mac display for the resumed encrypted stream."
             peers.send(ControlMessage(.status, detail: "fallback-active"))
             return
         }
@@ -532,6 +675,7 @@ final class MacConnectionModel: ObservableObject {
         streamer.setViewerBackgrounded(false)
         streamer.stop()
         remoteInput.setTargetDisplayID(nil)
+        streamMemoryPressure = .normal
         isStartingFallback = false
         isStreaming = false
     }
@@ -550,7 +694,7 @@ final class MacConnectionModel: ObservableObject {
         streamer.setWaitingForViewerResume(true)
         connectionHealthDetail = "Viewer suspended — stream retained for fast resume"
         status = "Waiting for iPad to return"
-        detail = "Keeping a low-power capture session ready for five minutes."
+        detail = "Keeping the encrypted capture session ready with a 60-FPS target for five minutes."
 
         streamResumeRetentionTask = Task { [weak self] in
             try? await Task.sleep(
@@ -567,6 +711,12 @@ final class MacConnectionModel: ObservableObject {
     private func cancelStreamResumeRetention() {
         streamResumeRetentionTask?.cancel()
         streamResumeRetentionTask = nil
+        // A reconnect callback can arrive before the explicit
+        // `viewer-foreground` control message. Clear the retained-background
+        // state here too, otherwise the capture cadence can remain in resume
+        // mode while the input socket has already been restored.
+        remoteViewerIsBackgrounded = false
+        streamer.setViewerBackgrounded(false)
         streamer.setWaitingForViewerResume(false)
     }
 
@@ -718,16 +868,23 @@ final class MacConnectionModel: ObservableObject {
     }
 
     private func startClipboardMonitoring() {
-        guard clipboardMonitorTask == nil else { return }
+        guard automaticClipboardSyncEnabled, clipboardMonitorTask == nil else { return }
         lastObservedClipboardChangeCount = NSPasteboard.general.changeCount
-        lastObservedClipboardSignature = clipboardSignature()
+        lastObservedClipboardSignature = nil
         clipboardMonitorTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                self.observeClipboardChange()
-                try? await Task.sleep(for: .milliseconds(250))
+                if self.hasPadPeer, !self.isStreaming {
+                    self.observeClipboardChange()
+                }
+                try? await Task.sleep(for: .milliseconds(500))
             }
         }
+    }
+
+    private func stopClipboardMonitoring() {
+        clipboardMonitorTask?.cancel()
+        clipboardMonitorTask = nil
     }
 
     /// Preserve a local copy made while the peer was reconnecting or the
@@ -758,6 +915,9 @@ final class MacConnectionModel: ObservableObject {
     }
 
     private func observeClipboardChange() {
+        // Keep pasteboard work away from the screen capture/input cadence.
+        // Clipboard buttons remain available for an intentional one-shot read.
+        guard hasPadPeer, automaticClipboardSyncEnabled, !isStreaming else { return }
         let changeCount = NSPasteboard.general.changeCount
         guard changeCount != lastObservedClipboardChangeCount else { return }
         lastObservedClipboardChangeCount = changeCount
@@ -782,7 +942,7 @@ final class MacConnectionModel: ObservableObject {
             pendingClipboardSignature = nil
             return
         }
-        guard hasPadPeer, automaticClipboardSyncEnabled else {
+        guard hasPadPeer, automaticClipboardSyncEnabled, !isStreaming else {
             // Keep a copy made while the peer is reconnecting or automatic
             // sync is paused. The next connection/toggle flushes the current
             // value instead of treating it as already delivered.
@@ -804,6 +964,7 @@ final class MacConnectionModel: ObservableObject {
                 "Round-trip latency",
                 connectionLatencyMS.map { "\($0) ms" } ?? "Not measured"
             ),
+            DiagnosticField("Mac sender video", senderVideoTelemetryDetail),
             DiagnosticField("Link health", connectionHealthDetail),
             DiagnosticField(
                 "Local Network permission",
@@ -999,10 +1160,23 @@ final class MacConnectionModel: ObservableObject {
     private func handle(_ command: ControlMessage) {
         switch command.kind {
         case .hello:
-            if let detail = command.detail,
-               detail.hasPrefix("display-width:"),
-               let width = Int(detail.dropFirst("display-width:".count)) {
-                streamer.setPreferredWidth(width)
+            if let detail = command.detail {
+                if detail.hasPrefix("display-width:") {
+                    let widthPart = detail
+                        .dropFirst("display-width:".count)
+                        .split(separator: ";", maxSplits: 1)
+                        .first
+                    if let widthPart, let width = Int(widthPart) {
+                        streamer.setPreferredWidth(width)
+                    }
+                } else if let preferences = StreamPreferences.parse(detail) {
+                    streamPreferences = preferences
+                    // The preference is read before the next capture starts.
+                    // Avoid tearing down a live encoder from a control packet;
+                    // the iPad UI tells the user that the next stream uses it.
+                    streamer.setStreamPreferences(preferences)
+                    scheduleStreamPreferenceRestartIfNeeded()
+                }
             }
         case .trySidecar:
             refreshDevices()
@@ -1026,8 +1200,18 @@ final class MacConnectionModel: ObservableObject {
                     peers.setRemoteViewerBackgrounded(false)
                     streamer.setViewerBackgrounded(false)
                     if isStreaming {
-                        streamer.requestKeyFrame()
+                        // Recreate the ScreenCaptureKit source instead of
+                        // continuing to encode the surface retained while the
+                        // iPad app was backgrounded. The existing encrypted
+                        // socket and input pipeline stay alive during this
+                        // short presentation-only refresh.
+                        streamer.refreshCaptureAfterForeground()
                     }
+                } else if detail == "video-keyframe-needed" {
+                    // The iPad detected a sequence gap or a decoder queue
+                    // reset. Recover immediately instead of waiting for the
+                    // next periodic IDR frame.
+                    streamer.requestKeyFrame()
                 }
             }
         case .input:

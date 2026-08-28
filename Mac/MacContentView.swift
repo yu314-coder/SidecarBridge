@@ -21,11 +21,21 @@ struct MacContentView: View {
             )
             .ignoresSafeArea()
 
+            RadialGradient(
+                colors: [.cyan.opacity(0.12), .clear],
+                center: .topTrailing,
+                startRadius: 10,
+                endRadius: 520
+            )
+            .ignoresSafeArea()
+
             ScrollView {
                 VStack(spacing: 18) {
                     header
                     statusCard
+                    dashboardOverviewCard
                     quickActionsCard
+                    streamPerformanceCard
                     modeCards
                     fileTransferCard
                     clipboardCard
@@ -130,14 +140,77 @@ struct MacContentView: View {
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.08)))
     }
 
-    private var quickActionsCard: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                quickActionButtons
-                Spacer(minLength: 0)
+    private var dashboardOverviewCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Label("At a glance", systemImage: "rectangle.3.group")
+                    .font(.headline)
+                Spacer()
+                Text(model.hasPadPeer ? "Secure local session" : "Ready for a local session")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.46))
             }
-            VStack(alignment: .leading, spacing: 10) {
-                quickActionButtons
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 175), spacing: 10)],
+                spacing: 10
+            ) {
+                DashboardMetric(
+                    icon: "network",
+                    title: "Route",
+                    value: model.hasPadPeer ? "Connected" : "Waiting",
+                    detail: model.hasPadPeer ? model.connectionTransport : "Wi-Fi / nearby P2P",
+                    tint: model.hasPadPeer ? .green : .cyan
+                )
+                DashboardMetric(
+                    icon: "display",
+                    title: "Display",
+                    value: model.isStreaming ? "Live" : "Idle",
+                    detail: model.isStreaming
+                        ? "\(model.streamPreferences.resolution.title) • \(model.streamPreferences.frameRate.rawValue) FPS target"
+                        : "Start when the iPad is ready",
+                    tint: model.isStreaming ? .green : .purple
+                )
+                DashboardMetric(
+                    icon: "keyboard",
+                    title: "Remote input",
+                    value: model.remoteInputAuthorized ? "Ready" : "Needs access",
+                    detail: model.remoteInputAuthorized ? "Keyboard + trackpad enabled" : "Accessibility permission",
+                    tint: model.remoteInputAuthorized ? .green : .orange
+                )
+                DashboardMetric(
+                    icon: "waveform.path.ecg",
+                    title: "Latency",
+                    value: model.connectionLatencyMS.map { "\($0) ms" } ?? "—",
+                    detail: model.hasPadPeer ? model.connectionHealthDetail : "Waiting for encrypted link",
+                    tint: model.connectionLatencyMS == nil ? .white.opacity(0.55) : .cyan
+                )
+            }
+        }
+        .padding(16)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
+    }
+
+    private var quickActionsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Label("Quick actions", systemImage: "bolt.fill")
+                    .font(.headline)
+                Spacer()
+                Text("Common controls stay one click away")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.44))
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    quickActionButtons
+                    Spacer(minLength: 0)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    quickActionButtons
+                }
             }
         }
         .padding(14)
@@ -190,31 +263,129 @@ struct MacContentView: View {
     }
 
     private var modeCards: some View {
-        HStack(spacing: 14) {
-            ModeCard(
-                icon: "cursorarrow.motionlines",
-                title: "In-App Display",
-                subtitle: "Recommended",
-                description: inAppDisplayDescription,
-                tint: .cyan,
-                buttonTitle: model.isStreaming ? "Streaming" : "Start App Stream",
-                isPrimary: true,
-                isDisabled: !model.hasPadPeer || model.isStreaming,
-                action: model.startFallback
-            )
-
-            ModeCard(
-                icon: "rectangle.connected.to.line.below",
-                title: systemDisplayTitle,
-                subtitle: "Public system UI",
-                description: systemDisplayDescription,
-                tint: .purple,
-                buttonTitle: "Open Displays Settings",
-                isPrimary: false,
-                isDisabled: false,
-                action: model.trySidecarNow
-            )
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                modeCardContents
+            }
+            VStack(spacing: 14) {
+                modeCardContents
+            }
         }
+    }
+
+    @ViewBuilder
+    private var modeCardContents: some View {
+        ModeCard(
+            icon: "cursorarrow.motionlines",
+            title: "In-App Display",
+            subtitle: "Recommended",
+            description: inAppDisplayDescription,
+            tint: .cyan,
+            buttonTitle: model.isStreaming ? "Streaming" : "Start App Stream",
+            isPrimary: true,
+            isDisabled: !model.hasPadPeer || model.isStreaming,
+            action: model.startFallback
+        )
+
+        ModeCard(
+            icon: "rectangle.connected.to.line.below",
+            title: systemDisplayTitle,
+            subtitle: "Public system UI",
+            description: systemDisplayDescription,
+            tint: .purple,
+            buttonTitle: "Open Displays Settings",
+            isPrimary: false,
+            isDisabled: false,
+            action: model.trySidecarNow
+        )
+    }
+
+    private var streamPerformanceCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: "gauge.with.needle")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.cyan)
+                    .frame(width: 44, height: 44)
+                    .background(.cyan.opacity(0.13), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Stream performance")
+                        .font(.headline)
+                    Text("Choose the target sent by this Mac when the iPad does not provide its own profile.")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.56))
+                }
+            }
+
+            HStack(spacing: 14) {
+                Picker("Quality", selection: Binding(
+                    get: { model.streamPreferences.resolution },
+                    set: { model.setStreamResolution($0) }
+                )) {
+                    ForEach(StreamResolutionPreference.allCases) { preference in
+                        Text(preference.title).tag(preference)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Picker("Frame rate", selection: Binding(
+                    get: { model.streamPreferences.frameRate },
+                    set: { model.setStreamFrameRate($0) }
+                )) {
+                    ForEach(availableFrameRatePreferences) { preference in
+                        Text(preference.title).tag(preference)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            if model.streamPreferences.ultraModeEnabled {
+                Label("Ultra profile received from iPad Developer options", systemImage: "bolt.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(.orange)
+            }
+
+            Text("\(model.streamPreferences.resolution.detail) \(model.streamPreferences.ultraModeEnabled ? "Ultra foreground P2P can target up to 240 FPS and 2K capture." : "Direct local links and nearby P2P can target up to 120 FPS.") The actual rate can be lower than the target when the display, memory pressure, or link cannot sustain it.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.52))
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Image(systemName: "gauge.with.needle")
+                    .foregroundStyle(.green)
+                Text("Live cadence target: at least 60 FPS when the display and link can sustain it; bounded queues shed stale work before latency grows.")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: model.streamMemoryPressure == .normal
+                    ? "memorychip"
+                    : "exclamationmark.triangle.fill")
+                    .foregroundStyle(model.streamMemoryPressure == .normal ? .green : .orange)
+                Text(model.streamMemoryPressure.detail(ultraModeEnabled: model.streamPreferences.ultraModeEnabled))
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "waveform.path.ecg")
+                    .foregroundStyle(.cyan)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Mac sender telemetry")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.62))
+                    Text(model.senderVideoTelemetryDetail)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.5))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(17)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
     }
 
     private var permissionCard: some View {
@@ -416,32 +587,34 @@ struct MacContentView: View {
                     .background(.purple.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Clipboard transfer").font(.headline)
-                    Text("Copy on either device and it syncs automatically while connected. No send button is needed; the buttons below are a manual fallback.")
+                    Text("Manual clipboard actions never interrupt live video. Automatic sync is optional and paused while streaming.")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.58))
                 }
             }
 
-            Toggle("Automatic text and file sync", isOn: $model.automaticClipboardSyncEnabled)
+            Toggle("Auto-send copied text and files", isOn: $model.automaticClipboardSyncEnabled)
                 .toggleStyle(.switch)
 
-            HStack(spacing: 10) {
-                Button {
-                    model.requestPadClipboard()
-                } label: {
-                    Label("Receive Clipboard", systemImage: "arrow.down.doc")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.purple)
-                .disabled(!model.hasPadPeer)
+            DisclosureGroup("Manual clipboard actions") {
+                HStack(spacing: 10) {
+                    Button {
+                        model.requestPadClipboard()
+                    } label: {
+                        Label("Receive Clipboard", systemImage: "arrow.down.doc")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.purple)
+                    .disabled(!model.hasPadPeer)
 
-                Button {
-                    model.sendClipboardToPad()
-                } label: {
-                    Label("Send Clipboard", systemImage: "arrow.up.doc")
+                    Button {
+                        model.sendClipboardToPad()
+                    } label: {
+                        Label("Send Clipboard", systemImage: "arrow.up.doc")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!model.hasPadPeer)
                 }
-                .buttonStyle(.bordered)
-                .disabled(!model.hasPadPeer)
             }
 
             Text(model.clipboardTransferStatus)
@@ -607,6 +780,15 @@ struct MacContentView: View {
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
     }
 
+    private var availableFrameRatePreferences: [StreamFrameRatePreference] {
+        if model.streamPreferences.ultraModeEnabled {
+            return StreamFrameRatePreference.allCases
+        }
+        return StreamFrameRatePreference.allCases.filter {
+            $0.rawValue <= StreamCadencePolicy.nearbyFrameRateCeiling
+        }
+    }
+
     private var footer: some View {
         HStack {
             Label("Local and encrypted", systemImage: "lock.fill")
@@ -681,6 +863,44 @@ private struct ModeCard: View {
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(tint.opacity(0.22)))
+    }
+}
+
+private struct DashboardMetric: View {
+    let icon: String
+    let title: String
+    let value: String
+    let detail: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 32, height: 32)
+                .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title.uppercased())
+                    .font(.caption2.bold())
+                    .tracking(0.7)
+                    .foregroundStyle(.white.opacity(0.46))
+                Text(value)
+                    .font(.callout.bold())
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.48))
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, minHeight: 66, alignment: .leading)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(.black.opacity(0.15), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 13).stroke(tint.opacity(0.14)))
     }
 }
 

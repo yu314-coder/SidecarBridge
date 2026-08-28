@@ -7,11 +7,10 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.2"
-    # App Store Connect requires a monotonically increasing build number for
-    # each platform. The last uploaded Mac build is 62, so 63 is the next
-    # valid Mac build for marketing version 1.2.
-    CURRENT_PROJECT_VERSION: "63"
+    MARKETING_VERSION: "1.3"
+    # App Store Connect requires the build number to increase across uploads.
+    # macOS 1.3 upload: build 88. Keep this sequence independent from iPadOS.
+    CURRENT_PROJECT_VERSION: "88"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -74,6 +73,12 @@ targets:
           - _sb-direct._tcp
         NSLocalNetworkUsageDescription: SidecarBridge finds your Mac and receives its screen over your local network.
         UIApplicationSupportsIndirectInputEvents: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneClassName: UIWindowScene
+                UISceneConfigurationName: Default Configuration
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         UISupportedInterfaceOrientations:
@@ -90,11 +95,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
         PRODUCT_NAME: SidecarBridge
-        MARKETING_VERSION: "1.2"
-        # iOS/iPadOS 1.2 build 73 is the update users should see in
-        # TestFlight/App Store Connect. The Mac target keeps its independent
-        # monotonically increasing sequence at build 63.
-        CURRENT_PROJECT_VERSION: "73"
+        MARKETING_VERSION: "1.3"
+        # iPadOS 1.3 upload: build 6. Keep this sequence independent from macOS.
+        CURRENT_PROJECT_VERSION: "6"
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO

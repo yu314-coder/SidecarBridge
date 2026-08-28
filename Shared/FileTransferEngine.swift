@@ -50,7 +50,13 @@ struct FileTransferSnapshot: Equatable {
 @MainActor
 final class FileTransferEngine {
     static let maximumFileSize: Int64 = 512 * 1024 * 1024
-    static let chunkSize = 128 * 1024
+    // MultipeerConnectivity's reliable data channel has a substantially
+    // smaller message limit than the direct TCP path. The payload is JSON
+    // encoded (including base64 for Data) and then encrypted, so a 128-KB
+    // raw chunk can exceed that limit and fail only on nearby P2P. Keep the
+    // shared chunk below 90 KB after encoding, leaving room for framing and
+    // the encrypted envelope on both transports.
+    static let chunkSize = 48 * 1024
     private static let idleTimeout: Duration = .seconds(45)
 
     var sendPacket: ((FileTransferPacket) -> Void)?

@@ -73,6 +73,284 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(try PacketCodec.decode(data), .control(input))
     }
 
+    func testStreamPreferencesRoundTrip() {
+        XCTAssertEqual(StreamPreferences.defaults.frameRate, .fps120)
+        let preferences = StreamPreferences(
+            resolution: .twoK,
+            frameRate: .fps120
+        )
+        XCTAssertEqual(
+            StreamPreferences.parse(preferences.encodedDetail),
+            preferences
+        )
+        XCTAssertEqual(
+            StreamPreferences.parse(
+                "stream-preferences:resolution=2k;fps=120;future-capability=yes"
+            ),
+            preferences
+        )
+        XCTAssertEqual(
+            StreamPreferences.parse("stream-preferences:resolution=2k;fps=240;ultra=1"),
+            StreamPreferences(
+                resolution: .twoK,
+                frameRate: .fps240,
+                ultraModeEnabled: true
+            )
+        )
+    }
+
+    func testStreamPreferencesRejectIncompleteOrUnknownValues() {
+        XCTAssertNil(StreamPreferences.parse("stream-preferences:resolution=2k"))
+        XCTAssertNil(StreamPreferences.parse("stream-preferences:resolution=8k;fps=120"))
+        XCTAssertNil(StreamPreferences.parse("stream-preferences:resolution=2k;fps=240"))
+    }
+
+    func testStreamPreferenceStoreUpgradesOnlyTheLegacyImplicit60Default() {
+        let suiteName = "SidecarBridge.StreamPreferenceStore.\(UUID().uuidString)"
+        let defaults = try! XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(StreamFrameRatePreference.fps60.rawValue, forKey: StreamPreferenceStore.frameRateKey)
+        XCTAssertEqual(StreamPreferenceStore.loadFrameRate(defaults: defaults), .fps120)
+
+        StreamPreferenceStore.saveFrameRate(.fps60, defaults: defaults)
+        XCTAssertEqual(StreamPreferenceStore.loadFrameRate(defaults: defaults), .fps60)
+    }
+
+    func testStreamCadenceNeverSelectsAnIntentionalSub60Rate() {
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 60,
+                displayRefreshRate: 60,
+                isNearby: false,
+                viewerIsBackgrounded: true,
+                waitingForViewerResume: true
+            ),
+            60
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 120,
+                displayRefreshRate: 120,
+                isNearby: false,
+                viewerIsBackgrounded: true,
+                waitingForViewerResume: false
+            ),
+            60
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 120,
+                displayRefreshRate: 120,
+                isNearby: false,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false
+            ),
+            120
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 120,
+                displayRefreshRate: 120,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false
+            ),
+            120
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 90,
+                displayRefreshRate: 120,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false
+            ),
+            90
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 120,
+                displayRefreshRate: 120,
+                isNearby: false,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                memoryPressure: .warning
+            ),
+            60
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 120,
+                displayRefreshRate: 120,
+                isNearby: false,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                memoryPressure: .critical
+            ),
+            60
+        )
+        XCTAssertEqual(StreamMemoryPressureLevel.warning.bitrateMultiplier, 0.22)
+        XCTAssertEqual(StreamMemoryPressureLevel.critical.bitrateMultiplier, 0.10)
+        XCTAssertEqual(StreamMemoryPressureLevel.warning.captureWidthCeiling, 1920)
+        XCTAssertEqual(StreamMemoryPressureLevel.critical.captureWidthCeiling, 1280)
+        XCTAssertNil(StreamMemoryPressureLevel.normal.captureWidthCeiling)
+    }
+
+    func testUltraCadenceRaisesOnlyTheNearbyHealthyPath() {
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 60,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false
+            ),
+            120
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 60,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                ultraModeEnabled: true
+            ),
+            240
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 60,
+                isNearby: false,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                ultraModeEnabled: true
+            ),
+            60
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 240,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                memoryPressure: .warning,
+                ultraModeEnabled: true
+            ),
+            120
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 240,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                memoryPressure: .critical,
+                ultraModeEnabled: true
+            ),
+            90
+        )
+        XCTAssertEqual(
+            StreamMemoryPressureLevel.frameRateCeiling(.warning, ultraModeEnabled: true),
+            120
+        )
+        XCTAssertEqual(
+            StreamMemoryPressureLevel.frameRateCeiling(.critical, ultraModeEnabled: true),
+            90
+        )
+    }
+
+    func testUltraCadenceKeepsHighRateDuringTransientTransportPressure() {
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 120,
+                displayRefreshRate: 60,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                backpressure: .constrained,
+                ultraModeEnabled: true
+            ),
+            120
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 120,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                backpressure: .severe,
+                ultraModeEnabled: true
+            ),
+            90
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.backpressureFrameRateCeiling(.constrained, ultraModeEnabled: true),
+            120
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.backpressureFrameRateCeiling(.severe, ultraModeEnabled: true),
+            90
+        )
+    }
+
+    func testBackpressureOnlyLowersCadenceAsNeeded() {
+        XCTAssertEqual(StreamBackpressureLevel.normal.frameRateCeiling, 120)
+        XCTAssertEqual(StreamBackpressureLevel.constrained.frameRateCeiling, 60)
+        XCTAssertEqual(StreamBackpressureLevel.severe.frameRateCeiling, 60)
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 120,
+                displayRefreshRate: 120,
+                isNearby: false,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                backpressure: .constrained
+            ),
+            60
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 120,
+                displayRefreshRate: 120,
+                isNearby: false,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                backpressure: .severe
+            ),
+            60
+        )
+    }
+
+    func testDecoderQueueStaysNearLiveEdge() {
+        XCTAssertEqual(StreamCadencePolicy.decoderQueueDepth(for: 30), 12)
+        XCTAssertEqual(StreamCadencePolicy.decoderQueueDepth(for: 60), 12)
+        XCTAssertEqual(StreamCadencePolicy.decoderQueueDepth(for: 120), 16)
+        XCTAssertEqual(
+            StreamCadencePolicy.decoderQueueDepth(for: 2),
+            StreamCadencePolicy.decoderQueueDepth(for: 60)
+        )
+    }
+
+    func testHighCadenceTransportWindowsStayBounded() {
+        XCTAssertEqual(StreamCadencePolicy.senderInFlightWindow(for: 60), 8)
+        XCTAssertEqual(StreamCadencePolicy.senderInFlightWindow(for: 120), 12)
+        XCTAssertEqual(StreamCadencePolicy.senderPendingWindow(for: 120), 13)
+        XCTAssertEqual(StreamCadencePolicy.receiverPendingWindow(for: 120), 24)
+        XCTAssertEqual(StreamCadencePolicy.senderStallTimeout, 4.0)
+        XCTAssertEqual(StreamCadencePolicy.captureQueueDepth(for: 120), 3)
+        XCTAssertEqual(StreamCadencePolicy.captureQueueDepth(for: 240), 4)
+        XCTAssertEqual(StreamCadencePolicy.decoderQueueDepth(for: 240), 24)
+        XCTAssertEqual(StreamCadencePolicy.senderInFlightWindow(for: 240), 16)
+        XCTAssertEqual(StreamCadencePolicy.senderPendingWindow(for: 240), 17)
+        XCTAssertEqual(StreamCadencePolicy.receiverPendingWindow(for: 240), 36)
+    }
+
     func testHeartbeatRoundTrip() throws {
         let heartbeat = ControlMessage(.status, detail: "heartbeat-ping:test-token")
         XCTAssertEqual(
@@ -145,6 +423,24 @@ final class PacketCodecTests: XCTestCase {
     }
 
     @MainActor
+    func testFileTransferChunkFitsNearbyReliableMessageBudget() throws {
+        let transfer = FileTransferPacket(
+            kind: .chunk,
+            transferID: UUID(),
+            name: nil,
+            totalSize: nil,
+            offset: 0,
+            payload: Data(repeating: 0xA5, count: FileTransferEngine.chunkSize),
+            message: nil,
+            sha256: nil
+        )
+        let encoded = try PacketCodec.encode(.file(transfer))
+        // Keep the JSON/base64 packet comfortably below MultipeerConnectivity
+        // reliable-data limits before encryption adds its envelope.
+        XCTAssertLessThan(encoded.count, 90 * 1024)
+    }
+
+    @MainActor
     func testChunkedFileTransferRoundTrip() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/TestTransfers/\(UUID().uuidString)", isDirectory: true)
@@ -172,6 +468,39 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertFalse(receiver.isBusy)
         XCTAssertFalse(
             try FileManager.default.contentsOfDirectory(atPath: receiverDirectory.path)
+                .contains(where: { $0.hasSuffix(".partial") })
+        )
+    }
+
+    @MainActor
+    func testChunkedFileTransferRoundTripInReverseDirection() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/TestTransfers/\(UUID().uuidString)", isDirectory: true)
+        let macDirectory = root.appendingPathComponent("mac", isDirectory: true)
+        let padDirectory = root.appendingPathComponent("pad", isDirectory: true)
+        try FileManager.default.createDirectory(at: macDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: padDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let original = Data((0..<(FileTransferEngine.chunkSize * 2 + 17)).map { UInt8(($0 * 7) % 251) })
+        let source = padDirectory.appendingPathComponent("from-ipad.dat")
+        try original.write(to: source)
+
+        let padSender = FileTransferEngine { padDirectory }
+        let macReceiver = FileTransferEngine { macDirectory }
+        padSender.sendPacket = { macReceiver.handle($0) }
+        macReceiver.sendPacket = { padSender.handle($0) }
+
+        var receivedURL: URL?
+        macReceiver.onReceived = { receivedURL = $0 }
+        padSender.sendFile(at: source)
+
+        let destination = try XCTUnwrap(receivedURL)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+        XCTAssertFalse(padSender.isBusy)
+        XCTAssertFalse(macReceiver.isBusy)
+        XCTAssertFalse(
+            try FileManager.default.contentsOfDirectory(atPath: macDirectory.path)
                 .contains(where: { $0.hasSuffix(".partial") })
         )
     }
