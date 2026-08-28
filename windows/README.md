@@ -56,6 +56,15 @@ cmake --build windows\build\x64 --config Release
 windows\build\x64\Release\SidecarBridgeWindows.exe
 ```
 
+For a 32-bit x86 build, use the Win32 preset (and the x86 WebView2 and
+OpenSSL libraries):
+
+```powershell
+cmake --preset windows-x86
+cmake --build windows\build\x86 --config Release
+windows\build\x86\Release\SidecarBridgeWindows.exe
+```
+
 If you do not want to use the preset, the equivalent configure command is:
 
 ```powershell
@@ -68,6 +77,10 @@ cmake -S windows -B windows\build\x64 `
 The post-build step copies `web/` beside the executable. The host maps that
 folder to the local virtual host `https://app.sidecarbridge.local/`; no remote
 website or public network is needed for the UI.
+
+The x86 executable must be paired with x86 `WebView2Loader.dll`, x86 OpenSSL
+`libcrypto`, and an x86 fixed WebView2 runtime when using a portable bundle.
+Do not mix x64 DLLs with the x86 executable.
 
 ## Portable release bundle
 

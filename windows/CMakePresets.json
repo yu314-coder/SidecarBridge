@@ -11,6 +11,17 @@
         "CMAKE_CXX_STANDARD": "17",
         "WEBVIEW2_SDK_DIR": "$env{WEBVIEW2_SDK_DIR}"
       }
+    },
+    {
+      "name": "windows-x86",
+      "displayName": "SidecarBridge Windows x86",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build/x86",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "17",
+        "WEBVIEW2_SDK_DIR": "$env{WEBVIEW2_SDK_DIR}"
+      }
     }
   ],
   "buildPresets": [
@@ -22,6 +33,11 @@
     {
       "name": "windows-x64-release",
       "configurePreset": "windows-x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-x86-release",
+      "configurePreset": "windows-x86",
       "configuration": "Release"
     }
   ]
