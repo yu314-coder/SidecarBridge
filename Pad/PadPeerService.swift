@@ -18,6 +18,7 @@ final class PadPeerService: NSObject {
     private var session: MCSession
     private var browser: MCNearbyServiceBrowser?
     private var invitedPeers = Set<String>()
+    private var rejectedPeers = Set<String>()
     private let lan = PadLANService()
     private var mcConnected = false
     private var lanConnected = false
@@ -53,9 +54,14 @@ final class PadPeerService: NSObject {
     private var multipeerDiscoveredMacs: [String: MCPeerID] = [:]
     private var multipeerDiscoveredHosts: [String: [String]] = [:]
     private var selectedMacName: String?
+    private var expectedMacID: String?
     // Finding a peer is not consent to invite it. This is enabled only by the
     // explicit Connect action in PadConnectionModel.
     private var userRequestedConnection = false
+    // Code-first pairing has no selected device name yet. Keep the explicit
+    // code authoritative while LAN/AWDL locate a route and the Mac identity
+    // is learned from the authenticated handshake.
+    private var codeFirstPairingRequested = false
 
     // Video callbacks arrive on the LAN/Multipeer queues while the display
     // layer is main-thread bound. JPEG fallback frames are independent and
@@ -101,6 +107,7 @@ final class PadPeerService: NSObject {
             self?.onLocalNetworkStateChanged?(state)
         }
         lan.onPairingCodeRequired = { [weak self] macName, error in
+            guard self?.userRequestedConnection == true, self?.mcConnected != true else { return }
             self?.fallbackWorkItem?.cancel()
             self?.stopMultipeerFallback()
             self?.onPairingCodeRequired?(macName, error)
@@ -112,6 +119,14 @@ final class PadPeerService: NSObject {
         }
         lan.onConnectionChanged = { [weak self] connected, value in
             guard let self else { return }
+            guard !connected || self.userRequestedConnection else {
+                self.lan.clearSelectedMac()
+                return
+            }
+            guard ConnectionRoutePolicy.shouldApplyLANEvent(
+                wasLANConnected: self.lanConnected,
+                connected: connected, nearbyConnected: self.mcConnected
+            ) else { return }
             // A queued main-actor delivery belongs to the old route. Drop it
             // before publishing the new state so a late callback cannot paint
             // a stale frame after the viewer has been flushed.
@@ -121,6 +136,11 @@ final class PadPeerService: NSObject {
                 self.pendingMultipeerInput.removeAll()
                 self.multipeerInputDrainScheduled = false
                 self.lanPeerName = value
+                if let value, !value.isEmpty {
+                    let name = value.hasPrefix("LAN:") ? String(value.dropFirst("LAN:".count)) : value
+                    if !name.isEmpty { self.selectedMacName = name }
+                }
+                self.codeFirstPairingRequested = false
                 self.fallbackWorkItem?.cancel()
                 self.stopMultipeerFallback()
             } else {
@@ -145,6 +165,7 @@ final class PadPeerService: NSObject {
         // the previous dial consent armed while discovery is rebuilt; a
         // discovered Mac must remain passive until the user taps Connect.
         userRequestedConnection = false
+        codeFirstPairingRequested = false
         selectedMacName = nil
         discardPendingVideoDelivery()
         fallbackWorkItem?.cancel()
@@ -155,8 +176,11 @@ final class PadPeerService: NSObject {
     }
 
     func selectMac(named name: String) {
+        rejectedPeers.removeAll()
         userRequestedConnection = true
+        codeFirstPairingRequested = false
         selectedMacName = name
+        expectedMacID = SavedMacRouteStore.route(named: name)?.macID
         invitedPeers.removeAll()
         lan.setMultipeerAdvertisedHosts(
             multipeerDiscoveredHosts[name] ?? [],
@@ -168,19 +192,44 @@ final class PadPeerService: NSObject {
         }
     }
 
+    /// Starts a first-time connection from the 16-digit code without a
+    /// discovered/selected device card. LAN scans the fixed SidecarBridge
+    /// port, while Multipeer can invite a candidate if AWDL discovers one.
+    func connectWithPairingCode(_ code: String, invitation: PairingInvitation? = nil, host: String? = nil) {
+        rejectedPeers.removeAll()
+        let normalized = PairingCode.normalize(code)
+        guard normalized.count == PairingCode.characterCount else { return }
+        userRequestedConnection = true
+        codeFirstPairingRequested = true
+        selectedMacName = invitation?.name
+        expectedMacID = invitation?.macID
+        submittedMCPairingCode = normalized
+        invitedPeers.removeAll()
+        // A connecting peer is absent from connectedPeers. Retire the old
+        // session unconditionally so a cancelled invitation cannot complete
+        // against the new attempt's ephemeral key or code.
+        mcConnected = false
+        mcPeerName = nil
+        rebuildMultipeerSession()
+        clearPendingMultipeerAuthentication()
+        lan.connectWithPairingCode(normalized, invitation: invitation, host: host)
+        inviteCodeFirstPeerIfAvailable()
+    }
+
     /// Stops discovery from dialing a previously selected Mac. Discovery can
     /// continue publishing device rows; a new connection starts only after
     /// the user selects a row again.
     func clearMacSelection() {
+        rejectedPeers.removeAll()
         userRequestedConnection = false
+        codeFirstPairingRequested = false
         selectedMacName = nil
+        expectedMacID = nil
         invitedPeers.removeAll()
         lan.clearSelectedMac()
-        if mcConnected || !session.connectedPeers.isEmpty {
-            session.disconnect()
-        }
         mcConnected = false
         mcPeerName = nil
+        rebuildMultipeerSession()
         discardPendingVideoDelivery()
         clearPendingMultipeerAuthentication()
     }
@@ -255,15 +304,20 @@ final class PadPeerService: NSObject {
             return
         }
         // Yield to input, SwiftUI, and the display layer between small video
-        // batches. Larger high-cadence batches cut main-queue scheduling
-        // overhead without allowing a burst to monopolize the actor.
+        // batches. At 120 FPS, large eight-frame bursts arrive as a 66-ms
+        // lump; AVSampleBufferDisplayLayer then reaches its pending limit and
+        // the decoder drops to the next IDR. Two-frame bursts keep the live
+        // edge supplied without turning a main-actor scheduling delay into a
+        // visible keyframe-only stream.
         let batchLimit: Int
         let firstPending = pendingVideoDeliveryHead < pendingVideoDeliveries.count
             ? pendingVideoDeliveries[pendingVideoDeliveryHead]
             : nil
         switch firstPending {
+        case .h264(let frame) where frame.frameRate >= 120:
+            batchLimit = 2
         case .h264(let frame) where frame.frameRate >= 90:
-            batchLimit = 8
+            batchLimit = 4
         case .jpeg:
             batchLimit = 1
         default:
@@ -346,7 +400,9 @@ final class PadPeerService: NSObject {
     }
 
     private func invite(_ peerID: MCPeerID, using browser: MCNearbyServiceBrowser) {
-        guard !invitedPeers.contains(peerID.displayName),
+        guard userRequestedConnection, !lanConnected, !mcConnected,
+              !rejectedPeers.contains(peerID.displayName),
+              !invitedPeers.contains(peerID.displayName),
               session.connectedPeers.isEmpty else { return }
         invitedPeers.insert(peerID.displayName)
         let privateKey = Curve25519.KeyAgreement.PrivateKey()
@@ -662,6 +718,8 @@ final class PadPeerService: NSObject {
     }
 
     private func rebuildMultipeerSession() {
+        mcConnectionWatchdog?.cancel()
+        mcConnectionWatchdog = nil
         session.delegate = nil
         session.disconnect()
         session = MCSession(
@@ -685,6 +743,12 @@ final class PadPeerService: NSObject {
                 return
             }
             let clientPublicKey = privateKey.publicKey.rawRepresentation
+            guard expectedMacID == nil || expectedMacID == macID else {
+                rejectedPeers.insert(remotePeer.displayName)
+                session.disconnect()
+                clearPendingMultipeerAuthentication()
+                return
+            }
             do {
                 mcSecureSession = try SecurePacketSession.keyAgreement(
                     privateKey: privateKey,
@@ -738,24 +802,31 @@ final class PadPeerService: NSObject {
                     return
                 }
             }
+            SavedMacRouteStore.remember(
+                macID: macID, name: remotePeer.displayName,
+                hosts: multipeerDiscoveredHosts[remotePeer.displayName] ?? []
+            )
             mcConnectionWatchdog?.cancel()
             mcConnectionWatchdog = nil
             mcConnected = true
             mcPeerName = remotePeer.displayName
+            selectedMacName = remotePeer.displayName
+            codeFirstPairingRequested = false
             clearPendingMultipeerAuthentication()
             reportConnection()
             updateHeartbeatState()
 
         case .rejected:
-            // A saved credential can become stale when the pairing transcript
-            // changes between app versions. Remove only this Mac's entry so a
-            // code submission is actually used on the retry; otherwise the
-            // same rejected credential would be selected again forever.
-            if usedSavedMCCredential, let macID = pendingMCMacID {
-                SecureCredentialStore.remove(account: "pad.mac.\(macID)")
-                usedSavedMCCredential = false
+            // Keep trusted credentials until a replacement is authenticated.
+            if codeFirstPairingRequested && expectedMacID == nil {
+                rejectedPeers.insert(remotePeer.displayName)
+                session.disconnect()
+                clearPendingMultipeerAuthentication()
+                return
             }
+            usedSavedMCCredential = false
             submittedMCPairingCode = nil
+            codeFirstPairingRequested = false
             pendingMCSecret = nil
             onPairingCodeRequired?(
                 remotePeer.displayName,
@@ -776,15 +847,10 @@ final class PadPeerService: NSObject {
               let channelBinding = pendingMCChannelBinding else { return }
 
         let account = "pad.mac.\(macID)"
-        let secret: Data
-        if let credential = SecureCredentialStore.data(account: account) {
-            secret = credential
-            usedSavedMCCredential = true
-        } else if let code = submittedMCPairingCode,
-                  code.count == PairingCode.characterCount {
-            secret = Data(code.utf8)
-            usedSavedMCCredential = false
-        } else {
+        guard let selection = PairingSecretSelection.select(
+            code: submittedMCPairingCode,
+            savedCredential: SecureCredentialStore.data(account: account)
+        ) else {
             onPairingCodeRequired?(
                 remotePeer.displayName,
                 submittedMCPairingCode == nil
@@ -793,6 +859,8 @@ final class PadPeerService: NSObject {
             )
             return
         }
+        let secret = selection.secret
+        usedSavedMCCredential = selection.usedSaved
 
         pendingMCSecret = secret
         let proof = PairingProof.make(
@@ -831,7 +899,9 @@ final class PadPeerService: NSObject {
         pendingMCChannelBinding = nil
         pendingMCSecret = nil
         pendingMCPrivateKey = nil
-        submittedMCPairingCode = nil
+        if !codeFirstPairingRequested {
+            submittedMCPairingCode = nil
+        }
         usedSavedMCCredential = false
         if !mcConnected {
             mcSecureSession = nil
@@ -865,6 +935,21 @@ final class PadPeerService: NSObject {
         fallbackWorkItem = nil
         scheduleMultipeerFallback()
     }
+
+    private func inviteCodeFirstPeerIfAvailable() {
+        guard codeFirstPairingRequested,
+              userRequestedConnection,
+              !lanConnected,
+              !mcConnected,
+              let browser,
+              session.connectedPeers.isEmpty else { return }
+        let candidates = multipeerDiscoveredMacs
+            .sorted { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }
+        guard let candidate = candidates.first(where: {
+            !invitedPeers.contains($0.key) && !rejectedPeers.contains($0.key) && (selectedMacName == nil || selectedMacName == $0.key)
+        }) else { return }
+        invite(candidate.value, using: browser)
+    }
 }
 
 extension PadPeerService: MCNearbyServiceBrowserDelegate {
@@ -881,6 +966,8 @@ extension PadPeerService: MCNearbyServiceBrowserDelegate {
             self.publishDiscoveredMacs()
             if self.userRequestedConnection, self.selectedMacName == name {
                 self.invite(peerID, using: browser)
+            } else if self.userRequestedConnection, self.codeFirstPairingRequested {
+                self.inviteCodeFirstPeerIfAvailable()
             }
         }
     }
@@ -900,7 +987,9 @@ extension PadPeerService: MCNearbyServiceBrowserDelegate {
             browser.delegate = nil
             self.browser = nil
             self.browserRunning = false
-            self.onConnectionChanged?(false, error.localizedDescription)
+            if !self.lanConnected && !self.mcConnected {
+                self.onConnectionChanged?(false, error.localizedDescription)
+            }
             self.scheduleMultipeerFallback()
         }
     }
@@ -921,7 +1010,7 @@ extension PadPeerService: MCSessionDelegate {
             } else {
                 self.mcConnected = false
                 self.mcPeerName = nil
-                self.discardPendingVideoDelivery()
+                if !self.lanConnected { self.discardPendingVideoDelivery() }
                 self.clearPendingMultipeerAuthentication()
                 self.mcConnectionWatchdog?.cancel()
                 self.mcConnectionWatchdog = nil
@@ -930,7 +1019,7 @@ extension PadPeerService: MCSessionDelegate {
                 self.invitedPeers.remove(peerID.displayName)
                 self.restartMultipeerBrowserAfterDisconnect()
             }
-            if state != .connected { self.reportConnection() }
+            if state != .connected && !self.lanConnected { self.reportConnection() }
             self.updateHeartbeatState()
         }
     }

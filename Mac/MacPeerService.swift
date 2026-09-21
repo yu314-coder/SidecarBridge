@@ -15,6 +15,7 @@ enum MacP2PState: Equatable {
 final class MacPeerService: NSObject {
     private struct PendingMCVideo {
         let sequence: UInt64
+        let frameRate: Int
         let isKeyFrame: Bool
         let data: Data
     }
@@ -52,7 +53,12 @@ final class MacPeerService: NSObject {
     private let mcVideoQueue = DispatchQueue(label: "SidecarBridge.MCVideo")
     private var mcVideoInFlight = Set<UInt64>()
     private var pendingMCVideo: [PendingMCVideo] = []
+    private var pendingMCVideoHead = 0
     private var mcWaitingForKeyFrame = false
+    // New iPad builds send cumulative display acknowledgements. Keep the
+    // legacy unpaced behavior until that capability is received so older
+    // viewers do not deadlock the nearby route.
+    private var mcVideoAcknowledgementsEnabled = false
     // MultipeerConnectivity does not provide a per-message completion for
     // `send(_:with: .reliable)`. Keep a small ordered queue and let its
     // reliable transport preserve the H.264 dependency chain. The former
@@ -127,6 +133,8 @@ final class MacPeerService: NSObject {
         stopMultipeerFallback()
         stopHeartbeat()
         lan.stop()
+        lanConnected = false
+        lanPeerName = nil
     }
 
     var hasConnectedPeer: Bool { lanConnected || mcConnected }
@@ -187,6 +195,7 @@ final class MacPeerService: NSObject {
                       let data = try? PacketCodec.encode(.video(frame)) else { return }
                 self.enqueueMCVideo(PendingMCVideo(
                     sequence: frame.sequence,
+                    frameRate: frame.frameRate,
                     isKeyFrame: frame.isKeyFrame,
                     data: data
                 ))
@@ -199,7 +208,10 @@ final class MacPeerService: NSObject {
             lan.acknowledgeVideo(sequence: sequence)
         } else {
             mcVideoQueue.async { [weak self] in
-                guard let self, self.mcVideoInFlight.remove(sequence) != nil else { return }
+                guard let self, self.mcVideoAcknowledgementsEnabled else { return }
+                let acknowledged = self.mcVideoInFlight.filter { $0 <= sequence }
+                guard !acknowledged.isEmpty else { return }
+                self.mcVideoInFlight.subtract(acknowledged)
                 self.sendNextMCVideoIfPossible()
             }
         }
@@ -211,15 +223,33 @@ final class MacPeerService: NSObject {
             guard video.isKeyFrame else { return }
             mcWaitingForKeyFrame = false
             pendingMCVideo = [video]
+            pendingMCVideoHead = 0
             sendNextMCVideoIfPossible()
             return
         }
 
-        guard pendingMCVideo.count < maximumMCVideoPending else {
-            // Do not discard an arbitrary P-frame and then continue sending
-            // its children. Clear the bounded tail and wait for one IDR so
-            // the next reliable burst starts a valid decoder chain.
+        guard pendingMCVideo.count - pendingMCVideoHead < maximumMCVideoPending else {
+            // Never continue with a dependent P-frame after dropping part of
+            // its GOP. If the newest complete IDR is already queued, keep it
+            // and discard only the stale prefix; this recovers the live edge
+            // immediately instead of waiting for another one-second IDR.
+            if video.isKeyFrame {
+                pendingMCVideo = [video]
+                pendingMCVideoHead = 0
+                mcWaitingForKeyFrame = false
+                sendNextMCVideoIfPossible()
+                return
+            }
+            if let keyIndex = pendingMCVideo.lastIndex(where: { $0.isKeyFrame }),
+               keyIndex >= pendingMCVideoHead {
+                pendingMCVideo = Array(pendingMCVideo[keyIndex...])
+                pendingMCVideoHead = 0
+                mcWaitingForKeyFrame = false
+                sendNextMCVideoIfPossible()
+                return
+            }
             pendingMCVideo.removeAll(keepingCapacity: true)
+            pendingMCVideoHead = 0
             mcWaitingForKeyFrame = true
             onKeyFrameNeeded?()
             return
@@ -235,19 +265,34 @@ final class MacPeerService: NSObject {
             // Send oldest first. Reliable MC delivery is deliberate here:
             // dropping a P-frame on the unreliable channel makes every later
             // P-frame undecodable and causes the visible keyframe-only stall.
-            while !pendingMCVideo.isEmpty,
+            while pendingMCVideoHead < pendingMCVideo.count,
                   mcConnected,
                   !session.connectedPeers.isEmpty {
-                let video = pendingMCVideo.removeFirst()
+                let video = pendingMCVideo[pendingMCVideoHead]
+                if mcVideoAcknowledgementsEnabled {
+                    let maximumInFlight = StreamCadencePolicy.senderInFlightWindow(for: video.frameRate)
+                    guard mcVideoInFlight.count < maximumInFlight else { break }
+                }
+                pendingMCVideoHead += 1
                 try session.send(
                     mcSecureSession.seal(video.data),
                     toPeers: session.connectedPeers,
                     with: .reliable
                 )
-                mcVideoInFlight.remove(video.sequence)
+                if mcVideoAcknowledgementsEnabled {
+                    mcVideoInFlight.insert(video.sequence)
+                }
+            }
+            if pendingMCVideoHead == pendingMCVideo.count {
+                pendingMCVideo.removeAll(keepingCapacity: true)
+                pendingMCVideoHead = 0
+            } else if pendingMCVideoHead >= 32 {
+                pendingMCVideo.removeSubrange(0..<pendingMCVideoHead)
+                pendingMCVideoHead = 0
             }
         } catch {
             pendingMCVideo.removeAll(keepingCapacity: true)
+            pendingMCVideoHead = 0
             mcVideoInFlight.removeAll(keepingCapacity: true)
             mcWaitingForKeyFrame = true
             onKeyFrameNeeded?()
@@ -258,7 +303,9 @@ final class MacPeerService: NSObject {
         mcVideoQueue.async { [weak self] in
             self?.mcVideoInFlight.removeAll(keepingCapacity: true)
             self?.pendingMCVideo.removeAll(keepingCapacity: true)
+            self?.pendingMCVideoHead = 0
             self?.mcWaitingForKeyFrame = false
+            self?.mcVideoAcknowledgementsEnabled = false
         }
     }
 
@@ -274,6 +321,16 @@ final class MacPeerService: NSObject {
 
     private func route(_ command: ControlMessage) {
         notePeerActivity()
+        if command.kind == .hello, command.detail == "video-ack", mcConnected {
+            // Only enable this gate for Multipeer. Direct LAN has its own
+            // contentProcessed pacing and ignores the acknowledgement.
+            mcVideoQueue.async { [weak self] in
+                guard let self, self.mcConnected else { return }
+                self.mcVideoAcknowledgementsEnabled = true
+                self.sendNextMCVideoIfPossible()
+            }
+            return
+        }
         guard command.kind == .status,
               let detail = command.detail,
               detail.hasPrefix("heartbeat-") else {
@@ -632,11 +689,11 @@ extension MacPeerService: MCNearbyServiceAdvertiserDelegate {
         guard !mcConnected,
               session.connectedPeers.isEmpty,
               pendingMCIdentity == nil,
-              let context,
+              let context, context.count <= 4096,
               let invitation = try? JSONDecoder().decode(MultipeerInvitationContext.self, from: context),
               invitation.protocolVersion == LANWire.securityProtocolVersion,
               invitation.clientPublicKey.count == 32,
-              !invitation.identity.deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              invitation.identity.isValidForAuthentication else {
             invitationHandler(false, nil)
             return
         }
@@ -692,6 +749,9 @@ extension MacPeerService: MCSessionDelegate {
     }
 
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
+        guard session === self.session else { return }
+        let generation = AuthorizationGeneration.shared.token
+        guard mcConnected || data.count <= 4096 else { session.disconnect(); return }
         guard data.count <= LANWire.maximumPayloadSize + SecurePacketSession.envelopeOverhead,
               SecurePacketSession.isEnvelope(data),
               let mcSecureSession else {
@@ -707,6 +767,7 @@ extension MacPeerService: MCSessionDelegate {
         }
         if case .authentication(let message) = packet {
             DispatchQueue.main.async {
+                guard session === self.session, generation == AuthorizationGeneration.shared.token else { return }
                 self.handleMultipeerAuthentication(message, from: peerID)
             }
             return
@@ -715,12 +776,19 @@ extension MacPeerService: MCSessionDelegate {
         switch packet {
         case .control(let command):
             if let input = command.remoteInputEvent {
-                dispatchInput(input)
+                AuthorizationGeneration.shared.perform(ifCurrent: generation) {
+                    guard session === self.session, mcConnected else { return }
+                    dispatchInput(input)
+                }
             } else {
-                DispatchQueue.main.async { self.route(command) }
+                DispatchQueue.main.async {
+                    guard session === self.session else { return }
+                    AuthorizationGeneration.shared.perform(ifCurrent: generation) { self.route(command) }
+                }
             }
         case .file(let transfer):
             DispatchQueue.main.async {
+                guard session === self.session, generation == AuthorizationGeneration.shared.token else { return }
                 self.notePeerActivity()
                 self.onFilePacket?(transfer)
             }

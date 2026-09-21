@@ -296,14 +296,14 @@ enum LANWire {
         return result
     }
 
-    static func takeFrames(from buffer: inout Data) throws -> [Data] {
+    static func takeFrames(from buffer: inout Data, maximumSize: Int = maximumPayloadSize) throws -> [Data] {
         var frames: [Data] = []
         var cursor = buffer.startIndex
 
         while buffer.distance(from: cursor, to: buffer.endIndex) >= 4 {
             let headerEnd = buffer.index(cursor, offsetBy: 4)
             let length = buffer[cursor..<headerEnd].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-            guard length > 0, length <= maximumPayloadSize else { throw LANError.invalidLength }
+            guard length > 0, length <= min(maximumSize, maximumPayloadSize) else { throw LANError.invalidLength }
             guard buffer.distance(from: headerEnd, to: buffer.endIndex) >= Int(length) else { break }
 
             let payloadEnd = buffer.index(headerEnd, offsetBy: Int(length))

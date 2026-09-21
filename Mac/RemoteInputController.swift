@@ -45,8 +45,9 @@ final class RemoteInputPipeline {
         _ input: RemoteInputEvent,
         completion: @escaping (Bool, CGPoint?) -> Void
     ) {
+        let generation = AuthorizationGeneration.shared.token
         queue.async { [controller] in
-            let accepted = controller.handle(input)
+            let accepted = controller.handleAuthorized(input, generation: generation)
             let pointerPosition: CGPoint?
             switch input.kind {
             case .pointerMove, .pointerDelta, .primaryDown, .primaryDrag,
@@ -77,6 +78,45 @@ final class RemoteInputPipeline {
 }
 
 final class RemoteInputController {
+    /// Keep main-thread TIS/AX work outside a background-held authorization
+    /// lock. Each actual side effect is still gated against revocation.
+    func handleAuthorized(_ input: RemoteInputEvent, generation: UUID) -> Bool {
+        let gate = AuthorizationGeneration.shared
+        guard isAuthorized else { return false }
+        switch input.kind {
+        case .inputMode, .cycleInputMode:
+            return gate.onMain(ifCurrent: generation) { self.handle(input) } ?? false
+        case .toggleChineseEnglishInputMode:
+            guard let expectation = gate.onMain(ifCurrent: generation, {
+                self.inputSourceController.chineseEnglishToggleExpectation()
+            }) else { return false }
+            var posted = false
+            guard gate.perform(ifCurrent: generation, {
+                posted = self.postInputSourceSwitchShortcut()
+            }) else { return false }
+            if posted && inputSourceController.waitForChineseEnglishToggle(expectation, generation: generation) {
+                return true
+            }
+            return gate.onMain(ifCurrent: generation) {
+                self.inputSourceController.toggleChineseEnglish()
+            } ?? false
+        case .text:
+            guard let text = input.text,
+                  let inserted = gate.onMain(ifCurrent: generation, {
+                      self.insertTextUsingAccessibility(text)
+                  }) else { return false }
+            if inserted { return true }
+            // Clipboard fallback remains off main and rechecks authorization.
+            return gate.perform(ifCurrent: generation) {
+                self.type(text, skipAccessibility: true)
+            }
+        default:
+            var accepted = false
+            gate.perform(ifCurrent: generation) { accepted = self.handle(input) }
+            return accepted
+        }
+    }
+
     /// Posting Quartz events is a separate TCC decision from Accessibility.
     /// The PostEvent grant is the permission that controls whether WindowServer
     /// accepts remote keyboard, pointer, and scroll events. Accessibility is
@@ -195,11 +235,12 @@ final class RemoteInputController {
             )
         case .text:
             guard let text = input.text else { return false }
-            // Keep committed Unicode insertion on main while the serial input
-            // queue waits for the focused AppKit control.
-            MainQueueExecutor.sync {
-                type(text)
-            }
+            // Keep the serial input queue responsive to later key events. The
+            // Accessibility text insertion API is the only main-thread hop;
+            // pasteboard fallback work must stay off the UI queue because a
+            // pasteboard owner (for example a browser) can take an
+            // unpredictable amount of time to provide data.
+            type(text)
             return true
         case .key:
             let code = input.hidUsage.flatMap(keyCode(forHIDUsage:))
@@ -465,7 +506,7 @@ final class RemoteInputController {
         }
     }
 
-    private func type(_ text: String) {
+    private func type(_ text: String, skipAccessibility: Bool = false) {
         let requiresReliableUnicodeInsertion = text.unicodeScalars.contains {
             !$0.isASCII
         }
@@ -474,7 +515,10 @@ final class RemoteInputController {
         // that application frameworks may ignore Unicode attached to
         // synthetic keyboard events. A normal paste is the most compatible
         // fallback, especially for committed CJK text.
-        if insertTextUsingAccessibility(text) {
+        let insertedUsingAccessibility = !skipAccessibility && MainQueueExecutor.sync {
+            insertTextUsingAccessibility(text)
+        }
+        if insertedUsingAccessibility {
             remoteInputLog.notice(
                 "Remote text route=accessibility utf16Count=\(text.utf16.count, privacy: .public)"
             )
@@ -563,11 +607,12 @@ final class RemoteInputController {
 
         // AppKit usually consumes paste synchronously, but Chromium and other
         // cross-platform controls may request pasteboard data on a later run
-        // loop. Keep ownership long enough for those controls, then restore
-        // only if no user or application has taken ownership in the meantime.
-        Thread.sleep(forTimeInterval: 0.35)
-        if pasteboard.changeCount == ownedChangeCount {
-            restorePasteboard(snapshot, to: pasteboard)
+        // loop. Restore asynchronously so neither the main queue nor the
+        // remote input queue is held for an arbitrary delay. Never overwrite a
+        // clipboard that the user or the target application changed meanwhile.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.35) {
+            guard pasteboard.changeCount == ownedChangeCount else { return }
+            self.restorePasteboard(snapshot, to: pasteboard)
         }
         return true
     }
@@ -852,6 +897,7 @@ private final class RemoteInputSourceController {
 
     func waitForChineseEnglishToggle(
         _ expectation: ChineseEnglishToggleExpectation,
+        generation: UUID? = nil,
         timeout: TimeInterval = 0.8
     ) -> Bool {
         // This method runs on the serial remote-input queue. Waiting here is
@@ -859,7 +905,7 @@ private final class RemoteInputSourceController {
         // source change or it will be interpreted as English.
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         repeat {
-            let matched = MainQueueExecutor.sync {
+            let check = { [self] in
                 dispatchPrecondition(condition: .onQueue(.main))
                 let current = TISCopyCurrentKeyboardInputSource()
                     .takeRetainedValue()
@@ -880,6 +926,13 @@ private final class RemoteInputSourceController {
                     "Confirmed focused macOS input source id=\(currentID ?? "unknown", privacy: .public)"
                 )
                 return true
+            }
+            let matched: Bool
+            if let generation {
+                guard let result = AuthorizationGeneration.shared.onMain(ifCurrent: generation, check) else { return false }
+                matched = result
+            } else {
+                matched = MainQueueExecutor.sync(check)
             }
             if matched {
                 return true

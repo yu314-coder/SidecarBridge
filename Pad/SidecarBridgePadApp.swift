@@ -9,7 +9,12 @@ struct SidecarBridgePadApp: App {
     var body: some Scene {
         WindowGroup {
             PadContentView(model: model)
-                .task { model.start() }
+                .task {
+                    #if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("--keyboard-layout-preview") { return }
+                    #endif
+                    model.start()
+                }
                 // ScenePhase normally delivers this transition, but the
                 // will-resign-active notification arrives earlier on iPadOS.
                 // Starting the PiP handoff at that point gives the system a

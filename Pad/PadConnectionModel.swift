@@ -34,15 +34,10 @@ final class PadConnectionModel: ObservableObject {
     @Published var isConnected = false
     @Published private(set) var isConnecting = false
     @Published var isStreaming = false
-    @Published var preferTrackpadControl: Bool = {
-        let defaults = UserDefaults.standard
-        let key = "preferTrackpadControl"
-        guard defaults.object(forKey: key) != nil else {
-            defaults.set(true, forKey: key)
-            return true
-        }
-        return defaults.bool(forKey: key)
-    }()
+    @Published var showingNativeSidecarSetup = false
+    @Published var nativeSidecarRoute: NativeSidecarRoute = .nearby
+    @Published private(set) var nativeSidecarProgress = NativeSidecarSetupProgress()
+    private var nativeSidecarTimeoutTask: Task<Void, Never>?
     @Published var localNetworkAccess: LocalNetworkAccessState = .checking
     @Published var connectionTransport = "Direct P2P preferred"
     @Published var connectionHealthDetail = "Waiting for encrypted link"
@@ -56,6 +51,10 @@ final class PadConnectionModel: ObservableObject {
     @Published var pointerIsPressed = false
     @Published var showClickIndicator = false
     @Published var streamFPS = 0
+    /// Maximum refresh cadence reported by the screen currently hosting the
+    /// active iPad scene. This is a physical presentation ceiling; Ultra can
+    /// raise the Mac target only up to this value.
+    @Published private(set) var viewerRefreshRate = 60
     @Published var streamResolution: StreamResolutionPreference = {
         let defaults = UserDefaults.standard
         return defaults.string(forKey: StreamPreferenceStore.resolutionKey)
@@ -109,17 +108,23 @@ final class PadConnectionModel: ObservableObject {
         }
     }
     @Published var pairingCode = ""
+    @Published var manualMacAddress = ""
+    @Published private(set) var pairingInvitation: PairingInvitation?
     @Published var pairingRequired = false
     @Published var pairingMacName = "Mac"
     @Published var pairingError: String?
     @Published var discoveredMacs: [String] = []
-    @Published var selectedMacName = UserDefaults.standard.string(
-        forKey: "selectedMacName"
-    )
+    @Published private(set) var availableMacNames = Set<String>()
+    @Published var selectedMacName: String?
     @Published var localSystemInformation = SystemInformation.current()
     @Published var remoteSystemInformation: SystemInformation?
     @Published var diagnosticActionDetail = "System information is ready."
     @Published var streamDimensions = "Waiting for video"
+    // The developer upscaling switch was removed from the settings UI. Keep
+    // this disabled for existing installs too, so an old persisted preference
+    // cannot silently turn the experimental renderer back on after upgrading.
+    @Published private(set) var liveUpscalingEnabled = false
+    @Published private(set) var liveUpscalingStatus = "Off"
 
     let videoDisplay = VideoDisplayController()
 
@@ -155,6 +160,13 @@ final class PadConnectionModel: ObservableObject {
     private var initialFrameRetryTask: Task<Void, Never>?
     private var frameWindowStart = ProcessInfo.processInfo.systemUptime
     private var frameWindowCount = 0
+    private var lastVideoAckSentAt: TimeInterval = 0
+    // Multipeer video is sent reliably, but it has no per-message completion.
+    // A small cumulative display acknowledgement lets the Mac keep a bounded
+    // in-flight window instead of allowing the framework to build seconds of
+    // stale screen data. Direct LAN ignores these acknowledgements.
+    private var videoAckBatchCount = 0
+    private var lastVideoAckSequence: UInt64?
     private var presentedStreamWidth = 0
     private var presentedStreamHeight = 0
     private var presentedStreamFormat = ""
@@ -177,6 +189,11 @@ final class PadConnectionModel: ObservableObject {
     private var automaticReceivedFileURLs: [URL] = []
     private var clipboardMonitorTask: Task<Void, Never>?
     private var clipboardChangeObserver: NSObjectProtocol?
+    // Only Macs that completed an authenticated pairing are shown as device
+    // cards. Unpaired Bonjour/AWDL results remain an internal route source
+    // for code-first connection and never appear as unsolicited devices.
+    private var rememberedMacNames: Set<String> = []
+    private static let rememberedMacNamesKey = "rememberedMacNames"
     // Clipboard reads on iPadOS can display the system paste privacy alert and
     // briefly take focus away from the live viewer.  Keep automatic sync as an
     // explicit opt-in, with a new key so upgrades do not inherit the old
@@ -190,6 +207,13 @@ final class PadConnectionModel: ObservableObject {
     /// different app or while a system transition is in progress.
     private var canReadSystemPasteboard: Bool {
         UIApplication.shared.applicationState == .active
+    }
+
+    /// A metadata-only check used before handling an explicit Command-V.
+    /// Reading the actual value is deferred until the user confirms sharing,
+    /// so the live viewer never triggers an unexpected paste privacy prompt.
+    var hasLocalClipboardContent: Bool {
+        UIPasteboard.general.hasStrings || UIPasteboard.general.hasURLs
     }
 
     var isDiscoveryTakingLonger: Bool {
@@ -214,10 +238,26 @@ final class PadConnectionModel: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
+        let savedSelectedMacName = defaults.string(forKey: "selectedMacName")
+        let savedRememberedMacNames = Set(defaults.stringArray(forKey: Self.rememberedMacNamesKey) ?? [])
+        rememberedMacNames = savedRememberedMacNames
+        // Older builds persisted a selection as soon as a device card was
+        // tapped. Do not treat that as proof of pairing: only the new
+        // authenticated-device list may restore a card on launch.
+        let restoredSelection = savedSelectedMacName.flatMap { savedRememberedMacNames.contains($0) ? $0 : nil }
+        selectedMacName = restoredSelection
+        if savedSelectedMacName != restoredSelection {
+            defaults.removeObject(forKey: "selectedMacName")
+        }
         if defaults.object(forKey: Self.automaticClipboardSyncDefaultsKey) == nil {
             defaults.set(false, forKey: Self.automaticClipboardSyncDefaultsKey)
         }
         automaticClipboardSyncEnabled = defaults.bool(forKey: Self.automaticClipboardSyncDefaultsKey)
+        // Populate the settings/diagnostic view before the first connection;
+        // the active scene capability is re-sent again whenever a session is
+        // connected or returns from the background.
+        let initialScreen = activeViewerScreen()
+        viewerRefreshRate = min(max(initialScreen.maximumFramesPerSecond, 60), 240)
         // Do not touch the general pasteboard during launch.  The first read
         // is performed only by an explicit clipboard action or after the user
         // opts into automatic sync.
@@ -265,6 +305,10 @@ final class PadConnectionModel: ObservableObject {
         videoDisplay.onPictureInPictureError = { [weak self] message in
             self?.backgroundViewerDetail = message
         }
+        videoDisplay.onLiveUpscalingStatusChanged = { [weak self] status in
+            self?.liveUpscalingStatus = status
+        }
+        videoDisplay.setLiveUpscalingEnabled(liveUpscalingEnabled)
         videoDisplay.setAutomaticBackgroundStart(keepRunningInBackground)
 
         peers.onLocalNetworkStateChanged = { [weak self] state in
@@ -304,24 +348,19 @@ final class PadConnectionModel: ObservableObject {
         }
         peers.onDiscoveredMacsChanged = { [weak self] names in
             guard let self else { return }
-            // Keep a remembered Mac visible while Bonjour/AWDL refreshes. A
-            // browser can legitimately publish an empty result set for a few
-            // seconds after iPadOS resumes or when the access point filters
-            // multicast, but the user should still have a concrete device
-            // card to tap and retry.
-            var visibleNames = names
-            if let remembered = self.selectedMacName,
-               !visibleNames.contains(remembered) {
-                visibleNames.insert(remembered, at: 0)
-            }
+            // Discovery is a route mechanism, not pairing consent. Keep only
+            // names that have already completed an authenticated pairing (or
+            // the explicitly remembered selection) in the device list.
+            self.availableMacNames = Set(names)
+            let visibleNames = Array(self.rememberedMacNames).sorted()
             self.discoveredMacs = visibleNames
             guard !self.isConnected, !self.pairingRequired else { return }
-            // Finding a Mac is not consent to connect. The device remains
-            // visible in the list and the user chooses when to establish the
-            // encrypted session.
-            if !names.isEmpty, !self.userRequestedConnection {
+            // Finding an unpaired Mac is intentionally silent. A previously
+            // trusted Mac may be shown as a card, but it still requires an
+            // explicit Connect tap.
+            if !visibleNames.isEmpty, !self.userRequestedConnection {
                 self.status = "Mac ready to connect"
-                self.detail = "Select a Mac below, then tap Connect to start the encrypted session."
+                self.detail = "Tap Connect on a saved Mac. Your trusted pairing is remembered."
                 self.connectionHealthDetail = "Waiting for your connection choice"
             }
         }
@@ -332,6 +371,11 @@ final class PadConnectionModel: ObservableObject {
                 || self.frame != nil
                 || self.videoDisplay.hasPictureInPictureContent
             self.isConnected = connected
+            // Settings acknowledgements belong to this authenticated link,
+            // never to an old Mac or a previous connection attempt.
+            self.nativeSidecarTimeoutTask?.cancel()
+            self.nativeSidecarTimeoutTask = nil
+            self.nativeSidecarProgress.reset()
             if connected {
                 if hadLiveVideoSession {
                     // An explicit Connect after an app switch creates a new
@@ -369,7 +413,14 @@ final class PadConnectionModel: ObservableObject {
                 self.remoteInputUnavailable = false
                 self.pairingRequired = false
                 self.pairingCode = ""
+                self.pairingInvitation = nil
+                self.manualMacAddress = ""
                 self.pairingError = nil
+                if let connectedName = Self.peerName(from: peerOrError) {
+                    self.rememberMacName(connectedName)
+                    self.selectedMacName = connectedName
+                    self.pairingMacName = connectedName
+                }
                 let isDirectLAN = peerOrError?.hasPrefix("LAN:") == true
                 self.connectedUsingDirectLAN = isDirectLAN
                 self.lastDiscoveryIssue = nil
@@ -384,16 +435,13 @@ final class PadConnectionModel: ObservableObject {
                         : "viewer-foreground"
                 ))
                 self.exchangeSystemInformation()
-                if self.preferTrackpadControl {
-                    self.detail = isDirectLAN
-                        ? "Direct encrypted local link; requesting the input-capable stream."
-                        : "Requesting the input-capable app stream."
-                    self.peers.send(ControlMessage(.startFallback))
-                } else {
-                    self.detail = isDirectLAN
-                        ? "Direct local link ready. System Sidecar requires an explicit button press."
-                        : "Mac found. Tap Open System Sidecar only if you want to leave this app."
-                }
+                // The user's Connect action always means the encrypted app
+                // display. Native Sidecar is a separate setup guide, not a
+                // saved mode that can leave an authenticated app link idle.
+                self.detail = isDirectLAN
+                    ? "Direct encrypted local link; requesting the input-capable stream."
+                    : "Requesting the input-capable app stream."
+                self.peers.send(ControlMessage(.startFallback))
             } else {
                 self.lastObservedClipboardChangeCount = UIPasteboard.general.changeCount
                 // Network/browser failures can be reported while the selected
@@ -486,12 +534,21 @@ final class PadConnectionModel: ObservableObject {
             // keyframe recovery even while the encrypted stream is healthy.
             self.recordVideoFrame()
             let displayed = self.videoDisplay.enqueue(frame)
+            if displayed {
+                self.acknowledgeVideoFrame(frame)
+            }
             if !displayed, frame.isKeyFrame {
                 self.retryInitialKeyFrameAfterDisplayAppears(frame)
             }
         }
         configureFileTransfer()
         refreshReceivedFiles()
+    }
+
+    func setLiveUpscalingEnabled(_ enabled: Bool) {
+        liveUpscalingEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "developerLiveMetalFXUpscaling")
+        videoDisplay.setLiveUpscalingEnabled(enabled)
     }
 
     var isFileTransferring: Bool { fileTransfer.isBusy }
@@ -519,6 +576,7 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func connectSelectedMac() {
+        guard !isConnecting, !isConnected else { return }
         guard let selectedMacName else {
             status = "Choose a Mac first"
             detail = "Select a device card before connecting."
@@ -555,11 +613,12 @@ final class PadConnectionModel: ObservableObject {
     private func armConnectionTimeout() {
         connectionTimeoutTask?.cancel()
         connectionTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(15))
+            try? await Task.sleep(for: .seconds(30))
             guard !Task.isCancelled, let self, self.isConnecting, !self.isConnected else { return }
             self.isConnecting = false
             self.status = "Ready to retry connection"
-            self.detail = "The selected Mac is still visible. Tap Connect to try the direct and nearby paths again."
+            self.detail = "Could not reach and authenticate the Mac. Keep the Mac app open, check Local Network access on both devices, or scan its current QR code to try its address directly."
+            self.pairingError = self.detail
             self.connectionHealthDetail = "Waiting for another connection attempt"
             // Clear the stale dial underneath the visible device card. The
             // next explicit Connect action starts a fresh LAN/P2P attempt;
@@ -674,35 +733,86 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func submitPairingCode() {
+        guard !isConnected, !isConnecting else { return }
         let normalized = PairingCode.normalize(pairingCode)
         guard normalized.count == PairingCode.characterCount else {
             pairingError = "Enter all 16 digits shown in the Mac app."
             return
         }
 
-        // A pairing code is an authentication secret, not a network address.
-        // Use the selected/remembered Mac (or the sole discovered Mac) as the
-        // route, then submit the code before the handshake arrives. This makes
-        // code-first pairing reliable without silently connecting when a Mac
-        // is merely discovered.
-        let targetName = selectedMacName ?? (discoveredMacs.count == 1 ? discoveredMacs[0] : nil)
-        guard isConnected || targetName != nil else {
-            pairingError = "Select a Mac card first; the code authenticates that Mac."
+        if let invitation = pairingInvitation, invitation.expiresAt <= Date() {
+            pairingError = "The scanned code has expired. Scan the current QR code on the Mac."
             return
         }
-
-        pairingError = nil
-        pairingRequired = true
-        if !isConnected, !isConnecting, let targetName {
-            userRequestedConnection = true
-            isConnecting = true
-            armConnectionTimeout()
-            connect(to: targetName, detail: "Connecting with your 16-digit pairing code…")
-        } else if let targetName {
-            pairingMacName = targetName
+        let address = manualMacAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard address.isEmpty || BridgeNetworkMetadata.isPrivateIPv4Address(address) else {
+            pairingError = "Use the private IPv4 address shown in the Mac app, for example 192.168.1.122."
+            return
         }
-        detail = "Verifying the one-time code over the encrypted local link…"
-        peers.submitPairingCode(normalized)
+        pairingError = nil
+        pairingRequired = false
+        selectedMacName = pairingInvitation?.name
+        pairingMacName = pairingInvitation?.name ?? "Mac"
+        userRequestedConnection = true
+        isConnecting = true
+        armConnectionTimeout()
+        status = "Connecting to \(pairingMacName)…"
+        detail = "Finding a local route and verifying your Mac. You can cancel at any time."
+        peers.connectWithPairingCode(normalized, invitation: pairingInvitation, host: address.isEmpty ? nil : address)
+    }
+
+    /// Scanning only fills the form. Connect remains an explicit user action.
+    func acceptPairingInvitation(_ value: String) {
+        guard !isConnecting, !isConnected else { return }
+        do {
+            let invitation = try PairingInvitation.decode(value)
+            pairingInvitation = invitation
+            pairingCode = PairingCode.formatted(invitation.code)
+            manualMacAddress = ""
+            pairingError = nil
+            status = "Ready to pair with \(invitation.name)"
+            detail = "QR code scanned. Tap Connect to securely pair; this Mac is saved after verification."
+        } catch {
+            pairingError = error.localizedDescription
+        }
+    }
+
+    func updatePairingCode(_ value: String) {
+        pairingCode = PairingCode.formattedInput(value)
+        if PairingCode.normalize(pairingCode) != pairingInvitation?.code {
+            pairingInvitation = nil
+        }
+        pairingError = nil
+    }
+
+    func cancelConnectionAttempt() {
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = nil
+        isConnecting = false
+        userRequestedConnection = false
+        pairingRequired = false
+        peers.clearMacSelection()
+        status = "Connection cancelled"
+        detail = "Tap Connect whenever you are ready."
+    }
+
+    private func rememberMacName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        rememberedMacNames.insert(trimmed)
+        UserDefaults.standard.set(Array(rememberedMacNames).sorted(), forKey: Self.rememberedMacNamesKey)
+        if !discoveredMacs.contains(trimmed) {
+            discoveredMacs.insert(trimmed, at: 0)
+        }
+    }
+
+    private static func peerName(from value: String?) -> String? {
+        guard var value, !value.isEmpty else { return nil }
+        if value.hasPrefix("LAN:") {
+            value.removeFirst("LAN:".count)
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     func forgetTrustedMacs() {
@@ -710,8 +820,13 @@ final class PadConnectionModel: ObservableObject {
         connectionTimeoutTask = nil
         isConnecting = false
         SecureCredentialStore.removeAll(accountPrefix: "pad.mac.")
+        SavedMacRouteStore.removeAll()
+        pairingInvitation = nil
+        manualMacAddress = ""
         UserDefaults.standard.removeObject(forKey: "selectedMacName")
+        UserDefaults.standard.removeObject(forKey: Self.rememberedMacNamesKey)
         UserDefaults.standard.removeObject(forKey: "lastDirectMacHost")
+        rememberedMacNames.removeAll()
         selectedMacName = nil
         connectionAttemptedMacName = nil
         userRequestedConnection = false
@@ -766,15 +881,13 @@ final class PadConnectionModel: ObservableObject {
         started = true
         beginDiscoveryClock(incrementAttempt: false)
         peers.start()
+        discoveredMacs = Array(rememberedMacNames).sorted()
         if let rememberedMac = selectedMacName {
-            if !discoveredMacs.contains(rememberedMac) {
-                discoveredMacs = [rememberedMac]
-            }
             status = "Ready — enter the code or tap Connect"
             detail = "Remembered Mac: \(rememberedMac). The code field stays available for first-time pairing."
         } else {
-            status = "Enter a code or choose a Mac"
-            detail = "Discovery runs passively. Enter the Mac's 16-digit code below, or select a device card when it appears."
+            status = "Enter the Mac code to connect"
+            detail = "Enter the Mac's 16-digit code below. A device card is not required for first-time pairing."
         }
     }
 
@@ -818,6 +931,7 @@ final class PadConnectionModel: ObservableObject {
                 DiagnosticField("Streaming", isStreaming ? "Active" : "Inactive"),
                 DiagnosticField("Stream", streamDimensions),
                 DiagnosticField("Received frame rate", streamFPS > 0 ? "\(streamFPS) FPS" : "Not measured"),
+                DiagnosticField("Viewer refresh ceiling", "\(viewerRefreshRate) FPS"),
                 DiagnosticField(
                     "Connection latency",
                     connectionLatencyMS.map { "\($0) ms" } ?? "Not measured"
@@ -890,6 +1004,12 @@ final class PadConnectionModel: ObservableObject {
                 peers.resumeAfterBackground()
             }
             if isConnected {
+                // A ProMotion iPad can report a different screen capability
+                // after the scene is attached (and after PiP hands the
+                // surface back). Re-send the active scene's display
+                // capability so the Mac does not remain on the conservative
+                // 60-FPS startup default.
+                sendDisplayCapabilities()
                 peers.send(ControlMessage(.status, detail: "viewer-foreground"))
                 reconcileClipboardAfterForeground()
             }
@@ -1104,22 +1224,28 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func requestSystemSidecar() {
-        guard isConnected else { return }
-        status = "Requesting System Sidecar…"
-        detail = "Apple's Sidecar app will replace this app while the native session is active."
-        peers.send(ControlMessage(.trySidecar, detail: UIDevice.current.name))
+        guard isConnected, UIDevice.current.userInterfaceIdiom == .pad,
+              !nativeSidecarProgress.isRequesting else { return }
+        let request = nativeSidecarProgress.begin(route: nativeSidecarRoute)
+        // This is not a start-session command. Leave decoder, capture and
+        // authentication intact; the user completes Apple's setup on the Mac.
+        peers.send(ControlMessage(.trySidecar, detail: request.wireValue))
+        nativeSidecarTimeoutTask?.cancel()
+        nativeSidecarTimeoutTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(8)) } catch { return }
+            guard let self else { return }
+            self.nativeSidecarProgress.expire(id: request.id)
+            self.nativeSidecarTimeoutTask = nil
+        }
     }
 
-    func setPreferTrackpadControl(_ enabled: Bool) {
-        preferTrackpadControl = enabled
-        UserDefaults.standard.set(enabled, forKey: "preferTrackpadControl")
-        guard isConnected else { return }
-        if enabled {
-            requestFallback()
-        } else {
-            status = "System Sidecar selected"
-            detail = "It will not launch automatically. Tap Open System Sidecar when you want Apple's separate display session."
-        }
+    func returnToInAppDisplay() {
+        nativeSidecarTimeoutTask?.cancel()
+        nativeSidecarTimeoutTask = nil
+        nativeSidecarProgress.reset()
+        showingNativeSidecarSetup = false
+        // Returning from a help panel must not rebuild a healthy live stream.
+        if isConnected && !isStreaming { requestFallback() }
     }
 
     func setStreamResolution(_ resolution: StreamResolutionPreference) {
@@ -1131,9 +1257,7 @@ final class PadConnectionModel: ObservableObject {
     }
 
     func setStreamFrameRate(_ frameRate: StreamFrameRatePreference) {
-        let safeFrameRate = ultraModeEnabled
-            ? frameRate
-            : StreamFrameRatePreference(rawValue: min(frameRate.rawValue, StreamCadencePolicy.nearbyFrameRateCeiling)) ?? .fps120
+        let safeFrameRate = frameRate.permitted(ultra: ultraModeEnabled)
         streamFrameRate = safeFrameRate
         StreamPreferenceStore.saveFrameRate(safeFrameRate)
         if isConnected {
@@ -1144,6 +1268,22 @@ final class PadConnectionModel: ObservableObject {
     func setUltraModeEnabled(_ enabled: Bool) {
         ultraModeEnabled = enabled
         StreamPreferenceStore.saveUltraMode(enabled)
+        if enabled, streamFrameRate.rawValue < StreamCadencePolicy.nearbyFrameRateCeiling {
+            // Ultra is an explicit performance action, not only permission to
+            // reveal larger picker values. Older installs often have a saved
+            // 30/60-FPS preference; leaving that value untouched made the
+            // toggle appear broken even though the Mac accepted `ultra=1`.
+            // Promote it to the highest ordinary ProMotion target first. The
+            // user can still choose 90/120/240 explicitly afterwards.
+            let target = StreamFrameRatePreference.allCases
+                .filter { $0.rawValue <= min(viewerRefreshRate, StreamCadencePolicy.nearbyFrameRateCeiling) }
+                .max(by: { $0.rawValue < $1.rawValue })
+                ?? .fps120
+            if streamFrameRate != target {
+                streamFrameRate = target
+                StreamPreferenceStore.saveFrameRate(target)
+            }
+        }
         if !enabled, streamFrameRate.rawValue > StreamCadencePolicy.nearbyFrameRateCeiling {
             streamFrameRate = .fps120
             StreamPreferenceStore.saveFrameRate(streamFrameRate)
@@ -1210,6 +1350,13 @@ final class PadConnectionModel: ObservableObject {
             inputSentAt = inputSentAt.filter { inputSequence &- $0.key < 36 }
         }
         peers.sendInput(sequenced)
+    }
+
+    /// Execute Command-V using the Mac's current clipboard. This is the
+    /// default path for a physical or on-screen Command-V and deliberately
+    /// does not read UIPasteboard.
+    func sendPasteCommand() {
+        sendInput(.key("v", modifiers: ["command"]))
     }
 
     func sendLeftClick() {
@@ -1354,6 +1501,38 @@ final class PadConnectionModel: ObservableObject {
         sendClipboardToMac(payload)
     }
 
+    /// Share the iPad's current text clipboard and paste it on the Mac as one
+    /// ordered operation. The caller must have already obtained explicit user
+    /// confirmation; this is the only Command-V path that reads the iPad
+    /// pasteboard.
+    func sendClipboardAndPasteToMac() {
+        guard canReadSystemPasteboard else {
+            clipboardTransferStatus = "Return to SidecarBridge to share the clipboard."
+            return
+        }
+        guard isConnected else {
+            clipboardTransferStatus = "Connect to the Mac before sharing the clipboard."
+            return
+        }
+
+        let payload = readClipboardPayload()
+        if !payload.files.isEmpty {
+            sendFiles(at: payload.files)
+            clipboardTransferStatus = payload.files.count == 1
+                ? "Sending the copied file to the Mac; use Paste after the transfer finishes."
+                : "Sending \(payload.files.count) copied files to the Mac; use Paste after the transfer finishes."
+            return
+        }
+        guard let text = payload.text, !text.isEmpty else {
+            clipboardTransferStatus = "The iPad clipboard has no text to share. Using the Mac clipboard instead."
+            sendPasteCommand()
+            return
+        }
+
+        peers.send(.clipboardTextAndPaste(ClipboardTransfer.prepare(text)))
+        clipboardTransferStatus = "Shared the iPad clipboard and pasted it on the Mac."
+    }
+
     private func updatePointerFeedback(for input: RemoteInputEvent) {
         if let x = input.x, let y = input.y {
             remotePointer = CGPoint(
@@ -1408,6 +1587,30 @@ final class PadConnectionModel: ObservableObject {
         frameWindowStart = ProcessInfo.processInfo.systemUptime
         frameWindowCount = 0
         streamFPS = 0
+        videoAckBatchCount = 0
+        lastVideoAckSequence = nil
+        lastVideoAckSentAt = 0
+    }
+
+    private func acknowledgeVideoFrame(_ frame: VideoFrame) {
+        guard lastVideoAckSequence != frame.sequence else { return }
+        lastVideoAckSequence = frame.sequence
+        videoAckBatchCount += 1
+        let now = ProcessInfo.processInfo.systemUptime
+        // Direct LAN does not wait on an application ACK (Network.framework
+        // already supplies the send window), but it still needs a lightweight
+        // display-progress signal. Without it the Mac can keep filling the
+        // iPad decoder queue at 120 FPS until the receiver repeatedly drops
+        // to the next IDR. Twelve-frame/100-ms feedback is enough to detect
+        // that backlog without turning the video path into stop-and-wait.
+        let batchSize = connectedUsingDirectLAN ? 12 : 4
+        let minimumInterval = connectedUsingDirectLAN ? 0.10 : 0
+        guard frame.isKeyFrame
+                || videoAckBatchCount >= batchSize
+                || now - lastVideoAckSentAt >= minimumInterval else { return }
+        videoAckBatchCount = 0
+        lastVideoAckSentAt = now
+        peers.send(ControlMessage(.status, detail: "video-ack:\(frame.sequence)"))
     }
 
     /// Publishes stream metadata only when it changes. H.264 frames arrive on
@@ -1476,10 +1679,34 @@ final class PadConnectionModel: ObservableObject {
         }
     }
 
+    private func activeViewerScreen() -> UIScreen {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState != .unattached }
+        // Prefer the foreground scene. On iPadOS, UIScreen.main can remain a
+        // stale 60-Hz screen reference during a scene/PiP handoff even when
+        // the active ProMotion display is capable of 120 Hz.
+        return scenes.first(where: { $0.activationState == .foregroundActive })?.screen
+            ?? scenes.first?.screen
+            ?? UIScreen.main
+    }
+
     private func sendDisplayCapabilities() {
-        let nativeBounds = UIScreen.main.nativeBounds
+        let screen = activeViewerScreen()
+        let nativeBounds = screen.nativeBounds
         let nativeWidth = Int(max(nativeBounds.width, nativeBounds.height))
+        // Advertise cumulative display acknowledgements for the nearby
+        // Multipeer route. The Mac keeps legacy pacing until it receives this
+        // capability, so older viewers remain compatible.
+        peers.send(ControlMessage(.hello, detail: "video-ack"))
         peers.send(ControlMessage(.hello, detail: "display-width:\(nativeWidth)"))
+        // Ultra mode must respect the receiving display's refresh capacity.
+        // Sending 240 FPS to a 60-Hz iPad fills the display-layer queue and
+        // causes repeated H.264 recovery, which looks like a broken 1–2 FPS
+        // stream even though input still works.
+        let viewerRefreshRate = min(max(screen.maximumFramesPerSecond, 60), 240)
+        self.viewerRefreshRate = viewerRefreshRate
+        peers.send(ControlMessage(.hello, detail: "viewer-refresh-rate:\(viewerRefreshRate)"))
         peers.send(ControlMessage(.hello, detail: StreamPreferences(
             resolution: streamResolution,
             frameRate: streamFrameRate,
@@ -1587,16 +1814,15 @@ final class PadConnectionModel: ObservableObject {
             return
         }
         guard command.kind == .status, let value = command.detail else { return }
+        if nativeSidecarProgress.receive(value) {
+            nativeSidecarTimeoutTask?.cancel()
+            nativeSidecarTimeoutTask = nil
+            return
+        }
+        // Legacy native-attempt messages and stale replies must not overwrite
+        // the actual video/input state or claim native success without proof.
+        if NativeSidecarSetupProgress.isSetupStatus(value) { return }
         switch value {
-        case "sidecar-wired":
-            status = "Trying wired Sidecar…"
-            detail = "The Mac detected an iPad USB connection."
-        case "sidecar-wireless":
-            status = "Trying wireless Sidecar…"
-            detail = "Using Apple Continuity discovery."
-        case "sidecar-unavailable", "sidecar-failed":
-            status = "Native Sidecar unavailable"
-            detail = "The Mac is starting the app stream."
         case "fallback-active":
             status = "App stream connected"
             detail = "Waiting for the first frame."
@@ -1609,9 +1835,6 @@ final class PadConnectionModel: ObservableObject {
             resetVideoRateWindow()
             connectionHealthDetail = "Refreshing Mac video profile"
             detail = "Applying the new video profile…"
-        case "sidecar-connected":
-            status = "System Sidecar connected"
-            detail = "iPadOS is switching to Apple's separate Sidecar display app."
         case "accessibility-required":
             remoteInputUnavailable = false
             remoteInputAuthorized = false

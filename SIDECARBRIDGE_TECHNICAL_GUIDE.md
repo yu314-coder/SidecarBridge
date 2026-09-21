@@ -29,7 +29,7 @@ SidecarBridge makes an iPhone or iPad usable as a low-latency Mac screen and inp
 It provides two deliberately separate experiences:
 
 1. **In-App Display** mirrors the Mac's main display inside SidecarBridge on iPhone or iPad. It uses public screen-capture, video, local-network, and input APIs. This mode supports touch on both devices plus iPad keyboard, trackpad, and Apple Pencil input.
-2. **System Sidecar** is shown only on iPad and asks macOS to open Apple's native Sidecar session. It provides a true virtual Retina display, but Apple presents it in the separate system Continuity experience rather than inside the app.
+2. **Apple Sidecar setup** is shown only on iPad and offers USB/nearby instructions plus an authenticated shortcut to the Mac's Displays settings. The user still selects the iPad in Apple's UI. Apple's native session can extend or mirror the desktop, but its display is separate from SidecarBridge.
 
 SidecarBridge never pretends that native Sidecar can be embedded in a third-party app. It keeps the public in-app transport separate from the public Displays settings shortcut.
 
@@ -154,11 +154,13 @@ Earlier builds periodically restarted healthy advertisement and browsing objects
 
 Both transports exchange an encrypted ping/pong every three seconds. The apps expose the measured round-trip time, consider a link stale after nine seconds without peer traffic, and rebuild only the failed direct or nearby path. The iPad also sends an immediate validation ping after foregrounding so a socket retained across suspension cannot remain falsely marked connected.
 
-### 4.3 System Sidecar
+### 4.3 Apple Sidecar setup
 
-Native Sidecar is never launched automatically. The user must explicitly select **Open System Sidecar**.
+Native Sidecar is never launched automatically. **Settings → Apple Sidecar setup** on iPad and **Set Up Apple Sidecar** on Mac provide cable/nearby checklists. Opening settings is not evidence of a native connection; the user must choose the iPad in Apple's Displays or Screen Mirroring UI.
 
-`SidecarConnector` uses the public System Settings URL to open Displays settings. Apple does not expose a documented API for enumerating Sidecar devices or starting a native session, so the App Store build contains no private Sidecar framework path or selector.
+`SidecarConnector` calls NSWorkspace with a best-effort Displays URL and falls back to the Settings application if rejected. UUID-correlated success/failure acknowledgements and an eight-second iPad timeout prevent a stuck setup spinner. The older unqualified settings acknowledgement is supported only during a pending request. Capture, input and authentication remain intact. **Connect** always requests the encrypted app display; a previously saved native-mode setting no longer leaves that connection idle.
+
+No documented public API for enumerating/starting/embedding native Sidecar was found; the App Store build contains no private Sidecar framework or selector. See [NATIVE_SIDECAR_SETUP.md](NATIVE_SIDECAR_SETUP.md) for sources, tests, and physical-device verification limits.
 
 ## 5. Encrypted LAN protocol
 
@@ -220,9 +222,9 @@ Encryption protects packet confidentiality and integrity. The one-time-code proo
 `H264Encoder` uses VideoToolbox hardware encoding. The target profile is designed for an iPad display:
 
 - native-width-aware HiDPI output;
-- user-selectable Adaptive, 1080p, or 2K width targets plus 30/60/90/120-FPS targets;
-- the direct target is clamped to the highest available refresh mode of the connected display, while foreground nearby fallback can target up to 1920 pixels and 120 FPS;
-- transport-specific bitrate and frame pacing (direct bitrate scales with pixel rate and cadence up to 40 Mbps; nearby remains at 8 Mbps);
+- user-selectable Adaptive, 1080p, 2K, or 4K width targets plus frame-rate targets;
+- Adaptive targets at least 1080p when supported and chooses the highest practical local size. Direct links can use up to 3840 pixels; nearby P2P can use up to 2560 pixels at a 60-FPS target, or an explicit 4K request at 60 FPS;
+- transport-specific bitrate and frame pacing (bitrate scales with pixel rate and cadence up to 48 Mbps direct and 36 Mbps nearby);
 - a 60-FPS software target while the iPad viewer is in background PiP or the
   short resume grace period; the app does not deliberately switch to a 2/15
   FPS power-saving mode;

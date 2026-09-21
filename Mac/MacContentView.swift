@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 
 struct MacContentView: View {
     @ObservedObject var model: MacConnectionModel
+    @Environment(\.openWindow) private var openWindow
+    @State private var section = "Connect"
 
     private var statusColor: Color {
         if model.isStreaming { return .green }
@@ -32,16 +34,26 @@ struct MacContentView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     header
-                    statusCard
-                    dashboardOverviewCard
-                    quickActionsCard
-                    streamPerformanceCard
-                    modeCards
-                    fileTransferCard
-                    clipboardCard
-                    permissionCard
-                    systemInformationCard
-                    startupCard
+                    workspaceNavigation
+                    switch section {
+                    case "Display":
+                        statusCard
+                        streamPerformanceCard
+                        modeCards
+                        nativeSidecarSetupCard
+                    case "Transfers":
+                        fileTransferCard
+                        clipboardCard
+                    case "Settings":
+                        permissionCard
+                        systemInformationCard
+                        startupCard
+                    default:
+                        pairingSetupCard
+                        statusCard
+                        dashboardOverviewCard
+                        quickActionsCard
+                    }
                     footer
                 }
                 .frame(maxWidth: 900)
@@ -54,19 +66,37 @@ struct MacContentView: View {
         }
     }
 
+    private var workspaceNavigation: some View {
+        HStack(spacing: 8) {
+            ForEach(["Connect", "Display", "Transfers", "Settings"], id: \.self) { item in
+                Button { section = item } label: {
+                    Label(item, systemImage: item == "Connect" ? "link" : item == "Display" ? "display" : item == "Transfers" ? "folder" : "slider.horizontal.3")
+                        .font(.callout.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 42)
+                        .background(section == item ? Color.cyan.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 10))
+                        .foregroundStyle(section == item ? .cyan : .white.opacity(0.72))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(section == item ? .isSelected : [])
+            }
+        }
+        .padding(6)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16))
+    }
+
     private var header: some View {
         HStack(spacing: 18) {
             Image("BrandMark")
                 .resizable()
                 .scaledToFit()
-                .frame(width: 78, height: 78)
+                .frame(width: 52, height: 52)
                 .shadow(color: .blue.opacity(0.35), radius: 18, y: 8)
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("SidecarBridge")
-                    .font(.system(size: 32, weight: .bold, design: .rounded))
-                Text("Your Mac screen, with the iPad keyboard and trackpad.")
-                    .font(.headline)
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                Text("Your workspace. Within reach.")
+                    .font(.callout)
                     .foregroundStyle(.white.opacity(0.62))
             }
             Spacer()
@@ -77,6 +107,12 @@ struct MacContentView: View {
                 .padding(.vertical, 6)
                 .background(.white.opacity(0.08), in: Capsule())
                 .foregroundStyle(.white.opacity(0.7))
+        }
+    }
+
+    private var pairingSetupCard: some View {
+        MacPairingCard(invitation: model.pairingInvitation, copyCode: model.copyPairingCode) {
+            openWindow(id: "pairing")
         }
     }
 
@@ -290,14 +326,36 @@ struct MacContentView: View {
         ModeCard(
             icon: "rectangle.connected.to.line.below",
             title: systemDisplayTitle,
-            subtitle: "Public system UI",
+            subtitle: "Apple's separate display",
             description: systemDisplayDescription,
             tint: .purple,
-            buttonTitle: "Open Displays Settings",
+            buttonTitle: "Set Up Apple Sidecar",
             isPrimary: false,
             isDisabled: false,
             action: model.trySidecarNow
         )
+    }
+
+    private var nativeSidecarSetupCard: some View {
+        DisclosureGroup("Apple Sidecar · cable or nearby wireless", isExpanded: $model.showingNativeSidecarSetup) {
+            VStack(alignment: .leading, spacing: 18) {
+                NativeSidecarGuide(route: $model.nativeSidecarRoute)
+                Divider()
+                Text(model.nativeSidecarProgress.title).font(.headline)
+                Text(model.nativeSidecarProgress.detail)
+                    .font(.callout).foregroundStyle(.secondary)
+                Button("Open Displays Settings", action: model.openDisplaysSettings)
+                    .buttonStyle(.borderedProminent)
+                if model.isStreaming {
+                    Label("The encrypted app stream is still running", systemImage: "lock.shield")
+                        .font(.caption).foregroundStyle(.cyan)
+                }
+            }
+            .padding(.top, 16)
+        }
+        .padding(20)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.07)))
     }
 
     private var streamPerformanceCard: some View {
@@ -345,7 +403,7 @@ struct MacContentView: View {
                     .foregroundStyle(.orange)
             }
 
-            Text("\(model.streamPreferences.resolution.detail) \(model.streamPreferences.ultraModeEnabled ? "Ultra foreground P2P can target up to 240 FPS and 2K capture." : "Direct local links and nearby P2P can target up to 120 FPS.") The actual rate can be lower than the target when the display, memory pressure, or link cannot sustain it.")
+            Text("\(model.streamPreferences.resolution.detail) \(model.streamPreferences.ultraModeEnabled ? "Ultra foreground P2P can target up to 240 FPS; 4K remains available at a 60-FPS target when the link and memory allow it." : "At a 60-FPS target, local links can use 1080p, 2K, or an explicit 4K request; higher-cadence nearby streams use a smaller cap for stability.") The actual resolution and cadence can be lower when the display, memory pressure, or link cannot sustain them.")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.52))
                 .fixedSize(horizontal: false, vertical: true)
@@ -499,11 +557,11 @@ struct MacContentView: View {
     }
 
     private var systemDisplayTitle: String {
-        return "System Sidecar"
+        return "Apple Sidecar setup"
     }
 
     private var systemDisplayDescription: String {
-        return "Opens Displays settings so you can choose Apple's built-in display feature."
+        return "USB or nearby wireless. Choose your iPad in Apple's Displays settings; the native display opens outside SidecarBridge."
     }
 
     private var fileTransferCard: some View {
@@ -795,9 +853,6 @@ struct MacContentView: View {
             Spacer()
             Button("Displays Settings") { model.openDisplaysSettings() }
                 .buttonStyle(.link)
-            if !model.reachableSidecarDevices.isEmpty {
-                Text("Apple Sidecar: \(model.reachableSidecarDevices.joined(separator: ", "))")
-            }
         }
         .font(.caption)
         .foregroundStyle(.white.opacity(0.42))

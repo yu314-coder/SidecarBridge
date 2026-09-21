@@ -27,17 +27,29 @@ final class MacPairingSecurity {
     let macID: String
     private var failedAttemptTimesByDevice: [String: [Date]] = [:]
     private var globalFailedAttemptTimes: [Date] = []
-    // A rejected saved credential means the peer still has a stale copy of
-    // our old pairing state. Require the displayed one-time code for a short
-    // repair window, then replace the credential after a successful proof.
-    // Keeping this state in memory avoids deleting a valid credential merely
-    // because a malicious peer submitted a bad proof.
-    private var repairRequiredUntilByDevice: [String: Date] = [:]
+    private let readCredential: (String) -> Data?
+    private let writeCredential: (Data, String) -> Bool
+    private let deleteCredentials: (String) -> Bool
+    private let recordAuthorization: @MainActor (BridgePeerIdentity) -> Void
+    private let defaults: UserDefaults
+    private var credentialGeneration: String
+    private let automaticallyRotate: Bool
     private var rotationTask: Task<Void, Never>?
 
-    private init() {
-        let defaults = UserDefaults.standard
-        if let saved = SecureCredentialStore.data(account: "mac.identity"),
+    init(defaults: UserDefaults = .standard,
+         read: @escaping (String) -> Data? = { SecureCredentialStore.data(account: $0) },
+         write: @escaping (Data, String) -> Bool = { SecureCredentialStore.set($0, account: $1) },
+         delete: @escaping (String) -> Bool = { SecureCredentialStore.removeAll(accountPrefix: $0) },
+         authorize: @escaping @MainActor (BridgePeerIdentity) -> Void = { MacAuthorizedDeviceStore.shared.authorize($0) },
+         automaticallyRotate: Bool = true) {
+        self.defaults = defaults
+        self.readCredential = read
+        self.writeCredential = write
+        self.deleteCredentials = delete
+        self.recordAuthorization = authorize
+        self.automaticallyRotate = automaticallyRotate
+        self.credentialGeneration = defaults.string(forKey: "pairingCredentialGeneration") ?? ""
+        if let saved = read("mac.identity"),
            let value = String(data: saved, encoding: .utf8),
            !value.isEmpty {
             macID = value
@@ -49,12 +61,12 @@ final class MacPairingSecurity {
         } else if let saved = defaults.string(forKey: "macDeviceIdentifier"),
                   !saved.isEmpty {
             macID = saved
-            SecureCredentialStore.set(Data(saved.utf8), account: "mac.identity")
+            _ = write(Data(saved.utf8), "mac.identity")
         } else {
             let value = UUID().uuidString
             macID = value
             defaults.set(value, forKey: "macDeviceIdentifier")
-            SecureCredentialStore.set(Data(value.utf8), account: "mac.identity")
+            _ = write(Data(value.utf8), "mac.identity")
         }
         pairingCode = PairingCode.generate()
         pairingCodeExpiresAt = Date().addingTimeInterval(PairingCode.lifetime)
@@ -62,11 +74,6 @@ final class MacPairingSecurity {
     }
 
     func requiresPairingCode(for identity: BridgePeerIdentity) -> Bool {
-        let key = identity.stableKey
-        if let expiry = repairRequiredUntilByDevice[key] {
-            if expiry > Date() { return true }
-            repairRequiredUntilByDevice.removeValue(forKey: key)
-        }
         return credential(for: identity) == nil
     }
 
@@ -78,89 +85,43 @@ final class MacPairingSecurity {
     ) -> PairingVerification {
         let now = Date()
         let attemptKey = identity.stableKey
-        let requiresRepair = isRepairRequired(for: attemptKey, now: now)
-        var failedAttemptTimes = failedAttemptTimesByDevice[attemptKey, default: []]
-        failedAttemptTimes.removeAll { now.timeIntervalSince($0) > 60 }
-        failedAttemptTimesByDevice[attemptKey] = failedAttemptTimes
-        globalFailedAttemptTimes.removeAll { now.timeIntervalSince($0) > 60 }
-        guard failedAttemptTimes.count < 5,
-              globalFailedAttemptTimes.count < 20 else {
-            return PairingVerification(
-                accepted: false,
-                issuedCredential: nil,
-                responseProof: nil,
-                detail: "Too many incorrect codes. Wait one minute and try again."
-            )
+        guard identity.isValidForAuthentication, nonce.count == 32, proof.count == 32 else {
+            return PairingVerification(accepted: false, issuedCredential: nil, responseProof: nil, detail: "Invalid pairing proof.")
         }
-
-        var secret: Data
-        var isExistingCredential: Bool
-        if let existing = credential(for: identity), !requiresRepair {
-            secret = existing
-            isExistingCredential = true
-        } else {
+        // Valid saved credentials must not be disabled by untrusted guesses.
+        let existing = credential(for: identity)
+        let savedProofValid = existing.map {
+            PairingProof.verify(proof, secret: $0, role: .client, identity: identity,
+                                macID: macID, nonce: nonce, channelBinding: channelBinding)
+        } ?? false
+        var secret = existing ?? Data()
+        let isExistingCredential = savedProofValid
+        if !savedProofValid {
+            failedAttemptTimesByDevice = failedAttemptTimesByDevice.compactMapValues {
+                let recent = $0.filter { now.timeIntervalSince($0) <= 60 }
+                return recent.isEmpty ? nil : recent
+            }
+            globalFailedAttemptTimes.removeAll { now.timeIntervalSince($0) > 60 }
+            var failures = failedAttemptTimesByDevice[attemptKey] ?? []
+            guard failures.count < 5, globalFailedAttemptTimes.count < 20 else {
+                return PairingVerification(accepted: false, issuedCredential: nil, responseProof: nil,
+                                           detail: "Too many incorrect codes. Wait one minute and try again.")
+            }
             guard now < pairingCodeExpiresAt else {
                 rotatePairingCode()
-                return PairingVerification(
-                    accepted: false,
-                    issuedCredential: nil,
-                    responseProof: nil,
-                    detail: "The pairing code expired. Enter the new code shown on the Mac."
-                )
+                return PairingVerification(accepted: false, issuedCredential: nil, responseProof: nil,
+                                           detail: "The pairing code expired. Enter the new code shown on the Mac.")
             }
             secret = Data(pairingCode.utf8)
-            isExistingCredential = false
-        }
-
-        var accepted = PairingProof.verify(
-            proof,
-            secret: secret,
-            role: .client,
-            identity: identity,
-            macID: macID,
-            nonce: nonce,
-            channelBinding: channelBinding
-        )
-
-        // A mobile build may have already removed its stale copy while this
-        // Mac was restarted, so there is no in-memory repair flag yet. Treat
-        // the currently displayed code as an explicit refresh request when
-        // the saved proof fails. The code is short-lived and still protected
-        // by the same per-device/global rate limits below.
-        if !accepted,
-           isExistingCredential,
-           now < pairingCodeExpiresAt {
-            let codeSecret = Data(pairingCode.utf8)
-            if PairingProof.verify(
-                proof,
-                secret: codeSecret,
-                role: .client,
-                identity: identity,
-                macID: macID,
-                nonce: nonce,
-                channelBinding: channelBinding
-            ) {
-                secret = codeSecret
-                isExistingCredential = false
-                accepted = true
+            guard PairingProof.verify(proof, secret: secret, role: .client, identity: identity,
+                                      macID: macID, nonce: nonce, channelBinding: channelBinding) else {
+                failures.append(now)
+                // At most 20 failed guesses can be recorded in the active window.
+                failedAttemptTimesByDevice[attemptKey] = failures
+                globalFailedAttemptTimes.append(now)
+                return PairingVerification(accepted: false, issuedCredential: nil, responseProof: nil,
+                                           detail: "The pairing proof was not accepted. Use the current Mac code to repair pairing.")
             }
-        }
-
-        guard accepted else {
-            failedAttemptTimes.append(now)
-            failedAttemptTimesByDevice[attemptKey] = failedAttemptTimes
-            globalFailedAttemptTimes.append(now)
-            if isExistingCredential {
-                repairRequiredUntilByDevice[attemptKey] = now.addingTimeInterval(5 * 60)
-            }
-            return PairingVerification(
-                accepted: false,
-                issuedCredential: nil,
-                responseProof: nil,
-                detail: isExistingCredential
-                    ? "The saved device credential was not accepted. Enter the current Mac code once to refresh this device."
-                    : "The one-time pairing code was not accepted."
-            )
         }
 
         let responseProof = PairingProof.make(
@@ -173,9 +134,8 @@ final class MacPairingSecurity {
         )
 
         if isExistingCredential {
-            repairRequiredUntilByDevice.removeValue(forKey: attemptKey)
             failedAttemptTimesByDevice.removeValue(forKey: attemptKey)
-            MacAuthorizedDeviceStore.shared.authorize(identity)
+            recordAuthorization(identity)
             return PairingVerification(
                 accepted: true,
                 issuedCredential: nil,
@@ -185,7 +145,7 @@ final class MacPairingSecurity {
         }
 
         let credential = SecureCredentialStore.randomBytes(count: 32)
-        guard SecureCredentialStore.set(credential, account: credentialAccount(for: identity)) else {
+        guard writeCredential(credential, credentialAccount(for: identity)) else {
             return PairingVerification(
                 accepted: false,
                 issuedCredential: nil,
@@ -193,8 +153,7 @@ final class MacPairingSecurity {
                 detail: "The trusted-device credential could not be saved in Keychain."
             )
         }
-        MacAuthorizedDeviceStore.shared.authorize(identity)
-        repairRequiredUntilByDevice.removeValue(forKey: attemptKey)
+        recordAuthorization(identity)
         failedAttemptTimesByDevice.removeValue(forKey: attemptKey)
         rotatePairingCode()
         return PairingVerification(
@@ -229,34 +188,30 @@ final class MacPairingSecurity {
         return PairingCode.formatted(pairingCode)
     }
 
-    func forgetAllDevices() {
-        SecureCredentialStore.removeAll(accountPrefix: "mac.peer.")
+    @discardableResult
+    func forgetAllDevices() -> Bool {
+        // Persist a fresh namespace BEFORE attempting deletion. Failed legacy
+        // deletion must never make a revoked credential eligible after relaunch.
+        credentialGeneration = UUID().uuidString
+        defaults.set(credentialGeneration, forKey: "pairingCredentialGeneration")
+        let persisted = defaults.synchronize()
+        let deleted = deleteCredentials("mac.peer.")
         failedAttemptTimesByDevice.removeAll()
-        repairRequiredUntilByDevice.removeAll()
         globalFailedAttemptTimes.removeAll()
         rotatePairingCode()
+        return persisted && deleted
     }
 
     func revokeCredential(for identity: BridgePeerIdentity) {
         SecureCredentialStore.remove(account: credentialAccount(for: identity))
-        repairRequiredUntilByDevice.removeValue(forKey: identity.stableKey)
     }
 
     private func credential(for identity: BridgePeerIdentity) -> Data? {
-        SecureCredentialStore.data(account: credentialAccount(for: identity))
+        readCredential(credentialAccount(for: identity))
     }
 
     private func credentialAccount(for identity: BridgePeerIdentity) -> String {
-        "mac.peer.\(identity.stableKey)"
-    }
-
-    private func isRepairRequired(for key: String, now: Date) -> Bool {
-        guard let expiry = repairRequiredUntilByDevice[key] else { return false }
-        guard expiry > now else {
-            repairRequiredUntilByDevice.removeValue(forKey: key)
-            return false
-        }
-        return true
+        credentialGeneration.isEmpty ? "mac.peer.\(identity.stableKey)" : "mac.peer.\(credentialGeneration).\(identity.stableKey)"
     }
 
     private func rotatePairingCode() {
@@ -267,6 +222,7 @@ final class MacPairingSecurity {
     }
 
     private func schedulePairingCodeRotation() {
+        guard automaticallyRotate else { return }
         rotationTask?.cancel()
         let expiry = pairingCodeExpiresAt
         rotationTask = Task { [weak self] in

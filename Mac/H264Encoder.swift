@@ -129,7 +129,7 @@ final class H264Encoder {
             (kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: keyFrameInterval)),
             (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 1.0)),
             (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate)),
-            (kVTCompressionPropertyKey_DataRateLimits, [NSNumber(value: bitrate / 8), NSNumber(value: 1)] as CFArray)
+            (kVTCompressionPropertyKey_DataRateLimits, [NSNumber(value: StreamQualityPolicy.peakBytesPerSecond(averageBitrate: bitrate)), NSNumber(value: 1)] as CFArray)
         ]
         for (key, value) in settings {
             let result = VTSessionSetProperty(session, key: key, value: value)
@@ -143,7 +143,11 @@ final class H264Encoder {
         _ = VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_MaxFrameDelayCount,
-            value: NSNumber(value: 0)
+            value: NSNumber(value: StreamEncoderCadencePolicy.maximumFrameDelayCount(
+                width: width,
+                height: height,
+                frameRate: frameRate
+            ))
         )
         // The viewer is interactive screen content rather than an archival
         // encode. Prefer a frame that is ready now over a slightly better
@@ -296,20 +300,31 @@ final class H264Encoder {
     /// than the requested cadence.
     func setMemoryPressure(_ level: StreamMemoryPressureLevel) {
         inFlightLock.lock()
-        maximumInFlightFrames = switch level {
-        case .normal:
-            // A 120-FPS nearby stream has only 8.3 ms between capture
-            // samples. Keep a slightly deeper, still bounded hardware
-            // pipeline so a short VideoToolbox callback hiccup does not
-            // collapse the sender to its old ~60-FPS throughput.
-            frameRate >= 240 ? 16 : (frameRate >= 120 ? 10 : (frameRate >= 90 ? 8 : 6))
-        // The pressure profile reduces dimensions and bitrate. Keep enough
-        // asynchronous submissions to sustain the 60-FPS clock while still
-        // bounding the number of full IOSurfaces retained by VideoToolbox.
-        case .warning: 4
-        case .critical: 3
-        }
+        maximumInFlightFrames = StreamEncoderCadencePolicy.maximumInFlightFrames(
+            width: width,
+            height: height,
+            frameRate: frameRate,
+            memoryPressure: level
+        )
         inFlightLock.unlock()
+
+        // Screen text benefits noticeably from VideoToolbox's quality-first
+        // mode when the machine has headroom. Under memory pressure (or at a
+        // high-cadence Ultra target) favor predictable encode completion so a
+        // slow callback cannot turn the live stream into a stale slideshow.
+        let prioritizeEncodingSpeed = StreamEncoderCadencePolicy.prioritizeEncodingSpeed(
+            width: width,
+            height: height,
+            frameRate: frameRate,
+            memoryPressure: level
+        )
+        if let session {
+            _ = VTSessionSetProperty(
+                session,
+                key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+                value: prioritizeEncodingSpeed ? kCFBooleanTrue : kCFBooleanFalse
+            )
+        }
     }
 
     /// Updates the timing metadata when the viewer enters or leaves its
@@ -350,7 +365,7 @@ final class H264Encoder {
         _ = VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_DataRateLimits,
-            value: [NSNumber(value: safeBitrate / 8), NSNumber(value: 1)] as CFArray
+            value: [NSNumber(value: StreamQualityPolicy.peakBytesPerSecond(averageBitrate: safeBitrate)), NSNumber(value: 1)] as CFArray
         )
     }
 
@@ -387,14 +402,7 @@ final class H264Encoder {
     @discardableResult
     private func emit(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return false }
-        let byteCount = CMBlockBufferGetDataLength(blockBuffer)
-        guard byteCount > 0 else { return false }
-        var sampleData = Data(count: byteCount)
-        let copyStatus = sampleData.withUnsafeMutableBytes { bytes in
-            guard let baseAddress = bytes.baseAddress else { return kCMBlockBufferBadLengthParameterErr }
-            return CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: byteCount, destination: baseAddress)
-        }
-        guard copyStatus == kCMBlockBufferNoErr else { return false }
+        guard let sampleData = EncodedVideoStorage.data(retaining: blockBuffer) else { return false }
 
         let isKeyFrame = isSyncSample(sampleBuffer)
         let parameterSets = isKeyFrame ? h264ParameterSets(from: sampleBuffer) : []

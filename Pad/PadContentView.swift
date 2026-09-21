@@ -8,21 +8,15 @@ private enum PadRootTab {
     case settings
 }
 
-private enum SoftwareKeyboardMode: String, CaseIterable, Identifiable {
-    case standard
-    case special
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .standard: return "Standard"
-        case .special: return "Special"
-        }
-    }
-}
 
 struct PadContentView: View {
+    private static var keyboardLayoutPreview: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--keyboard-layout-preview")
+        #else
+        false
+        #endif
+    }
     @ObservedObject var model: PadConnectionModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -30,14 +24,24 @@ struct PadContentView: View {
     @State private var controlDrawerOpen = false
     @State private var showingFileImporter = false
     @State private var showingFileManager = false
+    @State private var showingMacScreenSharing = false
+    @State private var showingPairingScanner = false
+    @State private var showingPasteShareConfirmation = false
     @State private var viewerScale: CGFloat = 1
     @State private var viewerOffset: CGSize = .zero
-    // The Mac cursor is embedded in the captured frame. Keeping a second
-    // iPad-drawn cursor causes visible drift, especially while the stream is
-    // under load, so the local cursor is permanently disabled.
-    @State private var showVirtualCursor = false
     @State private var showMagicKeyboardPointer: Bool = {
-        UserDefaults.standard.object(forKey: "showMagicKeyboardPointer") as? Bool ?? false
+        let defaults = UserDefaults.standard
+        let migrationKey = "showMagicKeyboardPointerDefaultV2"
+        if !defaults.bool(forKey: migrationKey) {
+            // Earlier builds hid the native Magic Keyboard pointer and relied
+            // on the Mac cursor being composited into every encoded frame.
+            // Migrate once to the native normal-sized pointer; users can still
+            // disable it in Viewer settings.
+            defaults.set(true, forKey: migrationKey)
+            defaults.set(true, forKey: "showMagicKeyboardPointer")
+            return true
+        }
+        return defaults.object(forKey: "showMagicKeyboardPointer") as? Bool ?? true
     }()
     @State private var showClickFeedback: Bool = {
         UserDefaults.standard.object(forKey: "showClickFeedback") as? Bool ?? true
@@ -54,8 +58,8 @@ struct PadContentView: View {
         return mapping
     }()
     @State private var isCalibratingPointerButtons = false
-    @State private var showsSoftwareKeyboard = false
-    @State private var softwareKeyboardMode: SoftwareKeyboardMode = .special
+    @State private var showsSoftwareKeyboard = Self.keyboardLayoutPreview
+    @State private var softwareKeyboardMode: SoftwareKeyboardMode = .standard
     @State private var softwareKeyboardModifiers: Set<String> = []
     // These are retained for the streaming drawer's legacy actions; the
     // dashboard no longer exposes diagnostics or destructive actions.
@@ -72,6 +76,9 @@ struct PadContentView: View {
     // type checker otherwise times out in Debug builds.
     private var contentWithLifecycle: some View {
         contentWithStreamingReset
+            .onChange(of: showsSoftwareKeyboard) { _, visible in
+                if visible { controlDrawerOpen = false }
+            }
             .onChange(of: showTopStatusBar) { _, value in
                 UserDefaults.standard.set(value, forKey: "showTopStatusBar")
             }
@@ -96,9 +103,6 @@ struct PadContentView: View {
 
     private var contentWithPersistedPointers: some View {
         contentWithTheme
-            .onChange(of: showVirtualCursor) { _, value in
-                UserDefaults.standard.set(value, forKey: "showVirtualCursor")
-            }
             .onChange(of: showMagicKeyboardPointer) { _, value in
                 UserDefaults.standard.set(value, forKey: "showMagicKeyboardPointer")
             }
@@ -131,7 +135,7 @@ struct PadContentView: View {
 
     @ViewBuilder
     private var primaryLayer: some View {
-        if model.isStreaming {
+        if model.isStreaming || Self.keyboardLayoutPreview {
             streamingView
             // Keep the viewer mounted behind Settings so the same sample
             // buffer layer remains the Picture-in-Picture source. The
@@ -149,6 +153,9 @@ struct PadContentView: View {
 
     var body: some View {
         content
+        .fullScreenCover(isPresented: $showingMacScreenSharing) {
+            MacScreenSharingView()
+        }
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [.item],
@@ -156,6 +163,24 @@ struct PadContentView: View {
         ) { handleFileImport($0) }
         .sheet(isPresented: $showingFileManager) {
             PadFileManagerView(model: model)
+        }
+        .sheet(isPresented: $showingPairingScanner) {
+            PairingScannerView(onScan: model.acceptPairingInvitation)
+        }
+        .confirmationDialog(
+            "Share the iPad clipboard?",
+            isPresented: $showingPasteShareConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Share iPad Clipboard and Paste") {
+                model.sendClipboardAndPasteToMac()
+            }
+            Button("Use Mac Clipboard") {
+                model.sendPasteCommand()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Command-V normally runs only on the Mac. The iPad has clipboard content that may be different. Share it only if you want that content pasted into the Mac app.")
         }
     }
 
@@ -187,8 +212,8 @@ struct PadContentView: View {
                         VStack(spacing: 24) {
                             Color.clear.frame(height: 1).id("dashboard-top")
                             header
-                            connectionCard
                             if model.isConnected {
+                                connectionCard
                                 connectedSessionCard
                                 permissionStrip
                                 modeChooser
@@ -206,23 +231,36 @@ struct PadContentView: View {
 
                                 systemInformationCard
                             } else {
-                                macSelectionPanel
-                                connectActionCard
-                                // Pairing is deliberately code-first: the
-                                // field is always present, even while Bonjour
-                                // or AWDL discovery is unavailable. Entering
-                                // the code never connects by itself; the user
-                                // still chooses a visible/remembered Mac.
-                                pairingCodePanel
-                                requirementStrip
-
-                                if visibleMacNames.isEmpty || model.isConnecting || model.pairingRequired || model.isDiscoveryTakingLonger || model.localNetworkPermissionNeeded {
-                                    discoveryCard
+                                if model.isConnecting || model.localNetworkPermissionNeeded {
+                                    connectionAttemptPanel
                                 }
+                                deviceWorkspace
+                                DisclosureGroup("Other connection options") {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        if supportsSystemSidecar {
+                                            Button {
+                                                selectedTab = .settings
+                                                model.showingNativeSidecarSetup = true
+                                            } label: {
+                                                Label("Apple Sidecar · cable or nearby", systemImage: "ipad.landscape")
+                                            }
+                                            .buttonStyle(.bordered)
+                                            Text("Apple's separate display. No Mac companion app is needed; finish setup on the Mac.")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                            Divider()
+                                        }
+                                        Text("Mac Screen Sharing uses a separate, unencrypted VNC connection on a trusted private network. It is not the encrypted SidecarBridge app connection.")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                        Button("Open Mac Screen Sharing") { showingMacScreenSharing = true }
+                                            .buttonStyle(.bordered)
+                                    }.padding(.top, 8)
+                                }
+                                .font(.callout).foregroundStyle(.secondary)
+                                .padding(.horizontal, 8)
                             }
                         }
                         .frame(maxWidth: 920)
-                        .frame(minHeight: geometry.size.height - 48)
+                        .frame(minHeight: geometry.size.height - 48, alignment: .top)
                         .padding(.horizontal, horizontalSizeClass == .compact ? 16 : 36)
                         .padding(.top, 24)
                         .padding(.bottom, 24)
@@ -244,7 +282,8 @@ struct PadContentView: View {
             Button(action: remoteAction) {
                 Label("Remote Control", systemImage: "rectangle.inset.filled.and.person.filled")
                     .font(.callout.bold())
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: 42)
+                    .background(selectedTab == .remoteControl ? Color.cyan.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 12))
             }
             .buttonStyle(.plain)
             .foregroundStyle(selectedTab == .remoteControl ? .cyan : .white.opacity(0.78))
@@ -253,14 +292,15 @@ struct PadContentView: View {
             Button { selectedTab = .settings } label: {
                 Label("Settings", systemImage: "gearshape.fill")
                     .font(.callout.bold())
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, minHeight: 42)
+                    .background(selectedTab == .settings ? Color.cyan.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 12))
             }
             .buttonStyle(.plain)
             .foregroundStyle(selectedTab == .settings ? .cyan : .white.opacity(0.78))
             .accessibilityHint("Open connection, viewer, keyboard, and pointer settings.")
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 14)
+        .padding(.vertical, 6)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().stroke(.white.opacity(0.12)))
         .shadow(color: .black.opacity(0.28), radius: 18, y: 8)
@@ -272,7 +312,6 @@ struct PadContentView: View {
         VStack(spacing: 0) {
             PadSettingsPanel(
                 model: model,
-                showVirtualCursor: $showVirtualCursor,
                 showMagicKeyboardPointer: $showMagicKeyboardPointer,
                 showClickFeedback: $showClickFeedback,
                 showTopStatusBar: $showTopStatusBar,
@@ -326,8 +365,8 @@ struct PadContentView: View {
                 .resizable()
                 .scaledToFill()
                 .frame(
-                    width: horizontalSizeClass == .compact ? 58 : 82,
-                    height: horizontalSizeClass == .compact ? 58 : 82
+                    width: horizontalSizeClass == .compact ? 44 : 56,
+                    height: horizontalSizeClass == .compact ? 44 : 56
                 )
                 .clipShape(RoundedRectangle(cornerRadius: horizontalSizeClass == .compact ? 15 : 20, style: .continuous))
                 .shadow(color: .blue.opacity(0.35), radius: 18, y: 8)
@@ -335,11 +374,11 @@ struct PadContentView: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("SidecarBridge")
-                    .font(.largeTitle.bold())
+                    .font(.title.bold())
                     .fontDesign(.rounded)
                     .minimumScaleFactor(0.8)
-                Text("A secure remote window into your Mac")
-                    .font(.headline)
+                Text("Your workspace. Within reach.")
+                    .font(.callout)
                     .foregroundStyle(.white.opacity(0.78))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -506,29 +545,38 @@ struct PadContentView: View {
             )
             .font(.caption.bold())
             .foregroundStyle(statusColor)
-            Text(model.preferTrackpadControl ? "In-App Display mode" : "System Sidecar mode")
+            Text("Encrypted In-App Display")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.74))
         }
     }
 
     private var connectActionCard: some View {
-        HStack(spacing: 15) {
+        let hasCode = PairingCode.normalize(model.pairingCode).count == PairingCode.characterCount
+        return HStack(spacing: 15) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(model.isConnecting ? "Connecting…" : "Ready to connect")
+                Text(model.isConnecting
+                     ? "Connecting…"
+                     : (hasCode && model.selectedMacName == nil ? "Ready to connect with code" : "Ready to connect"))
                     .font(.headline)
-                Text(model.selectedMacName.map { "Connect to \($0) with full keyboard and trackpad control." } ?? "Select a device to continue.")
+                Text(model.selectedMacName.map { "Connect to \($0) with full keyboard and trackpad control." } ?? "Enter the Mac's 16-digit code below; discovery is not required.")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.72))
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             Button {
-                model.connectSelectedMac()
+                if model.selectedMacName == nil {
+                    model.submitPairingCode()
+                } else {
+                    model.connectSelectedMac()
+                }
             } label: {
                 Group {
                     if model.isConnecting {
                         Label("Connecting…", systemImage: "hourglass")
+                    } else if model.selectedMacName == nil {
+                        Label("Connect with Code", systemImage: "lock.open.fill")
                     } else {
                         Label("Connect", systemImage: "play.fill")
                     }
@@ -538,7 +586,7 @@ struct PadContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.cyan)
-            .disabled(model.selectedMacName == nil || model.isConnected || model.isConnecting)
+            .disabled((model.selectedMacName == nil && !hasCode) || model.isConnected || model.isConnecting)
         }
         .padding(17)
         .background(
@@ -591,20 +639,19 @@ struct PadContentView: View {
     }
 
     private var visibleMacNames: [String] {
-        var names = model.discoveredMacs
-        if let selected = model.selectedMacName, !names.contains(selected) {
-            names.insert(selected, at: 0)
-        }
-        return names
+        // Device rows are an authenticated-device list. A route discovered
+        // by Bonjour/AWDL is intentionally not rendered until pairing has
+        // completed; first-time users connect from the code field instead.
+        return model.discoveredMacs
     }
 
     private var macSelectionPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("My Devices", systemImage: "rectangle.3.group")
+                Label("Your Macs", systemImage: "rectangle.3.group")
                     .font(.headline)
                 Spacer()
-                Text(visibleMacNames.isEmpty ? (model.isConnecting ? "Connecting" : "Searching") : "\(visibleMacNames.count) found")
+                Text(visibleMacNames.isEmpty ? "First connection" : "\(visibleMacNames.count) saved")
                     .font(.caption.bold())
                     .foregroundStyle(.white.opacity(0.55))
                 Button {
@@ -617,13 +664,18 @@ struct PadContentView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .accessibilityLabel("Refresh device list")
+                .disabled(model.isConnecting)
             }
             if visibleMacNames.isEmpty {
                 HStack(spacing: 10) {
-                    ProgressView().tint(.cyan)
-                    Text("Searching cable, local network, and nearby peer-to-peer…")
+                    Image(systemName: model.isConnecting ? "dot.radiowaves.left.and.right" : "lock.badge.clock")
+                        .foregroundStyle(.cyan)
+                    Text(model.isConnecting
+                         ? "Trying local routes for the entered pairing code…"
+                         : "Pair your first Mac to save it here for one-tap connections.")
                         .font(.callout)
                         .foregroundStyle(.white.opacity(0.7))
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer()
                 }
             } else {
@@ -634,21 +686,50 @@ struct PadContentView: View {
         .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16))
     }
 
+    private var deviceWorkspace: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(visibleMacNames.isEmpty ? "Bring your Mac with you" : "Choose your workspace")
+                    .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                Text("Pair securely once. Connect when you're ready.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if horizontalSizeClass == .regular && !dynamicTypeSize.isAccessibilitySize {
+                HStack(alignment: .top, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        macSelectionPanel
+                        Label("You decide when to connect", systemImage: "hand.tap")
+                            .font(.callout.weight(.medium))
+                        Text("Saved devices stay here. Opening this screen does not start a remote session.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    pairingCodePanel.frame(maxWidth: .infinity)
+                }
+            } else {
+                if visibleMacNames.isEmpty {
+                    pairingCodePanel
+                    macSelectionPanel
+                } else {
+                    macSelectionPanel
+                    pairingCodePanel
+                }
+            }
+        }
+    }
+
     private func macDeviceCard(_ name: String) -> some View {
         let isSelected = model.selectedMacName == name
         let isConnected = model.isConnected && isSelected
-        let isRemembered = isSelected && !model.discoveredMacs.contains(name)
+        let isRemembered = !model.availableMacNames.contains(name)
         let subtitle = isConnected
             ? "Connected — keyboard and trackpad are available"
             : isRemembered
-                ? "Saved on this iPad — tap Connect to try the local paths"
-                : isSelected
-                    ? "Selected — ready to connect"
-                    : "Available — tap the card to select"
+                ? "Saved securely · Connect will try its remembered address"
+                : "Available nearby · no code needed"
 
         return HStack(spacing: 12) {
             Button {
-                model.chooseMac(name)
+                model.selectMac(name)
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: isConnected ? "desktopcomputer.and.arrow.forward" : "desktopcomputer")
@@ -672,7 +753,8 @@ struct PadContentView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Mac \(name)")
-            .accessibilityHint(isSelected ? "Selected. Use Connect to start the session." : "Select this Mac without connecting.")
+            .accessibilityHint("Connect to this saved Mac using its trusted pairing.")
+            .disabled(model.isConnecting || model.isConnected)
 
             Button {
                 if !isSelected { model.chooseMac(name) }
@@ -702,17 +784,29 @@ struct PadContentView: View {
 
     private var pairingCodePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label(
-                model.pairingRequired ? "Enter the Mac pairing code" : "Connect with a 16-digit code",
-                systemImage: "lock.badge.clock"
-            )
-                .font(.headline)
-                .foregroundStyle(.cyan)
-            Text("Enter the 16-digit code shown by SidecarBridge on \(model.pairingMacName), including the dashes. It is used for the first connection only; a trusted Keychain credential is saved for later connections. The code authenticates the selected Mac while discovery continues in the background.")
+            HStack {
+                Label("Pair a Mac", systemImage: "plus.circle.fill")
+                    .font(.title3.bold()).foregroundStyle(.cyan)
+                Spacer()
+                Text("FIRST TIME ONLY").font(.caption2.bold()).foregroundStyle(.secondary)
+            }
+            Text("Open SidecarBridge on your Mac. Scan its QR code or enter its 16-digit code, then tap Connect.")
                 .font(.callout)
                 .foregroundStyle(.white.opacity(0.78))
                 .fixedSize(horizontal: false, vertical: true)
 
+            Button { showingPairingScanner = true } label: {
+                Label("Scan Mac Code", systemImage: "qrcode.viewfinder")
+                    .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered).tint(.cyan)
+            .disabled(model.isConnecting)
+            .accessibilityIdentifier("scan-mac-code")
+
+            if let invitation = model.pairingInvitation {
+                Label("\(invitation.name) · ready to pair", systemImage: "checkmark.circle.fill")
+                    .font(.callout.bold()).foregroundStyle(.green)
+            }
             HStack(spacing: 10) {
                 SecureField("0000-0000-0000-0000", text: pairingCodeFieldBinding)
                     .textContentType(.oneTimeCode)
@@ -723,14 +817,28 @@ struct PadContentView: View {
                     .padding(.vertical, 10)
                     .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 12))
                     .onSubmit { model.submitPairingCode() }
+                    .disabled(model.isConnecting)
+                    .accessibilityLabel("16-digit Mac pairing code")
 
-                Button(model.pairingRequired ? "Send Code" : "Connect with Code") {
+                Button("Connect") {
                     model.submitPairingCode()
                 }
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                     .tint(.cyan)
-                    .disabled(model.isConnected || PairingCode.normalize(model.pairingCode).count != PairingCode.characterCount)
+                    .disabled(model.isConnected || model.isConnecting || PairingCode.normalize(model.pairingCode).count != PairingCode.characterCount)
+                    .accessibilityIdentifier("connect-with-code")
             }
+
+            DisclosureGroup("Can’t find the Mac? Enter its address") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Optional: the private IPv4 address shown under Manual connection help in the Mac app. The same encrypted pairing still applies.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextField("192.168.1.122", text: $model.manualMacAddress)
+                        .keyboardType(.decimalPad).autocorrectionDisabled().textInputAutocapitalization(.never)
+                        .textFieldStyle(.roundedBorder).disabled(model.isConnecting)
+                }.padding(.top, 8)
+            }.font(.callout)
 
             if let error = model.pairingError {
                 Text(error)
@@ -738,7 +846,7 @@ struct PadContentView: View {
                     .foregroundStyle(.orange)
             }
 
-            Text(model.selectedMacName.map { "Target: \($0)" } ?? "Select a Mac card before connecting if more than one device is visible.")
+            Label("Encrypted locally. Pairing saved securely for next time.", systemImage: "lock.shield")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.58))
         }
@@ -750,8 +858,29 @@ struct PadContentView: View {
     private var pairingCodeFieldBinding: Binding<String> {
         Binding(
             get: { model.pairingCode },
-            set: { model.pairingCode = PairingCode.formattedInput($0) }
+            set: { model.updatePairingCode($0) }
         )
+    }
+
+    private var connectionAttemptPanel: some View {
+        HStack(spacing: 14) {
+            if model.isConnecting { ProgressView().tint(.cyan) }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(model.localNetworkPermissionNeeded ? "Allow Local Network access" : model.status)
+                    .font(.headline)
+                Text(model.localNetworkPermissionNeeded
+                     ? "Enable Local Network for SidecarBridge in Settings on both devices, then retry."
+                     : "Trying local routes and verifying your Mac. This may take up to 30 seconds.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if model.isConnecting {
+                Button("Cancel", action: model.cancelConnectionAttempt).buttonStyle(.bordered)
+            } else {
+                Button("Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                }.buttonStyle(.bordered)
+            }
+        }.padding(18).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
     }
 
     private var discoveryIdentity: some View {
@@ -983,21 +1112,22 @@ struct PadContentView: View {
             description: "Stays inside this app with Magic Keyboard, trackpad, touch, and Pencil control over an encrypted direct link.",
             badge: "FULL INPUT",
             tint: .cyan,
-            isSelected: model.preferTrackpadControl
+            isSelected: true
         ) {
-            model.setPreferTrackpadControl(true)
+            model.returnToInAppDisplay()
         }
 
         if supportsSystemSidecar {
             PadModeCard(
                 icon: "rectangle.connected.to.line.below",
-                title: "System Sidecar",
-                description: "Apple's native display session opens its separate Sidecar app and suspends this app.",
-                badge: "LEAVES APP",
+                title: "Apple Sidecar setup",
+                description: "Cable or nearby wireless. Select your iPad in Apple's settings to open its separate display.",
+                badge: "SETUP GUIDE",
                 tint: .purple,
-                isSelected: !model.preferTrackpadControl
+                isSelected: false
             ) {
-                model.setPreferTrackpadControl(false)
+                selectedTab = .settings
+                model.showingNativeSidecarSetup = true
             }
         }
     }
@@ -1026,15 +1156,11 @@ struct PadContentView: View {
         .controlSize(.large)
 
         Button {
-            if model.preferTrackpadControl || !supportsSystemSidecar {
-                model.requestFallback()
-            } else {
-                model.requestSystemSidecar()
-            }
+            model.requestFallback()
         } label: {
             Label(
-                model.preferTrackpadControl || !supportsSystemSidecar ? "Start In-App Display" : "Open System Sidecar",
-                systemImage: model.preferTrackpadControl || !supportsSystemSidecar ? "play.fill" : "rectangle.connected.to.line.below"
+                "Start In-App Display",
+                systemImage: "play.fill"
             )
             .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil)
         }
@@ -1168,7 +1294,7 @@ struct PadContentView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Clipboard transfer").font(.headline)
-                    Text("Manual clipboard actions never interrupt live video. Automatic sync is optional and may show iPadOS paste permission prompts.")
+                    Text("Command-V runs on the Mac by default. If the iPad has clipboard content, SidecarBridge asks before sharing it; automatic sync remains optional.")
                         .font(.callout)
                         .foregroundStyle(.white.opacity(0.78))
                         .fixedSize(horizontal: false, vertical: true)
@@ -1279,17 +1405,6 @@ struct PadContentView: View {
                             .accessibilityHidden(true)
                     }
 
-                    if showVirtualCursor {
-                        RemoteCursorOverlay(
-                            normalizedPosition: model.remotePointer,
-                            contentAspectRatio: model.streamAspectRatio,
-                            isPressed: model.pointerIsPressed,
-                            showClickIndicator: showClickFeedback && model.showClickIndicator
-                        )
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                    }
                 }
                 .scaleEffect(viewerScale)
                 .offset(viewerOffset)
@@ -1304,6 +1419,7 @@ struct PadContentView: View {
                     showsSoftwareKeyboard: showsSoftwareKeyboard,
                     showsMagicKeyboardPointer: showMagicKeyboardPointer,
                     onInput: model.sendInput,
+                    onPasteCommand: handleRemotePasteCommand,
                     onPointerCalibration: { mapping in
                         setPointerButtonMapping(mapping)
                     },
@@ -1337,7 +1453,7 @@ struct PadContentView: View {
 
                 Spacer()
 
-                if showBottomHint {
+                if showBottomHint && !showsSoftwareKeyboard {
                     Text(model.remoteInputUnavailable
                          ? "The Mac is not accepting remote input yet • enable Accessibility on the Mac"
                          : model.remoteInputAuthorized
@@ -1357,11 +1473,14 @@ struct PadContentView: View {
                 }
             }
 
-                streamingControlDrawer(availableSize: geometry.size)
+                if !showsSoftwareKeyboard {
+                    streamingControlDrawer(availableSize: geometry.size)
+                }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+            .overlay(alignment: .bottom) {
                 if showsSoftwareKeyboard {
                     onScreenKeyboardAccessory(availableSize: geometry.size)
+                        .padding(.bottom, max(geometry.safeAreaInsets.bottom, 20))
                 }
             }
             // The captured frame, video layer, and UIKit input surface now
@@ -1370,6 +1489,14 @@ struct PadContentView: View {
             // extends under the status/home areas, producing a stable
             // click/pointer offset on iPad.
             .frame(width: geometry.size.width, height: geometry.size.height)
+            .task(id: "\(showsSoftwareKeyboard)-\(geometry.size.width)-\(geometry.size.height)") {
+                guard showsSoftwareKeyboard else { return }
+                while !Task.isCancelled {
+                    followKeyboardCursor(size: geometry.size, bottomInset: geometry.safeAreaInsets.bottom)
+                    do { try await Task.sleep(for: .milliseconds(33)) }
+                    catch { return }
+                }
+            }
         }
         .ignoresSafeArea()
     }
@@ -1565,10 +1692,8 @@ struct PadContentView: View {
                                 if !showsSoftwareKeyboard {
                                     softwareKeyboardModifiers.removeAll()
                                 } else {
-                                    // The special-key controls live in the
-                                    // keyboard accessory above the system
-                                    // keyboard. Close the drawer so it cannot
-                                    // cover that accessory while typing.
+                                    // Close the drawer so it cannot cover the
+                                    // single custom keyboard while typing.
                                     setControlDrawer(open: false)
                                 }
                             } label: {
@@ -1582,7 +1707,7 @@ struct PadContentView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(showsSoftwareKeyboard ? .orange : .cyan)
-                            Text("The on-screen keyboard opens below. Its Special mode contains modifier, navigation, function, editing, input-source, and shortcut keys.")
+                            Text("Opens only the custom keyboard below, with letters, numbers and symbols. Special adds navigation, function and shortcut keys.")
                                 .font(.caption2)
                                 .foregroundStyle(.white.opacity(0.78))
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1630,11 +1755,11 @@ struct PadContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
     }
 
-    /// The special keys belong to the on-screen keyboard, not to the side
-    /// drawer. Keeping this as a safe-area inset places it directly above the
-    /// system keyboard while leaving the viewer/input coordinate space alone.
+    /// One custom keyboard replaces the system software keyboard; the viewer
+    /// retains its existing input/coordinate layout.
     private func onScreenKeyboardAccessory(availableSize: CGSize) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
+        let panelSize = SoftwareKeyboardLayout.panelSize(in: availableSize)
+        return Group {
             RemoteKeyboardToolbar(
                 mode: $softwareKeyboardMode,
                 modifiers: $softwareKeyboardModifiers,
@@ -1646,14 +1771,16 @@ struct PadContentView: View {
                 onHide: {
                     showsSoftwareKeyboard = false
                     softwareKeyboardModifiers.removeAll()
-                }
+                    viewerOffset = clampedViewerOffset(viewerOffset, scale: viewerScale, size: availableSize)
+                },
+                maximumHeight: panelSize.height - 16
             )
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 2)
             .padding(.vertical, 8)
         }
         .frame(
-            maxWidth: min(760, max(280, availableSize.width - 24)),
-            maxHeight: min(360, max(170, availableSize.height * 0.42))
+            width: panelSize.width,
+            height: panelSize.height
         )
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(.white.opacity(0.12)))
@@ -1686,11 +1813,31 @@ struct PadContentView: View {
     }
 
     private func sendSoftwareKeyboardKey(_ key: String, modifiers: Set<String>) {
-        model.sendInput(.key(key, modifiers: Array(modifiers)))
+        if key.lowercased() == "v", modifiers == ["command"] {
+            handleRemotePasteCommand()
+        } else {
+            model.sendInput(.key(key, modifiers: Array(modifiers)))
+        }
     }
 
     private func sendSoftwareKeyboardShortcut(_ key: String, modifiers: [String]) {
-        model.sendInput(.key(key, modifiers: modifiers))
+        if key.lowercased() == "v",
+           RemoteKeyboardInput.normalizedModifiers(modifiers) == ["command"] {
+            handleRemotePasteCommand()
+        } else {
+            model.sendInput(.key(key, modifiers: modifiers))
+        }
+    }
+
+    private func handleRemotePasteCommand() {
+        guard model.isConnected, model.isStreaming else { return }
+        // Only an explicit Command-V checks for local clipboard presence. No
+        // clipboard content is read until the user chooses to share it.
+        if model.hasLocalClipboardContent {
+            showingPasteShareConfirmation = true
+        } else {
+            model.sendPasteCommand()
+        }
     }
 
     private struct TrackpadClickButton: View {
@@ -1773,7 +1920,7 @@ struct PadContentView: View {
     }
 
     private func panViewer(by delta: CGSize, size: CGSize) {
-        guard viewerScale > 1 else { return }
+        guard viewerScale > 1 || showsSoftwareKeyboard else { return }
         viewerOffset = clampedViewerOffset(
             CGSize(width: viewerOffset.width + delta.width, height: viewerOffset.height + delta.height),
             scale: viewerScale,
@@ -1811,17 +1958,33 @@ struct PadContentView: View {
             aspectRatio: model.streamAspectRatio
         )
         let maximumX = max(0, content.width * (scale - 1) / 2)
-        let maximumY = max(0, content.height * (scale - 1) / 2)
+        let keyboardTravel = showsSoftwareKeyboard ? SoftwareKeyboardLayout.panelSize(in: size).height + 68 : 0
+        let maximumY = keyboardTravel + max(0, content.height * (scale - 1) / 2)
         return CGSize(
             width: min(max(offset.width, -maximumX), maximumX),
             height: min(max(offset.height, -maximumY), maximumY)
         )
     }
 
+    private func followKeyboardCursor(size: CGSize, bottomInset: CGFloat) {
+        guard showsSoftwareKeyboard, let cursor = model.remotePointer else { return }
+        let content = RemoteDisplayGeometry.contentRect(in: size, aspectRatio: model.streamAspectRatio)
+        let covered = SoftwareKeyboardLayout.panelSize(in: size).height + max(bottomInset, 20) + 8
+        let travel = CGSize(width: max(0, content.width * (viewerScale - 1) / 2),
+                            height: covered + 40 + max(0, content.height * (viewerScale - 1) / 2))
+        let next = KeyboardCursorFollow.nextOffset(
+            cursor: cursor, content: content, viewport: size, scale: viewerScale,
+            offset: viewerOffset, visibleTop: showTopStatusBar ? 100 : 24,
+            visibleBottom: size.height - covered, travel: travel,
+            immediate: reduceMotion)
+        // No implicit animation: video and input receive the same actual
+        // offset on each step instead of separate presentation transforms.
+        if next != viewerOffset { viewerOffset = next }
+    }
+
     private var streamQualityText: String {
-        guard model.frame == nil else { return "Encrypted HiDPI stream" }
-        guard model.streamFPS > 0 else { return "Hardware H.264 HiDPI" }
-        return "Hardware H.264 HiDPI • \(model.streamFPS) FPS"
+        let dimensions = model.streamDimensions.isEmpty ? "Waiting for video" : model.streamDimensions
+        return "\(dimensions) • \(model.streamFPS) FPS"
     }
 
     private var inputStatusIcon: String {
@@ -1879,8 +2042,13 @@ struct PadContentView: View {
         if model.isConnected {
             return model.isStreaming ? "Mac screen" : "App stream paused"
         }
-        if model.isConnecting { return "Connecting to selected Mac…" }
+        if model.isConnecting {
+            return model.selectedMacName == nil ? "Connecting with pairing code…" : "Connecting to selected Mac…"
+        }
         if model.selectedMacName != nil { return "Ready to connect to selected Mac" }
+        if PairingCode.normalize(model.pairingCode).count == PairingCode.characterCount {
+            return "Ready to connect with pairing code"
+        }
         return model.discoveredMacs.isEmpty ? "Looking for your Mac…" : "Mac ready to connect"
     }
 
@@ -1888,10 +2056,13 @@ struct PadContentView: View {
         if model.isConnected {
             return model.isStreaming ? model.detail : "Choose App Stream to continue controlling this Mac."
         }
-        if model.isConnecting { return "Establishing the encrypted local session. This can use the direct or nearby path." }
+        if model.isConnecting {
+            return model.selectedMacName.map { "Establishing the encrypted local session with \($0)." }
+                ?? "Trying local routes for the entered 16-digit code."
+        }
         return model.selectedMacName.map { "Use the Connect button on the \($0) device card to start the encrypted session." }
             ?? (model.discoveredMacs.isEmpty
-                ? "Keep SidecarBridge open on the Mac while discovery runs."
+                ? "Enter the Mac's 16-digit code below; a discovered device card is not required."
                 : "Select a Mac device card, then tap Connect when you are ready.")
     }
 
@@ -1916,231 +2087,8 @@ struct PadContentView: View {
     }
 }
 
-/// A compact remote keyboard accessory inspired by AnyDesk's iPad session
-/// menu. UIKit still owns normal text entry and IME composition; this view
-/// adds the keys that are difficult to reach from an iPad software keyboard.
-private struct RemoteKeyboardToolbar: View {
-    @Binding var mode: SoftwareKeyboardMode
-    @Binding var modifiers: Set<String>
-
-    let onKey: (String, Set<String>) -> Void
-    let onShortcut: (String, [String]) -> Void
-    let onInputMode: () -> Void
-    let onCycleInputMode: () -> Void
-    let onClearModifiers: () -> Void
-    let onHide: () -> Void
-
-    private let functionKeys = (1...12).map { "f\($0)" }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Label("Special input", systemImage: "command.square")
-                    .font(.caption.bold())
-                    .foregroundStyle(.white.opacity(0.84))
-                Spacer(minLength: 4)
-                Picker("Keyboard mode", selection: $mode) {
-                    ForEach(SoftwareKeyboardMode.allCases) { item in
-                        Text(item.title).tag(item)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 142)
-                .accessibilityLabel("Remote keyboard mode")
-            }
-
-            modifierRow
-
-            if mode == .special {
-                keyRow([
-                    ("Esc", "escape"),
-                    ("Tab", "tab"),
-                    ("Caps", "capslock"),
-                    ("Delete", "delete"),
-                    ("Forward", "forwarddelete"),
-                    ("Return", "return"),
-                    ("Space", "space")
-                ])
-
-                keyRow([
-                    ("Home", "home"),
-                    ("End", "end"),
-                    ("Pg Up", "pageup"),
-                    ("Pg Dn", "pagedown"),
-                    ("←", "left"),
-                    ("↑", "up"),
-                    ("↓", "down"),
-                    ("→", "right")
-                ])
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 5) {
-                        ForEach(functionKeys, id: \.self) { key in
-                            keyButton(title: key.uppercased(), key: key, width: 42)
-                        }
-                    }
-                }
-
-                shortcutRow
-                inputModeRow
-            } else {
-                Text("Use the standard iPad keyboard for letters and numbers. Modifier buttons stay available for shortcuts.")
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.72))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            HStack(spacing: 8) {
-                Button {
-                    onClearModifiers()
-                } label: {
-                    Label("Clear", systemImage: "xmark.circle")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(modifiers.isEmpty)
-
-                Button {
-                    onHide()
-                } label: {
-                    Label("Hide", systemImage: "keyboard.chevron.compact.down")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
-            }
-        }
-        .padding(10)
-        .background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.08)))
-        .accessibilityElement(children: .contain)
-    }
-
-    private var modifierRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 5) {
-                modifierButton(title: "⌘", name: "Command", key: "command")
-                modifierButton(title: "⌥", name: "Option", key: "option")
-                modifierButton(title: "⌃", name: "Control", key: "control")
-                modifierButton(title: "⇧", name: "Shift", key: "shift")
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 5) {
-                    modifierButton(title: "⌘", name: "Command", key: "command")
-                    modifierButton(title: "⌥", name: "Option", key: "option")
-                    modifierButton(title: "⌃", name: "Control", key: "control")
-                    modifierButton(title: "⇧", name: "Shift", key: "shift")
-                }
-            }
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var shortcutRow: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("Common shortcuts")
-                .font(.caption2.bold())
-                .foregroundStyle(.white.opacity(0.64))
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 5) {
-                    shortcutButton("⌘C", key: "c", modifiers: ["command"], description: "Copy")
-                    shortcutButton("⌘V", key: "v", modifiers: ["command"], description: "Paste")
-                    shortcutButton("⌘X", key: "x", modifiers: ["command"], description: "Cut")
-                    shortcutButton("⌘A", key: "a", modifiers: ["command"], description: "Select all")
-                    shortcutButton("⌘Z", key: "z", modifiers: ["command"], description: "Undo")
-                    shortcutButton("⇧⌘Z", key: "z", modifiers: ["command", "shift"], description: "Redo")
-                    shortcutButton("⌘Tab", key: "tab", modifiers: ["command"], description: "Switch app")
-                }
-            }
-        }
-    }
-
-    private var inputModeRow: some View {
-        HStack(spacing: 5) {
-            Button {
-                onInputMode()
-            } label: {
-                Label("中/英", systemImage: "character.cursor.ibeam")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.purple)
-            .accessibilityLabel("Toggle Chinese and English input")
-
-            Button {
-                onCycleInputMode()
-            } label: {
-                Label("Globe", systemImage: "globe")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .accessibilityLabel("Cycle Mac input source")
-        }
-    }
-
-    private func keyRow(_ keys: [(String, String)]) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 5) {
-                ForEach(Array(keys.enumerated()), id: \.offset) { _, item in
-                    keyButton(title: item.0, key: item.1)
-                }
-            }
-        }
-    }
-
-    private func modifierButton(title: String, name: String, key: String) -> some View {
-        let isActive = modifiers.contains(key)
-        return Button {
-            if isActive {
-                modifiers.remove(key)
-            } else {
-                modifiers.insert(key)
-            }
-        } label: {
-            Text(title)
-                .font(.headline.bold())
-                .frame(maxWidth: .infinity, minHeight: 34)
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(isActive ? .cyan : .white.opacity(0.18))
-        .accessibilityLabel("(name) modifier")
-        .accessibilityValue(isActive ? "Held" : "Not held")
-    }
-
-    private func keyButton(title: String, key: String, width: CGFloat = 58) -> some View {
-        Button {
-            onKey(key, modifiers)
-        } label: {
-            Text(title)
-                .font(.caption2.bold())
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .frame(minWidth: width, minHeight: 34)
-        }
-        .buttonStyle(.bordered)
-        .tint(.white.opacity(0.86))
-        .accessibilityLabel(title)
-        .accessibilityHint(modifiers.isEmpty ? "Send key" : "Send key with held modifiers")
-    }
-
-    private func shortcutButton(
-        _ title: String,
-        key: String,
-        modifiers: [String],
-        description: String
-    ) -> some View {
-        Button {
-            onShortcut(key, modifiers)
-        } label: {
-            Text(title)
-                .font(.caption2.bold())
-                .frame(minWidth: 48, minHeight: 34)
-        }
-        .buttonStyle(.bordered)
-        .tint(.indigo)
-        .accessibilityLabel(description)
-    }
-}
+/// Complete remote keyboard. Keys are executed by the Mac, including its
+/// active input source. No second iPad software keyboard is requested.
 
 private struct MacDiscoveryPulse: View {
     let tint: Color
@@ -2236,55 +2184,6 @@ private struct DiscoveryPathTile: View {
         Text(state)
             .font(.caption2.bold())
             .foregroundStyle(tint)
-    }
-}
-
-private struct RemoteCursorOverlay: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let normalizedPosition: CGPoint?
-    let contentAspectRatio: CGFloat
-    let isPressed: Bool
-    let showClickIndicator: Bool
-
-    var body: some View {
-        GeometryReader { geometry in
-            if let normalizedPosition {
-                let rect = contentRect(in: geometry.size)
-                let point = CGPoint(
-                    x: rect.minX + normalizedPosition.x * rect.width,
-                    y: rect.minY + normalizedPosition.y * rect.height
-                )
-
-                ZStack {
-                    if showClickIndicator || isPressed {
-                        Circle()
-                            .stroke(isPressed ? Color.cyan : Color.white, lineWidth: 3)
-                            .background(Circle().fill(Color.cyan.opacity(isPressed ? 0.22 : 0.1)))
-                            .frame(width: isPressed ? 34 : 46, height: isPressed ? 34 : 46)
-                            .position(point)
-                            .transition(.scale.combined(with: .opacity))
-                    }
-
-                    Image(systemName: "cursorarrow")
-                        .font(.system(size: 29, weight: .black))
-                        .foregroundStyle(.white)
-                        .shadow(color: .black, radius: 2, x: 1, y: 2)
-                        .overlay {
-                            Image(systemName: "cursorarrow")
-                                .font(.system(size: 29, weight: .black))
-                                .foregroundStyle(.clear)
-                                .shadow(color: .cyan.opacity(isPressed ? 0.9 : 0.45), radius: isPressed ? 8 : 4)
-                        }
-                        .position(x: point.x + 10, y: point.y + 13)
-                }
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: showClickIndicator)
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: isPressed)
-            }
-        }
-    }
-
-    private func contentRect(in size: CGSize) -> CGRect {
-        RemoteDisplayGeometry.contentRect(in: size, aspectRatio: contentAspectRatio)
     }
 }
 
@@ -2544,7 +2443,6 @@ private struct PadFileManagerView: View {
 
 private struct PadSettingsPanel: View {
     @ObservedObject var model: PadConnectionModel
-    @Binding var showVirtualCursor: Bool
     @Binding var showMagicKeyboardPointer: Bool
     @Binding var showClickFeedback: Bool
     @Binding var showTopStatusBar: Bool
@@ -2591,18 +2489,17 @@ private struct PadSettingsPanel: View {
                     }
 
                     Button {
-                        onOpenRemoteControl()
                         if !model.isConnected {
+                            onOpenRemoteControl()
                             model.connectSelectedMac()
-                        } else if model.preferTrackpadControl || !supportsSystemSidecar {
-                            model.requestFallback()
                         } else {
-                            model.requestSystemSidecar()
+                            onOpenRemoteControl()
+                            model.requestFallback()
                         }
                     } label: {
                         Label(
                             model.isConnected
-                                ? (model.preferTrackpadControl || !supportsSystemSidecar ? "Open In-App Display" : "Open System Sidecar")
+                                ? "Open In-App Display"
                                 : "Connect to selected Mac",
                             systemImage: model.isConnected ? "play.fill" : "arrow.right.circle.fill"
                         )
@@ -2617,26 +2514,27 @@ private struct PadSettingsPanel: View {
                     Text("Connection settings stay separate from the remote viewer, so you can reach them before and during a session.")
                 }
 
-                Section("Display mode") {
+                Section("Display and native setup") {
                     settingsModeButton(
                         title: "In-App Display",
                         detail: "Keep the Mac screen, keyboard, and trackpad inside SidecarBridge.",
                         icon: "cursorarrow.motionlines",
                         tint: .cyan,
-                        selected: model.preferTrackpadControl
+                        selected: true
                     ) {
-                        model.setPreferTrackpadControl(true)
+                        model.returnToInAppDisplay()
+                        if model.isConnected { onOpenRemoteControl() }
                     }
 
                     if supportsSystemSidecar {
                         settingsModeButton(
-                            title: "System Sidecar",
-                            detail: "Open Apple's separate display session.",
+                            title: "Apple Sidecar setup",
+                            detail: "Cable or nearby wireless — set up Apple's separate display.",
                             icon: "rectangle.connected.to.line.below",
                             tint: .purple,
-                            selected: !model.preferTrackpadControl
+                            selected: false
                         ) {
-                            model.setPreferTrackpadControl(false)
+                            model.showingNativeSidecarSetup = true
                         }
                     }
                 }
@@ -2663,6 +2561,9 @@ private struct PadSettingsPanel: View {
                         }
                     }
                     Text("90/120 FPS is available on capable direct or nearby links. Ultra FPS in Developer options adds higher targets for testing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Requested: \(model.streamFrameRate.rawValue) FPS · iPad display limit: \(model.viewerRefreshRate) Hz. Delivered FPS and resolution can be lower because of the source display, network, background state, or memory pressure.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -2803,6 +2704,11 @@ private struct PadSettingsPanel: View {
                         } label: {
                             Label("System information", systemImage: "info.circle")
                         }
+                        NavigationLink {
+                            OfflineKeyboardDiagnosticView()
+                        } label: {
+                            Label("Offline keyboard test", systemImage: "keyboard.badge.eye")
+                        }
                         Button {
                             model.refreshSystemInformation()
                         } label: {
@@ -2859,7 +2765,7 @@ private struct PadSettingsPanel: View {
                         }
                         .disabled(!model.ultraModeEnabled)
 
-                        Text("When enabled, this profile is sent to the Mac. Healthy foreground P2P can target up to 240 FPS and 2K capture. The display and link still determine the measured rate; OS-critical memory pressure and real congestion retain safety limits.")
+                        Text("When enabled, this profile is sent to the Mac. This iPad display currently reports a maximum of \(model.viewerRefreshRate) FPS, so the measured rate cannot exceed that physical ceiling. Ultra keeps the negotiated cadence stable and reduces bitrate/quality first under pressure.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } header: {
@@ -2873,6 +2779,11 @@ private struct PadSettingsPanel: View {
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: $model.showingNativeSidecarSetup) {
+                if supportsSystemSidecar {
+                    PadNativeSidecarSetupView(model: model, onOpenRemoteControl: onOpenRemoteControl)
+                }
+            }
         }
         .tint(.cyan)
         .sheet(isPresented: $showingSystemInformation) {
@@ -3058,7 +2969,7 @@ private struct PadSettingsPanel: View {
         } header: {
             Text("Transfers")
         } footer: {
-            Text("Automatic clipboard sync is off by default to keep the live viewer smooth. Enable it only if you accept iPadOS paste permission prompts; manual send and receive buttons remain available.")
+            Text("Command-V runs on the Mac by default. Sharing the iPad clipboard is explicit; automatic sync is optional and may show an iPadOS paste permission prompt.")
         }
     }
 

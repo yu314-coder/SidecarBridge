@@ -23,6 +23,12 @@ final class PadLANService {
     private var bonjourHostsByMac: [String: [String]] = [:]
     private var multipeerHostsByMac: [String: [String]] = [:]
     private var selectedMacName: String?
+    private var expectedMacID: String?
+    private var preferredHosts: [String] = []
+    private var candidateHost: String?
+    private var rejectedEndpointKeys = Set<String>()
+    private let attemptToken = ConnectionAttemptToken()
+    private var activeAttemptToken: UUID?
     // Discovery is always passive. This gate is set only by selectMac(named:)
     // after the user taps Connect, so a Bonjour/AWDL result can never dial the
     // Mac merely because it was found.
@@ -47,6 +53,10 @@ final class PadLANService {
     private var pairingSecret: Data?
     private var pairingChannelBinding: Data?
     private var submittedPairingCode: String?
+    // A code-first attempt is allowed to run before Bonjour/AWDL has exposed
+    // a device name. Keep the code while the fixed-port subnet probes and
+    // discovered service endpoints try possible Mac routes.
+    private var codeFirstPairingRequested = false
     private var usedSavedCredential = false
     private var receiveBuffer = Data()
     private var pendingInput = RemoteInputCoalescer()
@@ -58,9 +68,12 @@ final class PadLANService {
     }
 
     func restart() {
+        let token = attemptToken.begin()
         queue.async { [weak self] in
             guard let self else { return }
+            self.activeAttemptToken = token
             self.userRequestedConnection = false
+            self.codeFirstPairingRequested = false
             self.selectedMacName = nil
             self.browserRestartWorkItem?.cancel()
             self.browserRestartWorkItem = nil
@@ -115,6 +128,7 @@ final class PadLANService {
     }
 
     func stop() {
+        attemptToken.begin()
         queue.async { [weak self] in
             self?.browserRestartWorkItem?.cancel()
             self?.browserRestartWorkItem = nil
@@ -123,6 +137,7 @@ final class PadLANService {
             self?.connectionAttemptWorkItem?.cancel()
             self?.connectionAttemptWorkItem = nil
             self?.cancelSubnetProbes()
+            self?.codeFirstPairingRequested = false
             self?.browser?.cancel()
             self?.browser = nil
             self?.connection?.cancel()
@@ -168,11 +183,53 @@ final class PadLANService {
         }
     }
 
+    /// Starts a first-time pairing attempt without requiring a discovered
+    /// device card. The pairing code authenticates the Mac after the TCP
+    /// listener is reached; Bonjour/AWDL and the fixed-port local subnet
+    /// probe are only route mechanisms, not consent or identity.
+    func connectWithPairingCode(_ code: String, invitation: PairingInvitation? = nil, host: String? = nil) {
+        let normalized = PairingCode.normalize(code)
+        guard normalized.count == PairingCode.characterCount else { return }
+        let token = attemptToken.begin()
+        queue.async { [weak self] in
+            guard let self, normalized.count == PairingCode.characterCount else { return }
+            self.activeAttemptToken = token
+            self.userRequestedConnection = true
+            self.codeFirstPairingRequested = true
+            self.selectedMacName = invitation?.name
+            self.expectedMacID = invitation?.macID
+            self.preferredHosts = (invitation?.hosts ?? []) + [host].compactMap { $0 }.filter(BridgeNetworkMetadata.isPrivateIPv4Address)
+            self.rejectedEndpointKeys.removeAll()
+            self.submittedPairingCode = normalized
+            self.connectionAttemptWorkItem?.cancel()
+            self.connectionAttemptWorkItem = nil
+            self.cancelSubnetProbes()
+            self.connection?.cancel()
+            self.clearConnection(notify: false)
+            self.nextEndpointIndex = 0
+            self.triedCachedHostForBrowser = false
+            // The scanned/private address is the first candidate. Do not
+            // also probe it in parallel and create two competing handshakes.
+            self.connectNextAvailable()
+            self.scheduleSubnetProbe(after: 0.1)
+            if self.browser == nil {
+                self.startBrowser()
+            }
+        }
+    }
+
     func selectMac(named name: String) {
+        let token = attemptToken.begin()
         queue.async { [weak self] in
             guard let self else { return }
+            self.activeAttemptToken = token
             self.userRequestedConnection = true
+            self.codeFirstPairingRequested = false
             self.selectedMacName = name
+            let saved = SavedMacRouteStore.route(named: name)
+            self.expectedMacID = saved?.macID
+            self.preferredHosts = saved?.hosts ?? []
+            self.rejectedEndpointKeys.removeAll()
             self.connection?.cancel()
             self.clearConnection(notify: false)
             self.nextEndpointIndex = 0
@@ -190,10 +247,16 @@ final class PadLANService {
     /// target. This is used by the explicit-connect flow so discovering a Mac
     /// never silently opens a session.
     func clearSelectedMac() {
+        let token = attemptToken.begin()
         queue.async { [weak self] in
             guard let self else { return }
+            self.activeAttemptToken = token
             self.userRequestedConnection = false
+            self.codeFirstPairingRequested = false
             self.selectedMacName = nil
+            self.expectedMacID = nil
+            self.preferredHosts.removeAll()
+            self.rejectedEndpointKeys.removeAll()
             self.connectionAttemptWorkItem?.cancel()
             self.connectionAttemptWorkItem = nil
             self.cancelSubnetProbes()
@@ -210,7 +273,7 @@ final class PadLANService {
         queue.async { [weak self] in
             guard let self else { return }
             self.multipeerHostsByMac[name] = hosts
-            if self.selectedMacName == name,
+            if (self.selectedMacName == name || self.codeFirstPairingRequested),
                !self.isConnected,
                self.connection == nil {
                 self.connectNextAvailable()
@@ -227,8 +290,8 @@ final class PadLANService {
             for: .bonjourWithTXTRecord(type: BridgeConstants.lanServiceType, domain: nil),
             using: parameters
         )
-        browser.browseResultsChangedHandler = { [weak self] results, _ in
-            guard let self else { return }
+        browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
+            guard let self, let browser, self.browser === browser else { return }
             print("[SidecarBridge/LAN] Bonjour results: \(results.count)")
             for result in results {
                 guard case let .service(name, _, _, _) = result.endpoint else { continue }
@@ -269,8 +332,8 @@ final class PadLANService {
             }
             self.connectNextAvailable()
         }
-        browser.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
+        browser.stateUpdateHandler = { [weak self, weak browser] state in
+            guard let self, let browser, self.browser === browser else { return }
             print("[SidecarBridge/LAN] Browser state: \(state)")
             switch state {
             case .ready:
@@ -311,17 +374,31 @@ final class PadLANService {
     }
 
     private func connectNextAvailable() {
-        guard userRequestedConnection, connection == nil, let selectedMacName else { return }
-        let serviceEndpoints = endpoints.filter {
-            guard case let .service(name, _, _, _) = $0 else { return false }
-            return name == selectedMacName
+        guard userRequestedConnection, connection == nil else { return }
+        let serviceEndpoints: [NWEndpoint]
+        let advertisedHosts: [String]
+        if let selectedMacName {
+            serviceEndpoints = endpoints.filter {
+                guard case let .service(name, _, _, _) = $0 else { return false }
+                return name == selectedMacName
+            }
+            advertisedHosts = (multipeerHostsByMac[selectedMacName] ?? []) +
+                (bonjourHostsByMac[selectedMacName] ?? [])
+        } else if codeFirstPairingRequested {
+            // Code-first pairing deliberately does not need a device name.
+            // Use every route currently known to the passive browsers; the
+            // Mac's pairing proof decides which listener accepts the code.
+            serviceEndpoints = endpoints
+            advertisedHosts = Array(
+                Set(multipeerHostsByMac.values.flatMap { $0 } + bonjourHostsByMac.values.flatMap { $0 })
+            )
+        } else {
+            return
         }
-        let advertisedHosts = (multipeerHostsByMac[selectedMacName] ?? []) +
-            (bonjourHostsByMac[selectedMacName] ?? [])
         let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort)
         var selectableEndpoints: [NWEndpoint] = []
         if let port {
-            selectableEndpoints.append(contentsOf: advertisedHosts.map {
+            selectableEndpoints.append(contentsOf: (preferredHosts + advertisedHosts).map {
                 .hostPort(host: NWEndpoint.Host($0), port: port)
             })
         }
@@ -329,7 +406,7 @@ final class PadLANService {
         var seen = Set<String>()
         selectableEndpoints = selectableEndpoints.filter { endpoint in
             let key = String(describing: endpoint)
-            return seen.insert(key).inserted
+            return !rejectedEndpointKeys.contains(key) && seen.insert(key).inserted
         }
         guard !selectableEndpoints.isEmpty else { return }
         if nextEndpointIndex >= selectableEndpoints.count { nextEndpointIndex = 0 }
@@ -346,15 +423,9 @@ final class PadLANService {
             print("[SidecarBridge/LAN] Connection state: \(state)")
             switch state {
             case .ready:
-                self.connectionAttemptWorkItem?.cancel()
-                self.connectionAttemptWorkItem = nil
-                if let host = Self.privateIPv4Host(connection.currentPath?.remoteEndpoint)
-                    ?? Self.privateIPv4Host(endpoint) {
-                    // Keep the last dialable address even when this session
-                    // arrived through Bonjour. If multicast is filtered on the
-                    // next launch, the iPad can still start a direct attempt.
-                    UserDefaults.standard.set(host, forKey: "lastDirectMacHost")
-                }
+                // Keep the timeout armed through authentication, not just TCP.
+                self.candidateHost = Self.privateIPv4Host(connection.currentPath?.remoteEndpoint)
+                    ?? Self.privateIPv4Host(endpoint)
                 self.beginHandshake(on: connection)
                 self.receive(on: connection)
             case .failed(let error):
@@ -445,6 +516,18 @@ final class PadLANService {
                   let nonce = response.authNonce else {
                 throw LANWire.LANError.authenticationFailed
             }
+            guard expectedMacID == nil || expectedMacID == macID else {
+                skipUnauthenticatedCandidate()
+                return
+            }
+            // Legacy saved cards have no persisted ID yet. Keep a subnet
+            // probe from connecting to another previously paired Mac; the
+            // name selects a candidate, then the Keychain proof verifies it.
+            if expectedMacID == nil, !codeFirstPairingRequested,
+               let selectedMacName, selectedMacName != response.deviceName {
+                skipUnauthenticatedCandidate()
+                return
+            }
             pairingMacID = macID
             pairingMacName = response.deviceName
             pairingNonce = nonce
@@ -485,24 +568,20 @@ final class PadLANService {
         let identity = PadDeviceIdentity.current
 
         let account = "pad.mac.\(macID)"
-        let secret: Data
-        if let credential = SecureCredentialStore.data(account: account) {
-            secret = credential
-            usedSavedCredential = true
-        } else if let code = submittedPairingCode, code.count == PairingCode.characterCount {
-            secret = Data(code.utf8)
-            usedSavedCredential = false
-        } else {
-            DispatchQueue.main.async {
-                self.onPairingCodeRequired?(
-                    self.pairingMacName ?? "Mac",
-                    self.submittedPairingCode == nil
-                        ? nil
-                        : "Enter the complete 16-digit code shown on the Mac."
-                )
-            }
+        guard let selection = PairingSecretSelection.select(
+            code: submittedPairingCode,
+            savedCredential: SecureCredentialStore.data(account: account)
+        ) else {
+            connectionAttemptWorkItem?.cancel()
+            connectionAttemptWorkItem = nil
+            requirePairingCode(
+                macName: pairingMacName ?? "Mac",
+                detail: submittedPairingCode == nil ? nil : "Enter the complete 16-digit code shown on the Mac."
+            )
             return
         }
+        let secret = selection.secret
+        usedSavedCredential = selection.usedSaved
 
         let channelBinding = PairingProof.lanChannelBinding(
             clientPublicKey: clientPublicKey,
@@ -555,34 +634,43 @@ final class PadLANService {
                 guard SecureCredentialStore.set(credential, account: "pad.mac.\(macID)") else {
                     clearConnection(
                         notify: true,
-                        error: "The trusted Mac credential could not be saved in Keychain. Use Forget All on the Mac, then pair again."
+                        error: "Could not save this Mac securely. Unlock the iPad and retry; your other saved Macs are unchanged."
                     )
                     return
                 }
             }
+            SavedMacRouteStore.remember(
+                macID: macID, name: pairingMacName ?? "Mac",
+                hosts: [candidateHost].compactMap { $0 }
+            )
+            connectionAttemptWorkItem?.cancel()
+            connectionAttemptWorkItem = nil
             isConnected = true
+            if codeFirstPairingRequested, let connectedMacName = pairingMacName {
+                // Persist the authenticated identity as the future route
+                // selector. The device did not need to be discovered first,
+                // but subsequent reconnects can use its cached address.
+                selectedMacName = connectedMacName
+            }
             submittedPairingCode = nil
+            codeFirstPairingRequested = false
             pairingSecret = nil
             print("[SidecarBridge/LAN] Trusted encrypted handshake complete with \(pairingMacName ?? "Mac")")
             notify(connected: true, value: "LAN:\(pairingMacName ?? "Mac")")
         case .rejected:
-            // The Mac has explicitly told us that the saved credential is
-            // stale. Remove only this Mac's entry so the next submission uses
-            // the displayed one-time code instead of retrying the same bad
-            // credential forever. The Mac will issue a replacement credential
-            // after that one successful repair proof.
-            if usedSavedCredential, let macID = pairingMacID {
-                SecureCredentialStore.remove(account: "pad.mac.\(macID)")
-                usedSavedCredential = false
+            // An unverified rejection must not erase a trusted credential.
+            // During unaddressed code-first pairing it may be a different Mac.
+            if codeFirstPairingRequested && expectedMacID == nil && preferredHosts.isEmpty {
+                skipUnauthenticatedCandidate()
+                return
             }
+            connectionAttemptWorkItem?.cancel()
+            connectionAttemptWorkItem = nil
+            usedSavedCredential = false
             submittedPairingCode = nil
+            codeFirstPairingRequested = false
             pairingSecret = nil
-            DispatchQueue.main.async {
-                self.onPairingCodeRequired?(
-                    self.pairingMacName ?? "Mac",
-                    message.detail ?? "The one-time code was not accepted."
-                )
-            }
+            requirePairingCode(macName: pairingMacName ?? "Mac", detail: message.detail ?? "The one-time code was not accepted.")
         case .challenge, .response:
             break
         }
@@ -766,12 +854,12 @@ final class PadLANService {
 
     private func tryCachedDirectHost() {
         guard userRequestedConnection,
-              selectedMacName != nil,
+              (selectedMacName != nil || codeFirstPairingRequested),
               !triedCachedHostForBrowser,
               !isConnected,
               connection == nil,
               subnetProbeConnections.isEmpty,
-              let host = UserDefaults.standard.string(forKey: "lastDirectMacHost"),
+              let host = preferredHosts.first,
               Self.isPrivateIPv4Address(host),
               let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort) else { return }
         triedCachedHostForBrowser = true
@@ -787,7 +875,7 @@ final class PadLANService {
               selectedMacName != nil,
               !isConnected,
               connection == nil,
-              let host = UserDefaults.standard.string(forKey: "lastDirectMacHost"),
+              let host = preferredHosts.first,
               Self.isPrivateIPv4Address(host),
               let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort) else {
             return false
@@ -801,7 +889,8 @@ final class PadLANService {
     }
 
     private func probe(host: String, port: NWEndpoint.Port, generation: Int) {
-        guard subnetProbeConnections[host] == nil else { return }
+        guard subnetProbeConnections[host] == nil,
+              !rejectedEndpointKeys.contains(String(describing: NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port))) else { return }
         let probe = NWConnection(host: NWEndpoint.Host(host), port: port, using: lowLatencyParameters())
         subnetProbeConnections[host] = probe
         probe.stateUpdateHandler = { [weak self, weak probe] state in
@@ -838,8 +927,9 @@ final class PadLANService {
 
         cancelSubnetProbes(except: directConnection)
         print("[SidecarBridge/LAN] Fixed-port fallback found \(host):\(BridgeConstants.directPort)")
-        UserDefaults.standard.set(host, forKey: "lastDirectMacHost")
+        candidateHost = host
         connection = directConnection
+        armConnectionAttemptTimeout(for: directConnection)
         privateKey = Curve25519.KeyAgreement.PrivateKey()
         directConnection.stateUpdateHandler = { [weak self, weak directConnection] state in
             guard let self,
@@ -929,10 +1019,7 @@ final class PadLANService {
     }
 
     private static func isPrivateIPv4Address(_ address: String) -> Bool {
-        let parts = address.split(separator: ".").compactMap { Int($0) }
-        return parts.count == 4 &&
-            parts.allSatisfy { (0...255).contains($0) } &&
-            isPrivateIPv4(parts)
+        BridgeNetworkMetadata.isPrivateIPv4Address(address)
     }
 
     private static func privateIPv4Host(_ endpoint: NWEndpoint?) -> String? {
@@ -963,14 +1050,23 @@ final class PadLANService {
     /// stale service, so checking only whether the browser result list is
     /// non-empty is not sufficient.
     private var hasSelectableDirectCandidate: Bool {
-        guard let selectedMacName else { return false }
-        let hasService = endpoints.contains {
-            guard case let .service(name, _, _, _) = $0 else { return false }
-            return name == selectedMacName
+        if let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort),
+           preferredHosts.contains(where: {
+               !rejectedEndpointKeys.contains(String(describing: NWEndpoint.hostPort(host: NWEndpoint.Host($0), port: port)))
+           }) { return true }
+        if let selectedMacName {
+            let hasService = endpoints.contains {
+                guard case let .service(name, _, _, _) = $0 else { return false }
+                return name == selectedMacName
+            }
+            return hasService ||
+                !(bonjourHostsByMac[selectedMacName] ?? []).isEmpty ||
+                !(multipeerHostsByMac[selectedMacName] ?? []).isEmpty
         }
-        return hasService ||
-            !(bonjourHostsByMac[selectedMacName] ?? []).isEmpty ||
-            !(multipeerHostsByMac[selectedMacName] ?? []).isEmpty
+        guard codeFirstPairingRequested else { return false }
+        return !endpoints.isEmpty ||
+            multipeerHostsByMac.values.contains { !$0.isEmpty } ||
+            bonjourHostsByMac.values.contains { !$0.isEmpty }
     }
 
     /// A Bonjour endpoint may survive while its route has gone stale. Do not
@@ -982,12 +1078,8 @@ final class PadLANService {
                   let activeConnection,
                   self.connection === activeConnection,
                   !self.isConnected else { return }
-            print("[SidecarBridge/LAN] Connection attempt timed out; rebuilding discovery")
-            activeConnection.cancel()
-            self.clearConnection(notify: true, error: "Direct connection timed out; refreshing discovery.")
-            self.endpoints.removeAll()
-            self.nextEndpointIndex = 0
-            self.scheduleBrowserRestart(after: 0.25)
+            print("[SidecarBridge/LAN] Candidate timed out; trying another local route")
+            self.skipUnauthenticatedCandidate()
         }
         // A Wi-Fi-to-AWDL path can spend several seconds in preparing while
         // iPadOS changes interfaces. Four seconds caused false failures that
@@ -1020,7 +1112,10 @@ final class PadLANService {
         let wasConnected = isConnected
         connectionAttemptWorkItem?.cancel()
         connectionAttemptWorkItem = nil
+        let previousConnection = connection
         connection = nil
+        previousConnection?.cancel()
+        candidateHost = nil
         privateKey = nil
         secureSession = nil
         receiveBuffer.removeAll(keepingCapacity: true)
@@ -1032,21 +1127,51 @@ final class PadLANService {
         pairingServerPublicKey = nil
         pairingSecret = nil
         pairingChannelBinding = nil
-        submittedPairingCode = nil
+        if !codeFirstPairingRequested {
+            submittedPairingCode = nil
+        }
         usedSavedCredential = false
         isConnected = false
         if shouldNotify && (wasConnected || error != nil) { notify(connected: false, value: error) }
     }
 
+    private func skipUnauthenticatedCandidate() {
+        if let endpoint = connection?.endpoint {
+            rejectedEndpointKeys.insert(String(describing: endpoint))
+        }
+        if let host = candidateHost, let port = NWEndpoint.Port(rawValue: BridgeConstants.directPort) {
+            rejectedEndpointKeys.insert(String(describing: NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)))
+        }
+        clearConnection(notify: false)
+        nextEndpointIndex = 0
+        retrySoon()
+    }
+
     private func notify(connected: Bool, value: String?) {
-        DispatchQueue.main.async { self.onConnectionChanged?(connected, value) }
+        // Discovery is not the active data connection. A browser failure
+        // while encrypted traffic is flowing must not announce a disconnect.
+        guard connected || !isConnected else { return }
+        let token = activeAttemptToken
+        DispatchQueue.main.async {
+            guard token.map(self.attemptToken.isCurrent) ?? true else { return }
+            self.onConnectionChanged?(connected, value)
+        }
     }
 
     private func notifyLocalNetwork(_ state: LocalNetworkAccessState) {
         DispatchQueue.main.async { self.onLocalNetworkStateChanged?(state) }
     }
 
+    private func requirePairingCode(macName: String, detail: String?) {
+        let token = activeAttemptToken
+        DispatchQueue.main.async {
+            guard token.map(self.attemptToken.isCurrent) ?? true else { return }
+            self.onPairingCodeRequired?(macName, detail)
+        }
+    }
+
     private func accessState(for error: Error) -> LocalNetworkAccessState {
+        if let error = error as? NWError, case .dns(-65570) = error { return .denied }
         let description = String(describing: error) + " " + error.localizedDescription
         if description.localizedCaseInsensitiveContains("NoAuth") ||
             description.localizedCaseInsensitiveContains("PolicyDenied") ||

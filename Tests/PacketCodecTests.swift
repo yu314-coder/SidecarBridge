@@ -97,6 +97,11 @@ final class PacketCodecTests: XCTestCase {
                 ultraModeEnabled: true
             )
         )
+        let fourK = StreamPreferences(
+            resolution: .fourK,
+            frameRate: .fps60
+        )
+        XCTAssertEqual(StreamPreferences.parse(fourK.encodedDetail), fourK)
     }
 
     func testStreamPreferencesRejectIncompleteOrUnknownValues() {
@@ -190,14 +195,14 @@ final class PacketCodecTests: XCTestCase {
             ),
             60
         )
-        XCTAssertEqual(StreamMemoryPressureLevel.warning.bitrateMultiplier, 0.22)
-        XCTAssertEqual(StreamMemoryPressureLevel.critical.bitrateMultiplier, 0.10)
-        XCTAssertEqual(StreamMemoryPressureLevel.warning.captureWidthCeiling, 1920)
-        XCTAssertEqual(StreamMemoryPressureLevel.critical.captureWidthCeiling, 1280)
+        XCTAssertEqual(StreamMemoryPressureLevel.warning.bitrateMultiplier, 0.80)
+        XCTAssertEqual(StreamMemoryPressureLevel.critical.bitrateMultiplier, 0.55)
+        XCTAssertEqual(StreamMemoryPressureLevel.warning.captureWidthCeiling, 2560)
+        XCTAssertEqual(StreamMemoryPressureLevel.critical.captureWidthCeiling, 1920)
         XCTAssertNil(StreamMemoryPressureLevel.normal.captureWidthCeiling)
     }
 
-    func testUltraCadenceRaisesOnlyTheNearbyHealthyPath() {
+    func testUltraCadenceRaisesTheHealthyPathToViewerCapacity() {
         XCTAssertEqual(
             StreamCadencePolicy.effectiveFrameRate(
                 requested: 240,
@@ -228,7 +233,7 @@ final class PacketCodecTests: XCTestCase {
                 waitingForViewerResume: false,
                 ultraModeEnabled: true
             ),
-            60
+            240
         )
         XCTAssertEqual(
             StreamCadencePolicy.effectiveFrameRate(
@@ -240,7 +245,7 @@ final class PacketCodecTests: XCTestCase {
                 memoryPressure: .warning,
                 ultraModeEnabled: true
             ),
-            120
+            240
         )
         XCTAssertEqual(
             StreamCadencePolicy.effectiveFrameRate(
@@ -252,15 +257,15 @@ final class PacketCodecTests: XCTestCase {
                 memoryPressure: .critical,
                 ultraModeEnabled: true
             ),
-            90
+            60
         )
         XCTAssertEqual(
             StreamMemoryPressureLevel.frameRateCeiling(.warning, ultraModeEnabled: true),
-            120
+            240
         )
         XCTAssertEqual(
             StreamMemoryPressureLevel.frameRateCeiling(.critical, ultraModeEnabled: true),
-            90
+            60
         )
     }
 
@@ -275,7 +280,7 @@ final class PacketCodecTests: XCTestCase {
                 backpressure: .constrained,
                 ultraModeEnabled: true
             ),
-            120
+            90
         )
         XCTAssertEqual(
             StreamCadencePolicy.effectiveFrameRate(
@@ -287,15 +292,95 @@ final class PacketCodecTests: XCTestCase {
                 backpressure: .severe,
                 ultraModeEnabled: true
             ),
-            90
+            60
         )
         XCTAssertEqual(
             StreamCadencePolicy.backpressureFrameRateCeiling(.constrained, ultraModeEnabled: true),
-            120
+            90
         )
         XCTAssertEqual(
             StreamCadencePolicy.backpressureFrameRateCeiling(.severe, ultraModeEnabled: true),
+            60
+        )
+        // A ProMotion viewer uses the bounded 90/60 recovery steps when the
+        // receiver reports a real queue backlog, then returns to 120 after
+        // the sender's drain dwell.
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 240,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                backpressure: .constrained,
+                ultraModeEnabled: true,
+                viewerRefreshRate: 120
+            ),
             90
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 240,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                backpressure: .severe,
+                ultraModeEnabled: true,
+                viewerRefreshRate: 120
+            ),
+            60
+        )
+    }
+
+    func testUltraCadenceRespectsTheViewerDisplayRefreshRate() {
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 240,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                ultraModeEnabled: true,
+                viewerRefreshRate: 60
+            ),
+            60
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 240,
+                isNearby: true,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                ultraModeEnabled: true,
+                viewerRefreshRate: 120
+            ),
+            120
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 120,
+                displayRefreshRate: 60,
+                isNearby: false,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                ultraModeEnabled: true,
+                viewerRefreshRate: 120
+            ),
+            120
+        )
+        XCTAssertEqual(
+            StreamCadencePolicy.effectiveFrameRate(
+                requested: 240,
+                displayRefreshRate: 240,
+                isNearby: false,
+                viewerIsBackgrounded: false,
+                waitingForViewerResume: false,
+                ultraModeEnabled: true,
+                viewerRefreshRate: 120
+            ),
+            120
         )
     }
 
@@ -303,6 +388,9 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(StreamBackpressureLevel.normal.frameRateCeiling, 120)
         XCTAssertEqual(StreamBackpressureLevel.constrained.frameRateCeiling, 60)
         XCTAssertEqual(StreamBackpressureLevel.severe.frameRateCeiling, 60)
+        XCTAssertEqual(StreamBackpressureLevel.normal.bitrateMultiplier, 1.0)
+        XCTAssertEqual(StreamBackpressureLevel.constrained.bitrateMultiplier, 0.70)
+        XCTAssertEqual(StreamBackpressureLevel.severe.bitrateMultiplier, 0.45)
         XCTAssertEqual(
             StreamCadencePolicy.effectiveFrameRate(
                 requested: 120,
@@ -366,6 +454,13 @@ final class PacketCodecTests: XCTestCase {
             .control(message)
         )
         XCTAssertEqual(message.clipboardTextPayload, "Hello from the iPad 👋")
+
+        let pasteMessage = ControlMessage.clipboardTextAndPaste("Paste once")
+        XCTAssertEqual(
+            try PacketCodec.decode(PacketCodec.encode(.control(pasteMessage))),
+            .control(pasteMessage)
+        )
+        XCTAssertEqual(pasteMessage.clipboardTextPayload, "Paste once")
     }
 
     func testClipboardTextIsCappedBeforeTransport() {
@@ -1179,6 +1274,20 @@ final class PacketCodecTests: XCTestCase {
         XCTAssertEqual(input.kind, .key)
         XCTAssertEqual(input.key, "tab")
         XCTAssertEqual(input.modifiers, ["control", "shift"])
+    }
+
+    func testCommandVPasteIsTransportedAsAKeyShortcut() throws {
+        // Command-V must remain a key event. Clipboard reads belong to the
+        // explicit clipboard-transfer path, never to remote shortcut input.
+        let input = try XCTUnwrap(RemoteKeyboardInput.event(
+            key: "v",
+            modifiers: ["command"]
+        ))
+
+        XCTAssertEqual(input.kind, .key)
+        XCTAssertEqual(input.key, "v")
+        XCTAssertEqual(input.modifiers, ["command"])
+        XCTAssertNil(input.text)
     }
 
     func testControlArrowShortcutsCarryControlModifier() {

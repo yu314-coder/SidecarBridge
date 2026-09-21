@@ -263,17 +263,21 @@ enum SecureCredentialStore {
         return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
     }
 
-    static func remove(account: String) {
-        SecItemDelete(baseQuery(account: account, dataProtection: true) as CFDictionary)
-        SecItemDelete(baseQuery(account: account, dataProtection: false) as CFDictionary)
+    @discardableResult
+    static func remove(account: String) -> Bool {
+        let protected = SecItemDelete(baseQuery(account: account, dataProtection: true) as CFDictionary)
+        let legacy = SecItemDelete(baseQuery(account: account, dataProtection: false) as CFDictionary)
+        return deletionSucceeded(protected) && deletionSucceeded(legacy)
     }
 
-    static func removeAll(accountPrefix: String) {
-        removeAll(accountPrefix: accountPrefix, dataProtection: true)
-        removeAll(accountPrefix: accountPrefix, dataProtection: false)
+    @discardableResult
+    static func removeAll(accountPrefix: String) -> Bool {
+        let protected = removeAll(accountPrefix: accountPrefix, dataProtection: true)
+        let legacy = removeAll(accountPrefix: accountPrefix, dataProtection: false)
+        return protected && legacy
     }
 
-    private static func removeAll(accountPrefix: String, dataProtection: Bool) {
+    private static func removeAll(accountPrefix: String, dataProtection: Bool) -> Bool {
         var query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -284,15 +288,24 @@ enum SecureCredentialStore {
             query[kSecUseDataProtectionKeychain] = true
         }
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let records = result as? [[CFString: Any]] else { return }
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return true }
+        guard status == errSecSuccess,
+              let records = result as? [[CFString: Any]] else { return false }
+        var succeeded = true
         for record in records {
             guard let account = record[kSecAttrAccount] as? String,
                   account.hasPrefix(accountPrefix) else { continue }
-            SecItemDelete(
+            let deleted = SecItemDelete(
                 baseQuery(account: account, dataProtection: dataProtection) as CFDictionary
             )
+            if !deletionSucceeded(deleted) { succeeded = false }
         }
+        return succeeded
+    }
+
+    static func deletionSucceeded(_ status: OSStatus) -> Bool {
+        status == errSecSuccess || status == errSecItemNotFound
     }
 
     private static func baseQuery(account: String, dataProtection: Bool) -> [CFString: Any] {

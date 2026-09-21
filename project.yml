@@ -9,8 +9,8 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.3"
     # App Store Connect requires the build number to increase across uploads.
-    # macOS 1.3 upload: build 89. Keep this sequence independent from iPadOS.
-    CURRENT_PROJECT_VERSION: "89"
+    # macOS 1.3 upload: build 105. Keep this sequence independent from iPadOS.
+    CURRENT_PROJECT_VERSION: "105"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -72,7 +72,10 @@ targets:
           - _sb-screen._tcp
           - _sb-direct._tcp
         NSLocalNetworkUsageDescription: SidecarBridge finds your Mac and receives its screen over your local network.
+        NSCameraUsageDescription: Scan the temporary pairing QR code displayed by SidecarBridge on your Mac. Images are not saved or uploaded.
         UIApplicationSupportsIndirectInputEvents: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
           UISceneConfigurations:
@@ -96,8 +99,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
         PRODUCT_NAME: SidecarBridge
         MARKETING_VERSION: "1.3"
-        # iPadOS 1.3 upload: build 7. Keep this sequence independent from macOS.
-        CURRENT_PROJECT_VERSION: "7"
+        # iPadOS 1.3 upload: build 30. Keep this sequence independent from macOS.
+        CURRENT_PROJECT_VERSION: "30"
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
@@ -108,6 +111,9 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: AVKit.framework
       - sdk: GameController.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: VisionKit.framework
       - sdk: Security.framework
 
   SidecarBridgeTests:
@@ -116,6 +122,12 @@ targets:
     sources:
       - Tests
       - Shared
+      - Pad/MacScreenSharingSession.swift
+      - Mac/SidecarConnector.swift
+      - Mac/PairingQRCodeView.swift
+      - Mac/MacPairingCard.swift
+      - Mac/MacDeviceAuthorization.swift
+      - Pad/RemoteKeyboardToolbar.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.tests

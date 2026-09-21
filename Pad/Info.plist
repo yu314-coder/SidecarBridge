@@ -22,19 +22,17 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_sb-screen._tcp</string>
 		<string>_sb-direct._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan the temporary pairing QR code displayed by SidecarBridge on your Mac. Images are not saved or uploaded.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>SidecarBridge finds your Mac and receives its screen over your local network.</string>
-	<key>UIApplicationSupportsIndirectInputEvents</key>
-	<true/>
-	<key>UIFileSharingEnabled</key>
-	<true/>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -52,6 +50,10 @@
 			</array>
 		</dict>
 	</dict>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>UIFileSharingEnabled</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiresFullScreen</key>

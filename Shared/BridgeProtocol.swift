@@ -186,13 +186,18 @@ enum BridgeNetworkMetadata {
         var result = Set<String>()
         for raw in value.split(separator: ",") {
             let candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            let parts = candidate.split(separator: ".").compactMap { Int($0) }
-            guard parts.count == 4,
-                  parts.allSatisfy({ (0...255).contains($0) }),
-                  isPrivateIPv4(parts) else { continue }
+            guard isPrivateIPv4Address(candidate) else { continue }
             result.insert(candidate)
         }
         return result.sorted()
+    }
+
+    static func isPrivateIPv4Address(_ value: String) -> Bool {
+        let components = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 4,
+              components.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0 >= "0" && $0 <= "9" } }) else { return false }
+        let parts = components.compactMap { Int($0) }
+        return parts.count == 4 && parts.allSatisfy { (0...255).contains($0) } && isPrivateIPv4(parts)
     }
 
     private static func isPrivateIPv4(_ parts: [Int]) -> Bool {
@@ -244,6 +249,11 @@ enum ControlKind: String, Codable, Equatable {
     case systemInformation
     case requestClipboard
     case clipboardText
+    /// Replaces the Mac clipboard with the supplied iPad text and then
+    /// performs a single Command-V on the focused Mac app. This keeps the
+    /// transfer and paste ordered without making the iPad read its
+    /// pasteboard from the keyboard event path.
+    case clipboardTextAndPaste
     case clipboardError
 }
 
@@ -807,8 +817,12 @@ extension ControlMessage {
         ControlMessage(.clipboardText, detail: ClipboardTransfer.prepare(text))
     }
 
+    static func clipboardTextAndPaste(_ text: String) -> ControlMessage {
+        ControlMessage(.clipboardTextAndPaste, detail: ClipboardTransfer.prepare(text))
+    }
+
     var clipboardTextPayload: String? {
-        guard kind == .clipboardText,
+        guard kind == .clipboardText || kind == .clipboardTextAndPaste,
               let detail,
               detail.utf8.count <= ClipboardTransfer.maximumTextBytes else { return nil }
         return detail

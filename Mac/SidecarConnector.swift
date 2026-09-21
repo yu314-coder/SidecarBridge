@@ -1,40 +1,30 @@
 import AppKit
 import Foundation
 
-/// App Store builds may only use Apple's documented public APIs. Native
-/// Sidecar does not expose an API for third-party apps to enumerate devices or
-/// start a session, so this bridge opens the public Displays settings UI.
+/// Opens Apple's user-controlled setup. It does not enumerate native Sidecar
+/// devices, start a native session, or use the private SidecarCore framework.
+@MainActor
 final class SidecarConnector {
-    enum Transport: String {
-        case wired
-        case wireless
-    }
+    private let openURL: (URL) -> Bool
+    private let settingsApplicationURL: () -> URL?
 
-    enum ConnectorError: LocalizedError {
-        case useSystemSettings
-
-        var errorDescription: String? {
-            "Choose your iPad in System Settings → Displays. Apple does not provide a public API that lets SidecarBridge start native Sidecar."
-        }
-    }
-
-    func reachableDeviceNames() -> [String] {
-        []
-    }
-
-    func connect(
-        preferredName: String?,
-        transport: Transport,
-        completion: @escaping (Result<String, Error>) -> Void
+    init(
+        openURL: ((URL) -> Bool)? = nil,
+        settingsApplicationURL: (() -> URL?)? = nil
     ) {
-        let settingsURL = URL(
-            string: "x-apple.systempreferences:com.apple.Displays-Settings.extension"
-        )
-        if let settingsURL {
-            NSWorkspace.shared.open(settingsURL)
+        self.openURL = openURL ?? { NSWorkspace.shared.open($0) }
+        self.settingsApplicationURL = settingsApplicationURL ?? {
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.systempreferences")
         }
-        DispatchQueue.main.async {
-            completion(.failure(ConnectorError.useSystemSettings))
-        }
+    }
+
+    /// True means Launch Services accepted an open request, NOT that Displays
+    /// loaded or a native session started. The pane URL is best-effort; fall
+    /// back to the Settings app if its handler is unavailable.
+    func openSettings() -> Bool {
+        if let pane = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension"),
+           openURL(pane) { return true }
+        guard let application = settingsApplicationURL() else { return false }
+        return openURL(application)
     }
 }

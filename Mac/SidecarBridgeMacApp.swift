@@ -20,6 +20,7 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
 struct SidecarBridgeMacApp: App {
     @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var appDelegate
     @StateObject private var model = MacConnectionModel()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         WindowGroup {
@@ -30,6 +31,17 @@ struct SidecarBridgeMacApp: App {
                     model.start()
                 }
         }
+        .defaultSize(width: 1000, height: 820)
+        .windowResizability(.contentMinSize)
+
+        Window("Connect a device", id: "pairing") {
+            MacPairingWindow(model: model)
+                .task {
+                    MacShutdownCoordinator.shared.attach(model)
+                    model.start()
+                }
+        }
+        .defaultSize(width: 960, height: 580)
         .windowResizability(.contentMinSize)
 
         MenuBarExtra {
@@ -42,6 +54,15 @@ struct SidecarBridgeMacApp: App {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+
+            Divider()
+
+            Button("Show Pairing QR and Code") {
+                openWindow(id: "pairing")
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+            Button("Copy Pairing Code", action: model.copyPairingCode)
 
             Divider()
 

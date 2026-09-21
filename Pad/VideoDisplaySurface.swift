@@ -9,6 +9,7 @@ import UIKit
 final class VideoDisplayController: NSObject {
     var onPictureInPictureStateChanged: ((Bool, Bool, Bool) -> Void)?
     var onPictureInPictureError: ((String) -> Void)?
+    var onLiveUpscalingStatusChanged: ((String) -> Void)?
     /// Called when the H.264 decoder sees a missing frame or has to flush its
     /// dependency chain. The Mac responds with an immediate IDR frame.
     var onKeyFrameNeeded: (() -> Void)?
@@ -43,6 +44,7 @@ final class VideoDisplayController: NSObject {
     private var nextPresentationTimestamp = CMTime.zero
     private var formatWidth = 0
     private var formatHeight = 0
+    private var liveUpscalingEnabled = false
 
     /// Keep the decoder close to the live edge while allowing a short burst
     /// during a local render hiccup. H.264 frames are dropped only from the
@@ -84,6 +86,10 @@ final class VideoDisplayController: NSObject {
         }
         let hadPendingSamples = pendingSampleCount > 0
         self.view = view
+        view.onLiveUpscalingStatusChanged = { [weak self] status in
+            self?.onLiveUpscalingStatusChanged?(status)
+        }
+        view.setLiveUpscalingEnabled(liveUpscalingEnabled)
         configurePictureInPicture(for: view.displayLayer)
         if hadPendingSamples {
             hasReceivedSampleBuffer = true
@@ -380,6 +386,14 @@ final class VideoDisplayController: NSObject {
     func setAutomaticBackgroundStart(_ enabled: Bool) {
         automaticBackgroundStartEnabled = enabled
         pictureInPictureController?.canStartPictureInPictureAutomaticallyFromInline = enabled && hasReceivedSampleBuffer
+    }
+
+    func setLiveUpscalingEnabled(_ enabled: Bool) {
+        liveUpscalingEnabled = enabled
+        view?.setLiveUpscalingEnabled(enabled)
+        if view == nil {
+            onLiveUpscalingStatusChanged?(enabled ? "Ready when the live viewer opens" : "Off")
+        }
     }
 
     private func configurePictureInPicture(for displayLayer: AVSampleBufferDisplayLayer) {
@@ -749,20 +763,35 @@ final class VideoDisplayView: UIView {
     var displayLayer: AVSampleBufferDisplayLayer {
         layer as! AVSampleBufferDisplayLayer
     }
+    var onLiveUpscalingStatusChanged: ((String) -> Void)? {
+        didSet { liveUpscaler.onStatusChanged = onLiveUpscalingStatusChanged }
+    }
+    private lazy var liveUpscaler = MetalFXLiveUpscaler(hostView: self, sourceLayer: displayLayer)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
         displayLayer.videoGravity = .resizeAspect
+        _ = liveUpscaler
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        liveUpscaler.layout(in: bounds)
+    }
+
+    func setLiveUpscalingEnabled(_ enabled: Bool) {
+        liveUpscaler.setEnabled(enabled)
+    }
 
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
         displayLayer.enqueue(sampleBuffer)
     }
 
     func flush() {
+        liveUpscaler.reset()
         displayLayer.flushAndRemoveImage()
     }
 

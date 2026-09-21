@@ -46,6 +46,9 @@ final class MacLANService {
     private var connection: NWConnection?
     private var secureSession: SecurePacketSession?
     private final class Candidate {
+        let authorizationToken = AuthorizationGeneration.shared.token
+        var authenticationInFlight = false
+        var handshakeStarted = false
         let connection: NWConnection
         let privateKey = Curve25519.KeyAgreement.PrivateKey()
         let remoteHostKey: String
@@ -85,8 +88,20 @@ final class MacLANService {
     private var lastVideoProgressUptime = ProcessInfo.processInfo.systemUptime
     private var videoRecoveryInProgress = false
     private var pendingVideo: [PendingVideo] = []
+    // Advance through the ordered H.264 queue without `removeFirst()`. At
+    // 4K/60, shifting an array of Data-backed frames for every send creates
+    // avoidable ARC and memory traffic on the same queue that must keep the
+    // network socket supplied.
+    private var pendingVideoHead = 0
     private var pendingVideoBytes = 0
     private var inFlightVideoBytes = 0
+    // Direct LAN uses Network.framework's send completion for pacing, but
+    // that completion only describes the Mac socket. Keep the latest
+    // sequence the iPad actually accepted at the display boundary so a
+    // decoder backlog can lower Ultra cadence before it starts dropping a
+    // whole GOP.
+    private var lastDisplayedVideoSequence: UInt64?
+    private var latestSubmittedVideoSequence: UInt64?
     // Count and byte limits work together: count keeps the queue responsive
     // at 60/120 FPS, while the byte ceiling prevents a large text-heavy IDR
     // from turning a congested TCP socket into unbounded RAM growth.
@@ -100,6 +115,42 @@ final class MacLANService {
     private var videoBackpressureLevel: StreamBackpressureLevel = .normal
     private var videoBackpressureClearWorkItem: DispatchWorkItem?
     private var videoTelemetryTimer: DispatchSourceTimer?
+
+    private var pendingVideoCount: Int {
+        pendingVideo.count - pendingVideoHead
+    }
+
+    private var firstPendingVideo: PendingVideo? {
+        guard pendingVideoHead < pendingVideo.count else { return nil }
+        return pendingVideo[pendingVideoHead]
+    }
+
+    private func resetPendingVideo(keepingCapacity: Bool = true) {
+        pendingVideo.removeAll(keepingCapacity: keepingCapacity)
+        pendingVideoHead = 0
+        pendingVideoBytes = 0
+    }
+
+    private func replacePendingVideo(with video: PendingVideo) {
+        resetPendingVideo()
+        pendingVideo.append(video)
+        pendingVideoBytes = video.packet.count
+    }
+
+    private func popFirstPendingVideo() -> PendingVideo? {
+        guard pendingVideoHead < pendingVideo.count else { return nil }
+        let video = pendingVideo[pendingVideoHead]
+        pendingVideoHead += 1
+        if pendingVideoHead == pendingVideo.count {
+            pendingVideo.removeAll(keepingCapacity: true)
+            pendingVideoHead = 0
+        } else if pendingVideoHead >= 32,
+                  pendingVideoHead * 2 >= pendingVideo.count {
+            pendingVideo.removeSubrange(0..<pendingVideoHead)
+            pendingVideoHead = 0
+        }
+        return video
+    }
     private var videoTelemetryWindowStart = ProcessInfo.processInfo.systemUptime
     private var videoTelemetryEncodedFrames = 0
     private var videoTelemetrySubmittedFrames = 0
@@ -169,10 +220,39 @@ final class MacLANService {
     }
 
     func acknowledgeVideo(sequence: UInt64) {
-        // Direct Network.framework delivery is paced by contentProcessed.
-        // Waiting for an app-level round trip limited some local links to
-        // roughly four frames per second. Keep ACK decoding for compatibility,
-        // but do not let it open another concurrent TCP send.
+        // Direct Network.framework delivery is still paced by
+        // `contentProcessed`; this feedback never gates an individual send.
+        // It only reports whether the iPad's decoder/display is falling
+        // behind, allowing Ultra to step down before dependent P-frames are
+        // discarded. This avoids the old stop-and-wait ACK behaviour that
+        // limited otherwise healthy local links to a few FPS.
+        queue.async { [weak self] in
+            guard let self, self.isConnected else { return }
+            guard self.lastDisplayedVideoSequence == nil
+                    || sequence > self.lastDisplayedVideoSequence! else { return }
+            self.lastDisplayedVideoSequence = sequence
+            let senderWindow = StreamCadencePolicy.senderInFlightWindow(for: self.currentVideoFrameRate)
+            let unacknowledged = self.inFlightVideoSequences.reduce(into: 0) { count, value in
+                if value > sequence { count += 1 }
+            }
+            let sequenceLag = self.latestSubmittedVideoSequence.map { latest in
+                Int(min(latest > sequence ? latest - sequence : 0, UInt64(Int.max)))
+            } ?? 0
+            // `contentProcessed` may already have removed every frame from
+            // the local in-flight set while the iPad is still decoding. The
+            // cumulative sequence lag is therefore the authoritative remote
+            // display backlog; local pending/in-flight work is added as a
+            // second signal for a congested sender.
+            let outstanding = max(sequenceLag, self.pendingVideoCount + unacknowledged)
+            let highWater = max(8, senderWindow * 2)
+            if outstanding >= highWater {
+                self.videoBackpressureClearWorkItem?.cancel()
+                self.videoBackpressureClearWorkItem = nil
+                self.setVideoBackpressure(.constrained)
+            } else if outstanding <= max(1, senderWindow / 2) {
+                self.scheduleVideoBackpressureClear()
+            }
+        }
     }
 
     private func startListener() {
@@ -296,7 +376,7 @@ final class MacLANService {
                   self.candidates[ObjectIdentifier(activeConnection)] === candidate else { return }
             if let data { candidate.receiveBuffer.append(data) }
             do {
-                for payload in try LANWire.takeFrames(from: &candidate.receiveBuffer) {
+                for payload in try LANWire.takeFrames(from: &candidate.receiveBuffer, maximumSize: candidate.isAuthenticated ? LANWire.maximumPayloadSize : 4096) {
                     try self.handle(payload, from: candidate)
                 }
             } catch {
@@ -315,7 +395,13 @@ final class MacLANService {
     }
 
     private func handle(_ payload: Data, from candidate: Candidate) throws {
+        guard candidate.authorizationToken == AuthorizationGeneration.shared.token else {
+            throw LANWire.LANError.authenticationFailed
+        }
+        guard candidate.isAuthenticated || payload.count <= 4096 else { throw LANWire.LANError.invalidLength }
         if candidate.secureSession == nil {
+            guard !candidate.handshakeStarted else { throw LANWire.LANError.invalidHandshake }
+            candidate.handshakeStarted = true
             let hello = try LANWire.decodeHandshake(payload, marker: LANWire.clientHello)
             candidate.timeoutWorkItem?.cancel()
             candidate.timeoutWorkItem = nil
@@ -340,14 +426,18 @@ final class MacLANService {
             guard candidate.isAuthenticated,
                   connection === candidate.connection else { return }
             if let input = command.remoteInputEvent {
-                onInput?(input)
+                AuthorizationGeneration.shared.perform(ifCurrent: candidate.authorizationToken) { onInput?(input) }
             } else {
-                DispatchQueue.main.async { self.onCommand?(command) }
+                DispatchQueue.main.async {
+                    AuthorizationGeneration.shared.perform(ifCurrent: candidate.authorizationToken) { self.onCommand?(command) }
+                }
             }
         case .file(let transfer):
             guard candidate.isAuthenticated,
                   connection === candidate.connection else { return }
-            DispatchQueue.main.async { self.onFilePacket?(transfer) }
+            DispatchQueue.main.async {
+                AuthorizationGeneration.shared.perform(ifCurrent: candidate.authorizationToken) { self.onFilePacket?(transfer) }
+            }
         case .jpeg, .video:
             break
         }
@@ -359,6 +449,7 @@ final class MacLANService {
         candidate: Candidate
     ) {
         DispatchQueue.main.async {
+            guard candidate.authorizationToken == AuthorizationGeneration.shared.token else { return }
             let security = MacPairingSecurity.shared
             let macID = security.macID
             let requiresCode = security.requiresPairingCode(for: identity)
@@ -411,7 +502,8 @@ final class MacLANService {
     }
 
     private func handleAuthentication(_ message: PairingMessage, candidate: Candidate) {
-        guard message.kind == .response,
+        guard !candidate.isAuthenticated, !candidate.authenticationInFlight,
+              message.kind == .response,
               message.protocolVersion == LANWire.securityProtocolVersion,
               let proof = message.proof,
               let identity = candidate.pendingIdentity,
@@ -419,7 +511,9 @@ final class MacLANService {
               let nonce = candidate.authenticationNonce,
               let clientPublicKey = candidate.clientPublicKey,
               let serverPublicKey = candidate.serverPublicKey else { return }
+        candidate.authenticationInFlight = true
         DispatchQueue.main.async {
+            guard candidate.authorizationToken == AuthorizationGeneration.shared.token else { return }
             let result = MacPairingSecurity.shared.verify(
                 identity: identity,
                 nonce: nonce,
@@ -432,7 +526,9 @@ final class MacLANService {
             self.queue.async { [weak self, weak candidate] in
                 guard let self,
                       let candidate,
+                      candidate.authorizationToken == AuthorizationGeneration.shared.token,
                       self.candidates[ObjectIdentifier(candidate.connection)] === candidate else { return }
+                candidate.authenticationInFlight = false
                 let response = PairingMessage(
                     kind: result.accepted ? .accepted : .rejected,
                     protocolVersion: LANWire.securityProtocolVersion,
@@ -441,6 +537,7 @@ final class MacLANService {
                     detail: result.detail
                 )
                 self.sendAuthentication(response, candidate: candidate) { error in
+                    guard candidate.authorizationToken == AuthorizationGeneration.shared.token else { return }
                     guard error == nil else {
                         if result.issuedCredential != nil {
                             DispatchQueue.main.async {
@@ -509,16 +606,14 @@ final class MacLANService {
         if waitingForKeyFrame {
             guard video.isKeyFrame else {
                 videoTelemetryDroppedFrames += 1
-                if pendingVideo.count >= StreamCadencePolicy.senderPendingWindow(for: currentVideoFrameRate) * 3 {
+                if pendingVideoCount >= StreamCadencePolicy.senderPendingWindow(for: currentVideoFrameRate) * 3 {
                     setVideoBackpressure(.severe)
                 }
                 return
             }
             waitingForKeyFrame = false
             scheduleVideoBackpressureClear()
-            pendingVideoBytes = 0
-            pendingVideo = [video]
-            pendingVideoBytes = video.packet.count
+            replacePendingVideo(with: video)
             sendNextVideoIfPossible()
             return
         }
@@ -532,10 +627,19 @@ final class MacLANService {
         // periodic keyframe (about 1–2 FPS).
         let maximumPending = StreamCadencePolicy.senderPendingWindow(for: currentVideoFrameRate) * 3
         let projectedBytes = pendingVideoBytes + inFlightVideoBytes + video.packet.count
-        if pendingVideo.count < maximumPending,
+        if pendingVideoCount < maximumPending,
            projectedBytes <= maximumVideoBufferedBytes {
             pendingVideo.append(video)
             pendingVideoBytes += video.packet.count
+            // Lower the capture clock before the hard limit is reached. The
+            // previous late-only signal allowed a 120-FPS ultra stream to
+            // fill the ordered H.264 window first; the subsequent IDR wait
+            // looked like a 1–2 FPS stream even though input was healthy.
+            let highWaterBytes = maximumVideoBufferedBytes * 3 / 4
+            let highWaterFrames = StreamCadencePolicy.senderPendingWindow(for: currentVideoFrameRate) * 2
+            if projectedBytes >= highWaterBytes || pendingVideoCount >= highWaterFrames {
+                setVideoBackpressure(.constrained)
+            }
             sendNextVideoIfPossible()
         } else {
             // Keep the already-ordered burst and stop admitting new P-frames
@@ -548,15 +652,20 @@ final class MacLANService {
             if !waitingForKeyFrame {
                 waitingForKeyFrame = true
                 videoRecoveryInProgress = true
-                setVideoBackpressure(.constrained)
+                // If the constrained cadence was already insufficient, move
+                // to the severe 60-FPS recovery step instead of re-entering
+                // the same overflow/IDR loop at the unchanged rate.
+                let recoveryLevel: StreamBackpressureLevel
+                switch videoBackpressureLevel {
+                case .normal: recoveryLevel = .constrained
+                case .constrained, .severe: recoveryLevel = .severe
+                }
+                setVideoBackpressure(recoveryLevel)
                 onKeyFrameNeeded?()
             }
             if video.isKeyFrame {
                 waitingForKeyFrame = false
-                pendingVideo.removeAll(keepingCapacity: true)
-                pendingVideoBytes = 0
-                pendingVideo = [video]
-                pendingVideoBytes = video.packet.count
+                replacePendingVideo(with: video)
                 sendNextVideoIfPossible()
             } else {
                 videoTelemetryDroppedFrames += 1
@@ -570,10 +679,9 @@ final class MacLANService {
               let secureSession else { return }
 
         let maximumInFlight = StreamCadencePolicy.senderInFlightWindow(for: currentVideoFrameRate)
-        let recoveryAllowance = videoRecoveryInProgress && pendingVideo.first?.isKeyFrame == true ? 1 : 0
+        let recoveryAllowance = videoRecoveryInProgress && firstPendingVideo?.isKeyFrame == true ? 1 : 0
         while inFlightVideoSequences.count < maximumInFlight + recoveryAllowance,
-              !pendingVideo.isEmpty {
-            let video = pendingVideo.removeFirst()
+              let video = popFirstPendingVideo() {
             pendingVideoBytes = max(0, pendingVideoBytes - video.packet.count)
             do {
                 let data = try autoreleasepool {
@@ -586,6 +694,7 @@ final class MacLANService {
                     videoRecoveryInProgress = false
                 }
                 inFlightVideoSequences.insert(video.sequence)
+                latestSubmittedVideoSequence = video.sequence
                 inFlightVideoBytes += data.count
                 videoTelemetrySubmittedFrames += 1
                 sendingFrame = true
@@ -649,8 +758,7 @@ final class MacLANService {
             // later. Clearing the set here used to open a second burst while
             // the first burst was still blocked, repeatedly forcing the iPad
             // to wait for a keyframe and producing the observed ~1 FPS.
-            self.pendingVideo.removeAll(keepingCapacity: true)
-            self.pendingVideoBytes = 0
+            self.resetPendingVideo()
             self.waitingForKeyFrame = true
             self.videoRecoveryInProgress = true
             self.onKeyFrameNeeded?()
@@ -703,7 +811,7 @@ final class MacLANService {
             submittedFPS: Double(videoTelemetrySubmittedFrames) / duration,
             completedFPS: Double(videoTelemetryCompletedFrames) / duration,
             droppedFPS: Double(videoTelemetryDroppedFrames) / duration,
-            pendingFrames: pendingVideo.count,
+            pendingFrames: pendingVideoCount,
             inFlightFrames: inFlightVideoSequences.count,
             advertisedFPS: currentVideoFrameRate,
             backpressure: String(describing: videoBackpressureLevel)
@@ -737,10 +845,13 @@ final class MacLANService {
         videoWatchdogs.removeAll(keepingCapacity: true)
         inFlightVideoSequences.removeAll(keepingCapacity: true)
         inFlightVideoBytes = 0
+        lastDisplayedVideoSequence = nil
+        latestSubmittedVideoSequence = nil
+        videoBackpressureClearWorkItem?.cancel()
+        videoBackpressureClearWorkItem = nil
         lastVideoProgressUptime = ProcessInfo.processInfo.systemUptime
         videoRecoveryInProgress = false
-        pendingVideo.removeAll(keepingCapacity: true)
-        pendingVideoBytes = 0
+        resetPendingVideo()
         videoBackpressureClearWorkItem?.cancel()
         videoBackpressureClearWorkItem = nil
         setVideoBackpressure(.normal)
@@ -759,14 +870,17 @@ final class MacLANService {
         guard videoBackpressureLevel != .normal else { return }
         let workItem = DispatchWorkItem { [weak self] in
             guard let self,
-                  self.pendingVideo.isEmpty,
+                  self.pendingVideoCount == 0,
                   self.inFlightVideoSequences.count <= 1,
                   !self.waitingForKeyFrame else { return }
             self.videoBackpressureClearWorkItem = nil
             self.setVideoBackpressure(.normal)
         }
         videoBackpressureClearWorkItem = workItem
-        queue.asyncAfter(deadline: .now() + 0.75, execute: workItem)
+        // Keep the reduced cadence in place long enough for the ordered
+        // encoder/transport window to drain. A short 750-ms dwell caused
+        // normal <-> constrained oscillation on busy Macs.
+        queue.asyncAfter(deadline: .now() + 2.0, execute: workItem)
     }
 
     private func clear(_ candidate: Candidate, error: String? = nil) {
@@ -824,7 +938,10 @@ final class MacLANService {
     }
 
     private func notify(connected: Bool, value: String?) {
-        DispatchQueue.main.async { self.onConnectionChanged?(connected, value) }
+        let generation = AuthorizationGeneration.shared.token
+        DispatchQueue.main.async {
+            AuthorizationGeneration.shared.perform(ifCurrent: generation) { self.onConnectionChanged?(connected, value) }
+        }
     }
 
     private func notifyLocalNetwork(_ state: LocalNetworkAccessState) {

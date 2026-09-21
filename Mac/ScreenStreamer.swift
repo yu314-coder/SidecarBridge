@@ -153,8 +153,8 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
     /// must target the same display; the main display can differ when an
     /// external monitor is attached.
     private(set) var captureDisplayID: CGDirectDisplayID?
-    private var lastFrameTime: TimeInterval = 0
-    private var preferredWidth = 2360
+    private var captureClock = StreamCaptureClock()
+    private var preferredWidth = 3840
     private var streamPreferences = StreamPreferences.defaults
     private var transportProfile: TransportProfile = .direct
     private var activeFrameRate = 60
@@ -163,6 +163,10 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
     // foreground; bounded queues and backpressure still protect slow links.
     private var foregroundFrameRate = 60
     private var displayRefreshRate = 60
+    // The iPad's presentation surface is an independent cadence limit. Keep
+    // a conservative 60-FPS default until its capability hello arrives so an
+    // ultra request cannot flood a 60-Hz receiver during startup.
+    private var viewerRefreshRate = 60
     private var viewerIsBackgrounded = false
     private var waitingForViewerResume = false
     private var memoryPressureLevel: StreamMemoryPressureLevel = .normal
@@ -171,7 +175,6 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
     private var pendingMemoryPressureLevel: StreamMemoryPressureLevel?
     private var memoryPressureTransitionWorkItem: DispatchWorkItem?
     private var lastMemoryPressureApplyUptime: TimeInterval = 0
-    private let memoryPressureMinimumDwell: TimeInterval = 2.0
     private let configurationScheduler = StreamConfigurationScheduler()
     private var foregroundRefreshTask: Task<Void, Never>?
     private var foregroundRefreshToken = UUID()
@@ -196,7 +199,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
     }
 
     func setPreferredWidth(_ width: Int) {
-        preferredWidth = min(max(width, 1440), 2880)
+        preferredWidth = min(max(width, 1440), 3840)
     }
 
     func setStreamPreferences(_ preferences: StreamPreferences) {
@@ -268,6 +271,13 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
         updateActiveFrameRate()
     }
 
+    func setViewerRefreshRate(_ refreshRate: Int) {
+        let safeRefreshRate = min(max(refreshRate, StreamCadencePolicy.minimumLiveFrameRate), 240)
+        guard viewerRefreshRate != safeRefreshRate else { return }
+        viewerRefreshRate = safeRefreshRate
+        updateActiveFrameRate()
+    }
+
     /// Lets the sender throttle capture when its bounded network window is
     /// full. This keeps the Mac near the live edge instead of encoding frames
     /// that will immediately be discarded by the transport.
@@ -333,18 +343,20 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
     /// moving. Apply pressure changes with a short entry debounce and a longer
     /// normal-state dwell so one transient sample cannot thrash ScreenCaptureKit.
     private func scheduleMemoryPressureProfile(_ level: StreamMemoryPressureLevel) {
+        // Repeated notifications must not keep postponing the same change.
+        guard level != pendingMemoryPressureLevel else { return }
         guard level != memoryPressureLevel || pendingMemoryPressureLevel != nil else { return }
-        pendingMemoryPressureLevel = level
         memoryPressureTransitionWorkItem?.cancel()
-
+        memoryPressureTransitionWorkItem = nil
+        pendingMemoryPressureLevel = nil
+        // A brief warning that clears before the debounce needs no reconfigure.
+        guard level != memoryPressureLevel else { return }
+        pendingMemoryPressureLevel = level
         let now = ProcessInfo.processInfo.systemUptime
-        let entryDelay: TimeInterval = switch level {
-        case .critical: 0.1
-        case .warning: 0.35
-        case .normal: 1.5
-        }
-        let earliestNextApply = lastMemoryPressureApplyUptime + memoryPressureMinimumDwell
-        let delay = max(entryDelay, max(0, earliestNextApply - now))
+        let delay = StreamPressureTransitionPolicy.delay(
+            from: memoryPressureLevel, to: level,
+            sinceLastChange: now - lastMemoryPressureApplyUptime
+        )
         let workItem = DispatchWorkItem { [weak self] in
             guard let self,
                   self.pendingMemoryPressureLevel == level else { return }
@@ -354,7 +366,8 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
             self.lastMemoryPressureApplyUptime = ProcessInfo.processInfo.systemUptime
             self.encoder.setMemoryPressure(level)
             self.updateActiveFrameRate()
-            self.encoder.requestKeyFrame()
+            // Cadence/resolution changes already request their own IDR.
+            // A bitrate-only adjustment does not invalidate decoder state.
             self.onMemoryPressureChanged?(level)
         }
         memoryPressureTransitionWorkItem = workItem
@@ -439,24 +452,31 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
             throw StreamError.noDisplay
         }
         captureDisplayID = display.displayID
-        captureDisplayWidth = display.width
-        captureDisplayHeight = display.height
         displayRefreshRate = Self.refreshRate(for: display.displayID)
 
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        // contentRect is in points, not native capture pixels. A 1920x1080
+        // HiDPI desktop can supply 3840x2160 pixels without upscaling.
+        let source = StreamQualityPolicy.sourcePixels(points: filter.contentRect.size,
+                                                       scale: CGFloat(filter.pointPixelScale))
+        captureDisplayWidth = source.width > 0 ? Int(source.width) : display.width
+        captureDisplayHeight = source.height > 0 ? Int(source.height) : display.height
         let configuration = SCStreamConfiguration()
         let dimensions = captureDimensions(
-            displayWidth: display.width,
-            displayHeight: display.height
+            displayWidth: captureDisplayWidth,
+            displayHeight: captureDisplayHeight
         )
         foregroundFrameRate = transportProfile == .nearbyP2P
             ? min(
                 streamPreferences.frameRate.rawValue,
-                streamPreferences.ultraModeEnabled
-                    ? StreamCadencePolicy.ultraFrameRateCeiling
-                    : StreamCadencePolicy.nearbyFrameRateCeiling
+                min(
+                    streamPreferences.ultraModeEnabled
+                        ? StreamCadencePolicy.ultraFrameRateCeiling
+                        : StreamCadencePolicy.nearbyFrameRateCeiling,
+                    viewerRefreshRate
+                )
             )
-            : min(streamPreferences.frameRate.rawValue, displayRefreshRate)
+            : min(streamPreferences.frameRate.rawValue, min(displayRefreshRate, viewerRefreshRate))
         updateActiveFrameRate()
         configuration.width = dimensions.width
         configuration.height = dimensions.height
@@ -480,7 +500,7 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
             frameRate: activeFrameRate
         )
         encoder.onFrame = { [weak self] frame in self?.onFrame?(frame) }
-        lastFrameTime = 0
+        captureClock.reset()
         try encoder.start(
             width: configuration.width,
             height: configuration.height,
@@ -504,15 +524,12 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
     }
 
     private func captureDimensions(displayWidth: Int, displayHeight: Int) -> (width: Int, height: Int) {
-        let requestedWidth = streamPreferences.resolution.maximumWidth.map {
-            min(preferredWidth, $0)
-        } ?? min(preferredWidth, 2360)
-        let transportWidth = transportProfile == .nearbyP2P
-            ? min(requestedWidth, streamPreferences.ultraModeEnabled ? 2560 : 1920)
-            : min(requestedWidth, 2560)
-        let targetWidth = memoryPressureLevel.captureWidthCeiling.map {
-            min(transportWidth, $0)
-        } ?? transportWidth
+        // Route/FPS changes no longer silently change the chosen resolution.
+        // Congestion adjusts encoded bytes; memory pressure bounds surfaces.
+        let targetWidth = StreamQualityPolicy.captureWidth(
+            preferred: preferredWidth, resolution: streamPreferences.resolution,
+            memory: memoryPressureLevel
+        )
         let scale = min(1.0, Double(targetWidth) / Double(max(displayWidth, 1)))
         let width = max(960, Int(Double(displayWidth) * scale)) & ~1
         let height = max(540, Int(Double(displayHeight) * scale)) & ~1
@@ -584,11 +601,14 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
         foregroundFrameRate = transportProfile == .nearbyP2P
             ? min(
                 streamPreferences.frameRate.rawValue,
-                streamPreferences.ultraModeEnabled
-                    ? StreamCadencePolicy.ultraFrameRateCeiling
-                    : StreamCadencePolicy.nearbyFrameRateCeiling
+                min(
+                    streamPreferences.ultraModeEnabled
+                        ? StreamCadencePolicy.ultraFrameRateCeiling
+                        : StreamCadencePolicy.nearbyFrameRateCeiling,
+                    viewerRefreshRate
+                )
             )
-            : min(streamPreferences.frameRate.rawValue, displayRefreshRate)
+            : min(streamPreferences.frameRate.rawValue, min(displayRefreshRate, viewerRefreshRate))
         activeFrameRate = StreamCadencePolicy.effectiveFrameRate(
             requested: streamPreferences.frameRate.rawValue,
             displayRefreshRate: displayRefreshRate,
@@ -597,7 +617,8 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
             waitingForViewerResume: waitingForViewerResume,
             memoryPressure: memoryPressureLevel,
             backpressure: transportBackpressure,
-            ultraModeEnabled: streamPreferences.ultraModeEnabled
+            ultraModeEnabled: streamPreferences.ultraModeEnabled,
+            viewerRefreshRate: viewerRefreshRate
         )
         // Background/resume and memory-pressure state can change without
         // rebuilding SCStream. Keep VideoToolbox's timestamps, bitrate, and
@@ -651,41 +672,18 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
             guard let self else { return }
             self.captureQueue.async { [weak self, reference] in
                 guard let self, self.stream === reference.stream else { return }
-                self.lastFrameTime = 0
+                self.captureClock.reset()
                 self.encoder.requestKeyFrame()
             }
         }
     }
 
     private func targetBitrate(width: Int, height: Int, frameRate: Int) -> Int {
-        let baseBitrate: Int
-        if transportProfile != .direct && !streamPreferences.ultraModeEnabled {
-            baseBitrate = 8_000_000
-        } else {
-            // Text-heavy 2K capture needs more bits than the old fixed 20 Mbps
-            // setting. Scale from pixels and cadence, then keep a hard ceiling
-            // so a 120-FPS request cannot turn a temporary Wi-Fi dip into an
-            // unbounded TCP latency queue. This remains a target; VideoToolbox
-            // may choose a lower rate on older hardware.
-            let pixels = max(1, width * height)
-            // High cadence multiplies frame count, but it should not multiply
-            // the per-pixel budget without a ceiling. The old 40-Mbps cap was
-            // reached by a 2K/120 stream, filling the short TCP window and
-            // forcing a keyframe recovery loop. Keep text legible while
-            // leaving headroom for the input channel and the iPad decoder.
-            let pixelBudget = Double(pixels) * 4.5
-            let cadenceScale = min(max(Double(frameRate) / 60.0, 1.0), 1.75)
-            let calculated = Int(pixelBudget * cadenceScale)
-            baseBitrate = min(max(calculated, 12_000_000), 32_000_000)
-        }
-
-        let pressureBitrate = Int(Double(baseBitrate) * memoryPressureLevel.bitrateMultiplier)
-        // Under pressure, the bitrate floor must actually fall. The previous
-        // unconditional 6 Mbps floor silently defeated the warning/critical
-        // multipliers and kept large H.264 buffers resident while RAM was
-        // already yellow.
-        let floor = memoryPressureLevel == .normal ? 6_000_000 : 2_000_000
-        return max(floor, pressureBitrate)
+        StreamQualityPolicy.bitrate(
+            width: width, height: height, frameRate: frameRate,
+            isNearby: transportProfile == .nearbyP2P,
+            memory: memoryPressureLevel, backpressure: transportBackpressure
+        )
     }
 
     private static func refreshRate(for displayID: CGDirectDisplayID) -> Int {
@@ -707,10 +705,17 @@ final class ScreenStreamer: NSObject, SCStreamOutput, @unchecked Sendable {
               sampleBuffer.isValid,
               let pixelBuffer = sampleBuffer.imageBuffer else { return }
 
-        let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastFrameTime >= 1.0 / Double(activeFrameRate) else { return }
-        lastFrameTime = now
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer, createIfNecessary: false
+        ) as? [[SCStreamFrameInfo: Any]],
+              let rawStatus = attachments.first?[.status] as? Int,
+              SCFrameStatus(rawValue: rawStatus) == .complete else { return }
+
+        // Callback arrival spacing includes scheduler jitter. The capture
+        // timestamp preserves the actual cadence even when callbacks bunch up.
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        encoder.encode(pixelBuffer, presentationTime: presentationTime.isValid ? presentationTime : CMTime(seconds: now, preferredTimescale: 600))
+        guard presentationTime.isNumeric,
+              captureClock.accepts(timestamp: presentationTime.seconds, frameRate: activeFrameRate) else { return }
+        encoder.encode(pixelBuffer, presentationTime: presentationTime)
     }
 }

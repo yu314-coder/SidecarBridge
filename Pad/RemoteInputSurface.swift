@@ -142,6 +142,7 @@ struct RemoteInputSurface: UIViewRepresentable {
     let showsSoftwareKeyboard: Bool
     let showsMagicKeyboardPointer: Bool
     let onInput: (RemoteInputEvent) -> Void
+    let onPasteCommand: () -> Void
     let onPointerCalibration: (RemotePointerButtonMapping) -> Void
     let onZoom: (CGFloat, CGPoint) -> Void
     let onViewportPan: (CGSize) -> Void
@@ -156,6 +157,7 @@ struct RemoteInputSurface: UIViewRepresentable {
             showsSoftwareKeyboard: showsSoftwareKeyboard,
             showsMagicKeyboardPointer: showsMagicKeyboardPointer,
             onInput: onInput,
+            onPasteCommand: onPasteCommand,
             onPointerCalibration: onPointerCalibration,
             onZoom: onZoom,
             onViewportPan: onViewportPan
@@ -171,6 +173,7 @@ struct RemoteInputSurface: UIViewRepresentable {
         uiView.showsSoftwareKeyboard = showsSoftwareKeyboard
         uiView.showsMagicKeyboardPointer = showsMagicKeyboardPointer
         uiView.onInput = onInput
+        uiView.onPasteCommand = onPasteCommand
         uiView.onPointerCalibration = onPointerCalibration
         uiView.onZoom = onZoom
         uiView.onViewportPan = onViewportPan
@@ -202,16 +205,25 @@ private final class RemoteTextInputView: UITextView {
     var onControlArrow: ((String) -> Void)?
     var onInputModeSwitch: (() -> Void)?
     var onTextInputStateChanged: (() -> Void)?
+    /// UIKit may route Command-V to the hidden text view's standard editing
+    /// action instead of delivering it through `pressesBegan`. Intercept the
+    /// action so the iPad never performs a native local paste. The parent
+    /// decides whether to forward the Mac shortcut directly or ask before
+    /// sharing the iPad clipboard.
+    var onPasteCommand: (() -> Void)?
 
     private let suppressedSoftwareKeyboardView = UIView(frame: .zero)
 
     private func updateInputView() {
-        // A zero-sized custom input view suppresses the on-screen keyboard, but
-        // it also disconnects the standard text-input system that tracks the
-        // Magic Keyboard's Globe/input-source key. Keep UIKit's real input view
-        // while hardware is attached; iPadOS already hides its software
-        // keyboard in that state.
-        let usesSystemInputView = showsSoftwareKeyboard || hasHardwareKeyboard
+        // The hidden text receiver must not put UIKit's shortcut strip over
+        // the custom keyboard's bottom row on iPad.
+        inputAssistantItem.leadingBarButtonGroups = []
+        inputAssistantItem.trailingBarButtonGroups = []
+        // The custom SwiftUI keyboard must never open UIKit's keyboard too.
+        // Outside that panel, preserve the hardware keyboard's UIKit input
+        // mode path, including Globe/input-source notifications.
+        let usesSystemInputView = SoftwareKeyboardLayout.usesSystemInputView(
+            customKeyboardVisible: showsSoftwareKeyboard, hardwareKeyboard: hasHardwareKeyboard)
         if usesSystemInputView {
             guard inputView != nil else { return }
             inputView = nil
@@ -253,6 +265,10 @@ private final class RemoteTextInputView: UITextView {
         // Candidate confirmation is not guaranteed to produce a separate
         // UITextViewDelegate change after the marked range disappears.
         onTextInputStateChanged?()
+    }
+
+    override func paste(_ sender: Any?) {
+        onPasteCommand?()
     }
 
     override func unmarkText() {
@@ -343,6 +359,7 @@ private final class RemoteTextInputView: UITextView {
 
 final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, UIPointerInteractionDelegate {
     var onInput: (RemoteInputEvent) -> Void
+    var onPasteCommand: () -> Void
     var onPointerCalibration: (RemotePointerButtonMapping) -> Void
     var onZoom: (CGFloat, CGPoint) -> Void
     var onViewportPan: (CGSize) -> Void
@@ -386,6 +403,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
     private var primaryClickTracker = RemoteClickSequenceTracker()
     private var secondaryClickTracker = RemoteClickSequenceTracker()
     private var directTouchClickTracker = RemoteClickSequenceTracker()
+    private var touchPointerAccumulator = TouchPointerAccumulator()
     private var directTouchStartLocation = CGPoint.zero
     private var directTouchLastLocation = CGPoint.zero
     private var directTouchHoldLastLocation = CGPoint.zero
@@ -417,6 +435,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
     private var hardwareKeyRepeatTasks: [Int: Task<Void, Never>] = [:]
     private let hardwareKeyRepeatDelay = Duration.milliseconds(420)
     private let hardwareKeyRepeatInterval = Duration.milliseconds(45)
+    private var lastPasteForwardedAt = -Double.greatestFiniteMagnitude
     private lazy var hiddenSystemPointerInteraction = UIPointerInteraction(delegate: self)
 
     init(
@@ -428,6 +447,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
         showsSoftwareKeyboard: Bool,
         showsMagicKeyboardPointer: Bool,
         onInput: @escaping (RemoteInputEvent) -> Void,
+        onPasteCommand: @escaping () -> Void,
         onPointerCalibration: @escaping (RemotePointerButtonMapping) -> Void,
         onZoom: @escaping (CGFloat, CGPoint) -> Void,
         onViewportPan: @escaping (CGSize) -> Void
@@ -440,6 +460,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
         self.showsSoftwareKeyboard = showsSoftwareKeyboard
         self.showsMagicKeyboardPointer = showsMagicKeyboardPointer
         self.onInput = onInput
+        self.onPasteCommand = onPasteCommand
         self.onPointerCalibration = onPointerCalibration
         self.onZoom = onZoom
         self.onViewportPan = onViewportPan
@@ -647,6 +668,9 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
             guard let self, let textInputView else { return }
             self.scheduleIMECommitPoll(from: textInputView)
         }
+        textInputView.onPasteCommand = { [weak self] in
+            self?.handlePasteCommand()
+        }
         addSubview(textInputView)
         synchronizeRemoteInputMode(force: true)
     }
@@ -802,6 +826,19 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
             // Its notification then reconciles the Mac to the exact language.
             return false
         }
+        // Command-V is also exposed as UITextView's native paste action. Do
+        // not let UIKit read UIPasteboard here (which can show a privacy alert
+        // and stall the live viewer); forward the shortcut to the Mac and let
+        // the paste action override below safely deduplicate it if UIKit also
+        // invokes that path.
+        if hidUsage == 25,
+           modifiers.contains("command"),
+           !modifiers.contains("option"),
+           !modifiers.contains("control"),
+           !modifiers.contains("shift") {
+            handlePasteCommand()
+            return true
+        }
         guard let remoteEvent = remoteEvent(for: hardwareKey) else { return false }
         guard hardwareKeyRepeatTasks[hidUsage] == nil else {
             // UIKit may deliver repeat press notifications itself. SidecarBridge
@@ -867,6 +904,15 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
         } else {
             onInput(remoteEvent)
         }
+    }
+
+    private func handlePasteCommand() {
+        let now = ProcessInfo.processInfo.systemUptime
+        // A single physical Command-V can arrive through both UIKey and
+        // UITextView.paste. Keep one remote event for that gesture.
+        guard now - lastPasteForwardedAt > 0.20 else { return }
+        lastPasteForwardedAt = now
+        onPasteCommand()
     }
 
     private func synchronizeRemoteInputMode(
@@ -1126,7 +1172,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
             action: #selector(handleTouchHold(_:))
         )
         directTouchHold.consumesDirectTouch = true
-        directTouchHold.minimumPressDuration = 0.22
+        directTouchHold.minimumPressDuration = 0.35
         directTouchHold.allowableMovement = 18
         directTouchHold.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
         directTouchHold.cancelsTouchesInView = false
@@ -1158,6 +1204,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
         switch recognizer.state {
         case .began:
             directTouchStartLocation = location
+            touchPointerAccumulator.reset()
             directTouchLastLocation = location
             directTouchStartedAt = ProcessInfo.processInfo.systemUptime
             directTouchMovedBeyondClickSlop = false
@@ -1178,6 +1225,9 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
             sendRelativePointer(from: directTouchLastLocation, to: location)
             directTouchLastLocation = location
         case .ended:
+            if !isPrimaryDragging && !directTouchConsumedByHold {
+                sendRelativePointer(from: directTouchLastLocation, to: location, force: true)
+            }
             defer {
                 directTouchConsumedByHold = false
                 directTouchMovedBeyondClickSlop = false
@@ -1188,6 +1238,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
             }
         case .cancelled, .failed:
             directTouchClickTracker.reset()
+            touchPointerAccumulator.reset()
             directTouchConsumedByHold = false
             directTouchMovedBeyondClickSlop = false
         default:
@@ -1214,27 +1265,10 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
             interval: pointerDoubleClickInterval,
             movedBeyondClickSlop: false
         )
-        // A direct finger tap may arrive without a final hover/pointer packet
-        // (for example after the viewer resumes from the background). Anchor
-        // the click to the same normalized point used by the existing viewer
-        // geometry instead of relying on a possibly stale Mac cursor. This
-        // does not change the alignment transform; it only makes the click
-        // packet carry the point that was actually touched.
-        if let point = normalizedPoint(location) {
-            onInput(.primaryDown(
-                x: point.x,
-                y: point.y,
-                clickCount: count
-            ))
-            onInput(.primaryUp(
-                x: point.x,
-                y: point.y,
-                clickCount: count
-            ))
-        } else {
-            onInput(.primaryDownAtCurrentPointer(clickCount: count))
-            onInput(.primaryUp(clickCount: count))
-        }
+        // Finger gestures are a trackpad: taps click where the Mac cursor is,
+        // not where the finger happens to touch the glass.
+        onInput(.primaryDownAtCurrentPointer(clickCount: count))
+        onInput(.primaryUp(clickCount: count))
     }
 
     @objc private func handlePointerPress(_ recognizer: PointerPressGestureRecognizer) {
@@ -1405,6 +1439,7 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
 
     @objc private func handleTouchHold(_ recognizer: UILongPressGestureRecognizer) {
         let point = recognizer.location(in: self)
+        let isFinger = (recognizer as? RemoteHoldGestureRecognizer)?.consumesDirectTouch == true
         switch recognizer.state {
         case .began:
             guard !isPrimaryDragging else { return }
@@ -1417,17 +1452,32 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
             isPrimaryDragging = true
             lastPointerTime = 0
             directTouchHoldLastLocation = point
-            if let normalized = normalizedPoint(point) {
+            if isFinger {
+                sendRelativePointer(from: directTouchLastLocation, to: point, force: true)
+                onInput(.primaryDownAtCurrentPointer())
+            } else if let normalized = normalizedPoint(point) {
                 onInput(.primaryDown(x: normalized.x, y: normalized.y))
             } else {
                 onInput(.primaryDownAtCurrentPointer())
             }
         case .changed:
             guard isPrimaryDragging else { return }
-            sendRelativePointer(from: directTouchHoldLastLocation, to: point)
+            if isFinger {
+                sendRelativePointer(from: directTouchHoldLastLocation, to: point)
+            } else if let normalized = normalizedPoint(point) {
+                onInput(.primaryDrag(x: normalized.x, y: normalized.y))
+            }
             directTouchHoldLastLocation = point
         case .ended, .cancelled, .failed:
-            finishPrimaryDrag(at: nil)
+            if isFinger {
+                if recognizer.state == .ended {
+                    sendRelativePointer(from: directTouchHoldLastLocation, to: point, force: true)
+                }
+                touchPointerAccumulator.reset()
+                finishPrimaryDrag(at: nil)
+            } else {
+                finishPrimaryDrag(at: normalizedPoint(point))
+            }
         default:
             break
         }
@@ -1437,7 +1487,10 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
         let point = recognizer.location(in: self)
         switch recognizer.state {
         case .began:
-            guard let normalized = normalizedPoint(point) else { return }
+            guard !isPrimaryDragging else { return }
+            let translation = recognizer.translation(in: self)
+            let origin = CGPoint(x: point.x - translation.x, y: point.y - translation.y)
+            guard let normalized = normalizedPoint(origin) else { return }
             reclaimKeyboardFocus()
             isPrimaryDragging = true
             activePrimaryClickCount = 1
@@ -1488,11 +1541,13 @@ final class InputView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate, 
 
     private func sendRelativePointer(from previous: CGPoint, to current: CGPoint, force: Bool = false) {
         guard let delta = normalizedDelta(from: previous, to: current) else { return }
+        touchPointerAccumulator.add(x: delta.x, y: delta.y)
         let now = ProcessInfo.processInfo.systemUptime
         guard force || now - lastPointerTime >= pointerEmissionInterval else { return }
         lastPointerTime = now
-        guard delta != .zero else { return }
-        onInput(.pointerDelta(x: delta.x, y: delta.y))
+        let accumulated = touchPointerAccumulator.take()
+        guard accumulated.x != 0 || accumulated.y != 0 else { return }
+        onInput(.pointerDelta(x: accumulated.x, y: accumulated.y))
     }
 
     @objc private func handlePrimaryClick(_ recognizer: UITapGestureRecognizer) {

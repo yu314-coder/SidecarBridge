@@ -9,7 +9,9 @@ final class MacConnectionModel: ObservableObject {
     @Published var detail = "Looking for your iPad."
     @Published var isStreaming = false
     @Published var hasPadPeer = false
-    @Published var reachableSidecarDevices: [String] = []
+    @Published var showingNativeSidecarSetup = false
+    @Published var nativeSidecarRoute: NativeSidecarRoute = .nearby
+    @Published private(set) var nativeSidecarProgress = NativeSidecarSetupProgress()
     @Published var pairedPeer: String?
     @Published var launchAtLogin = false
     @Published var launchAtLoginNeedsApproval = false
@@ -113,7 +115,6 @@ final class MacConnectionModel: ObservableObject {
     }
     private var started = false
     private var isStartingFallback = false
-    private var attemptID = UUID()
     private var accessibilityPollTask: Task<Void, Never>?
     private var screenRecordingPollTask: Task<Void, Never>?
     private var streamResumeRetentionTask: Task<Void, Never>?
@@ -242,13 +243,17 @@ final class MacConnectionModel: ObservableObject {
                 self.suppressedClipboardSignature = nil
                 self.cancelStreamResumeRetention()
                 let isDirectLAN = peerOrError?.hasPrefix("LAN:") == true
+                // The refresh capability is sent immediately after the
+                // handshake, but reset the sender when a different iPad (or
+                // a legacy build) connects so a previous 120/240-Hz session
+                // can never leak into a conservative viewer. The capability
+                // hello raises this again as soon as it arrives.
+                self.streamer.setViewerRefreshRate(60)
                 self.streamer.setTransportProfile(isDirectLAN ? .direct : .nearbyP2P)
                 self.refreshPermissions()
                 self.connectionTransport = isDirectLAN ? "Direct local link / AWDL" : "Nearby P2P fallback"
                 self.status = isDirectLAN ? "iPad connected on same Wi-Fi" : "iPad app connected nearby"
-                self.detail = isDirectLAN
-                    ? "Waiting for the iPad's selected display mode. Apple Sidecar will not start automatically."
-                    : "Waiting for the iPad's selected display mode."
+                self.detail = "Encrypted app link ready; waiting for the iPad's stream request. Native Sidecar setup is separate."
                 self.pairedPeer = MacAuthorizedDeviceStore.shared.displaySummary
                 self.sendRemoteInputPermissionStatus()
                 self.exchangeSystemInformation()
@@ -445,10 +450,9 @@ final class MacConnectionModel: ObservableObject {
         repairLaunchAtLoginIfNeeded()
         refreshPermissions()
         peers.start()
-        refreshDevices()
         startClipboardMonitoring()
         status = "Waiting for iPad"
-        detail = "Open SidecarBridge on the iPad. Its selected mode decides whether to use the app stream or Apple Sidecar."
+        detail = "Open SidecarBridge on your iPad or iPhone and tap Connect. Apple Sidecar setup is available separately below."
     }
 
     func setShutdownProtectionEnabled(_ enabled: Bool) {
@@ -537,7 +541,6 @@ final class MacConnectionModel: ObservableObject {
         streamPreferenceRestartTask = nil
         clipboardMonitorTask?.cancel()
         clipboardMonitorTask = nil
-        attemptID = UUID()
         pendingFileURLs.removeAll(keepingCapacity: false)
         queuedFileCount = 0
         fileTransfer.cancelAll(reason: "SidecarBridge is quitting.")
@@ -587,13 +590,11 @@ final class MacConnectionModel: ObservableObject {
     var p2pIsChecking: Bool { !p2pIsReady }
 
     func trySidecarNow() {
-        attemptNative(preferredName: nil, allowFallback: false)
+        showingNativeSidecarSetup = true
     }
 
     func startFallback() {
-        // Invalidate callbacks from any older native attempt. The app-stream
-        // mode must never launch Apple Continuity on its own.
-        attemptID = UUID()
+        // Starting the encrypted app stream never launches native Sidecar.
         guard hasPadPeer else {
             status = "Open the iPad app first"
             detail = "The private stream starts after the two apps find each other."
@@ -721,9 +722,7 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func openDisplaysSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") {
-            NSWorkspace.shared.open(url)
-        }
+        openNativeSidecarSetup()
     }
 
     func openLocalNetworkSettings() {
@@ -759,14 +758,38 @@ final class MacConnectionModel: ObservableObject {
     }
 
     func forgetPairing() {
-        MacPairingSecurity.shared.forgetAllDevices()
+        AuthorizationGeneration.shared.invalidate()
+        peers.stop()
+        stopFallback()
+        stopClipboardMonitoring()
+        pendingFileURLs.removeAll()
+        queuedFileCount = 0
+        fileTransfer.cancelAll(reason: "Device authorization revoked.")
+        let removed = MacPairingSecurity.shared.forgetAllDevices()
         MacAuthorizedDeviceStore.shared.forgetAll()
-        pairedPeer = nil
+        pairedPeer = removed ? nil : "Revoked devices — Keychain cleanup incomplete"
+        hasPadPeer = false
+        remoteSystemInformation = nil
+        status = removed ? "All devices disconnected and forgotten" : "Disconnected — Keychain cleanup needs attention"
+        detail = removed ? "Scan the new code to authorize a device again." : "Old credentials are disabled. Unlock the Mac and retry Forget All to finish Keychain cleanup."
+        if removed { peers.start() }
     }
 
     func copyPairingCode() {
+        pairingCode = MacPairingSecurity.shared.currentDisplayCode()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(pairingCode, forType: .string)
+    }
+
+    var pairingInvitation: PairingInvitation {
+        let security = MacPairingSecurity.shared
+        return PairingInvitation(
+            macID: security.macID,
+            name: PairingInvitation.displayName(Host.current().localizedName ?? "Mac"),
+            code: PairingCode.normalize(pairingCode),
+            hosts: Array(BridgeNetworkMetadata.localPrivateIPv4Addresses().prefix(8)),
+            expiresAt: security.pairingCodeExpiresAt
+        )
     }
 
     func refreshSystemInformation() {
@@ -1169,6 +1192,14 @@ final class MacConnectionModel: ObservableObject {
                     if let widthPart, let width = Int(widthPart) {
                         streamer.setPreferredWidth(width)
                     }
+                } else if detail.hasPrefix("viewer-refresh-rate:") {
+                    let ratePart = detail
+                        .dropFirst("viewer-refresh-rate:".count)
+                        .split(separator: ";", maxSplits: 1)
+                        .first
+                    if let ratePart, let rate = Int(ratePart) {
+                        streamer.setViewerRefreshRate(rate)
+                    }
                 } else if let preferences = StreamPreferences.parse(detail) {
                     streamPreferences = preferences
                     // The preference is read before the next capture starts.
@@ -1179,8 +1210,13 @@ final class MacConnectionModel: ObservableObject {
                 }
             }
         case .trySidecar:
-            refreshDevices()
-            attemptNative(preferredName: command.detail, allowFallback: true)
+            // This handler receives commands only after the existing encrypted
+            // pairing layer authenticates the peer. Do not add a second,
+            // unauthenticated native-setup listener or cable bypass.
+            let value = command.detail ?? ""
+            let request = NativeSidecarSetupRequest.parse(value)
+            if value.hasPrefix(NativeSidecarSetupRequest.prefix), request == nil { return }
+            openNativeSidecarSetup(request: request, notifyPeer: true)
         case .startFallback:
             startFallback()
         case .stopFallback:
@@ -1243,7 +1279,7 @@ final class MacConnectionModel: ObservableObject {
             diagnosticActionDetail = "Connected device information updated."
         case .requestClipboard:
             sendClipboardToPad()
-        case .clipboardText:
+        case .clipboardText, .clipboardTextAndPaste:
             guard let text = command.clipboardTextPayload else {
                 clipboardTransferStatus = "The received clipboard text was invalid or too large."
                 return
@@ -1255,7 +1291,23 @@ final class MacConnectionModel: ObservableObject {
             NSPasteboard.general.setString(text, forType: .string)
             lastObservedClipboardChangeCount = NSPasteboard.general.changeCount
             lastObservedClipboardSignature = "text:\(text)"
-            clipboardTransferStatus = "Copied iPad clipboard to the Mac."
+            if command.kind == .clipboardTextAndPaste {
+                clipboardTransferStatus = "Pasted iPad clipboard on the Mac."
+                // The clipboard replacement and the paste shortcut stay in
+                // this receive path, so Command-V cannot race the clipboard
+                // write across the network or input queues.
+                remoteInput.submit(.key("v", modifiers: ["command"])) { [weak self] accepted, _ in
+                    guard let self else { return }
+                    DispatchQueue.main.async {
+                        self.applyRemoteInputResult(accepted)
+                        if !accepted {
+                            self.clipboardTransferStatus = "Clipboard copied; Mac input permission is required to paste."
+                        }
+                    }
+                }
+            } else {
+                clipboardTransferStatus = "Copied iPad clipboard to the Mac."
+            }
         case .clipboardError:
             clipboardTransferStatus = command.detail ?? "Clipboard transfer failed."
         }
@@ -1289,15 +1341,18 @@ final class MacConnectionModel: ObservableObject {
         return detail
     }
 
-    private func refreshDevices() {
-        reachableSidecarDevices = sidecar.reachableDeviceNames()
-    }
-
-    private func attemptNative(preferredName: String?, allowFallback: Bool) {
-        attemptID = UUID()
-        status = "Displays settings opened"
-        detail = "Choose your iPad in Displays. Apple does not provide a public API that lets SidecarBridge start native Sidecar."
-        peers.send(ControlMessage(.status, detail: "sidecar-settings-opened"))
-        openDisplaysSettings()
+    private func openNativeSidecarSetup(request: NativeSidecarSetupRequest? = nil, notifyPeer: Bool = false) {
+        if let request { nativeSidecarRoute = request.route }
+        showingNativeSidecarSetup = true
+        let activeRequest = nativeSidecarProgress.begin(route: nativeSidecarRoute, id: request?.id ?? UUID())
+        let accepted = sidecar.openSettings()
+        nativeSidecarProgress.receive(accepted ? activeRequest.successReply : activeRequest.failureReply)
+        // Do not touch the active capture, input state, pairing, or global
+        // connection status while the user explores Apple's settings.
+        if notifyPeer {
+            let reply = request.map { accepted ? $0.successReply : $0.failureReply }
+                ?? (accepted ? "sidecar-settings-opened" : "sidecar-settings-failed")
+            peers.send(ControlMessage(.status, detail: reply))
+        }
     }
 }
