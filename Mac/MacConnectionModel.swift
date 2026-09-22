@@ -1184,7 +1184,9 @@ final class MacConnectionModel: ObservableObject {
         switch command.kind {
         case .hello:
             if let detail = command.detail {
-                if detail.hasPrefix("display-width:") {
+                if detail == "viewer-foreground-live-support" {
+                    peers.send(ControlMessage(.status, detail: "viewer-foreground-live-supported"))
+                } else if detail.hasPrefix("display-width:") {
                     let widthPart = detail
                         .dropFirst("display-width:".count)
                         .split(separator: ";", maxSplits: 1)
@@ -1230,12 +1232,12 @@ final class MacConnectionModel: ObservableObject {
                     remoteViewerIsBackgrounded = true
                     peers.setRemoteViewerBackgrounded(true)
                     streamer.setViewerBackgrounded(true)
-                } else if detail == "viewer-foreground" {
+                } else if detail == "viewer-foreground" || detail == "viewer-foreground-live" {
                     remoteViewerIsBackgrounded = false
                     cancelStreamResumeRetention()
                     peers.setRemoteViewerBackgrounded(false)
                     streamer.setViewerBackgrounded(false)
-                    if isStreaming {
+                    if isStreaming && detail == "viewer-foreground" {
                         // Recreate the ScreenCaptureKit source instead of
                         // continuing to encode the surface retained while the
                         // iPad app was backgrounded. The existing encrypted

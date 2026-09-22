@@ -87,6 +87,24 @@ final class PadConnectionModel: ObservableObject {
         return defaults.bool(forKey: key)
     }()
     @Published var backgroundViewerDetail = "Connect and start In-App Display to prepare the background viewer."
+    @Published private(set) var frameInterpolationEnabled = false
+    @Published private(set) var frameInterpolationStatus = "Off"
+    private var supportsLiveForegroundResume = false
+    private var pipWasActiveDuringBackground = false
+    private var liveForegroundStatus: String {
+        supportsLiveForegroundResume ? "viewer-foreground-live" : "viewer-foreground"
+    }
+
+    func setFrameInterpolationEnabled(_ enabled: Bool) {
+        frameInterpolationEnabled = enabled
+        videoDisplay.setFrameInterpolationEnabled(enabled)
+    }
+
+    func receivedMemoryWarning() {
+        guard frameInterpolationEnabled else { return }
+        setFrameInterpolationEnabled(false)
+        frameInterpolationStatus = "Disabled after a memory warning; original video retained"
+    }
     @Published private(set) var discoveryElapsedSeconds = 0
     @Published private(set) var discoveryAttempt = 1
     @Published private(set) var lastDiscoveryIssue: String?
@@ -277,6 +295,7 @@ final class PadConnectionModel: ObservableObject {
             self.isPictureInPictureActive = active
             self.isPictureInPictureSuspended = suspended
             if active {
+                if self.applicationIsBackgrounded { self.pipWasActiveDuringBackground = true }
                 self.backgroundViewerDetail = "Active — the Mac screen can remain visible. Return here to send keyboard and trackpad input."
                 self.peers.send(ControlMessage(.status, detail: "viewer-background"))
                 self.endBackgroundTask()
@@ -296,7 +315,7 @@ final class PadConnectionModel: ObservableObject {
             if !active,
                self.isConnected,
                UIApplication.shared.applicationState == .active {
-                self.peers.send(ControlMessage(.status, detail: "viewer-foreground"))
+                self.peers.send(ControlMessage(.status, detail: self.liveForegroundStatus))
             }
             if possible, self.backgroundRequested, !active {
                 _ = self.videoDisplay.startPictureInPicture()
@@ -305,8 +324,21 @@ final class PadConnectionModel: ObservableObject {
         videoDisplay.onPictureInPictureError = { [weak self] message in
             self?.backgroundViewerDetail = message
         }
+        videoDisplay.onPictureInPictureStopped = { [weak self] in
+            guard let self else { return }
+            self.backgroundRequested = false
+            self.backgroundActivationTask?.cancel()
+            // Closing the PiP window is an explicit user action, not a
+            // failure to retry forever. Preserve intent for foreground resume.
+            if self.applicationIsBackgrounded {
+                self.backgroundViewerDetail = "Background viewer closed. The saved session resumes when you return."
+            }
+        }
         videoDisplay.onLiveUpscalingStatusChanged = { [weak self] status in
             self?.liveUpscalingStatus = status
+        }
+        videoDisplay.onInterpolationStatusChanged = { [weak self] status in
+            self?.frameInterpolationStatus = status
         }
         videoDisplay.setLiveUpscalingEnabled(liveUpscalingEnabled)
         videoDisplay.setAutomaticBackgroundStart(keepRunningInBackground)
@@ -370,6 +402,7 @@ final class PadConnectionModel: ObservableObject {
             let hadLiveVideoSession = self.isStreaming
                 || self.frame != nil
                 || self.videoDisplay.hasPictureInPictureContent
+            if !connected { self.supportsLiveForegroundResume = false }
             self.isConnected = connected
             // Settings acknowledgements belong to this authenticated link,
             // never to an old Mac or a previous connection attempt.
@@ -932,6 +965,7 @@ final class PadConnectionModel: ObservableObject {
                 DiagnosticField("Stream", streamDimensions),
                 DiagnosticField("Received frame rate", streamFPS > 0 ? "\(streamFPS) FPS" : "Not measured"),
                 DiagnosticField("Viewer refresh ceiling", "\(viewerRefreshRate) FPS"),
+                DiagnosticField("Frame interpolation", frameInterpolationStatus),
                 DiagnosticField(
                     "Connection latency",
                     connectionLatencyMS.map { "\($0) ms" } ?? "Not measured"
@@ -969,6 +1003,15 @@ final class PadConnectionModel: ObservableObject {
         switch phase {
         case .active:
             let shouldRestoreStream = enteredBackground && restoreStreamAfterBackground
+            let needsVideoReset = shouldRestoreStream && FrameInterpolationPolicy.needsResumeReset(
+                connected: isConnected,
+                pipActive: isPictureInPictureActive || pipWasActiveDuringBackground,
+                lastFrameAge: videoDisplay.lastVideoFrameAge
+            )
+            // AVKit may stop PiP just before SwiftUI reports `.active`.
+            // Remember that it was live rather than treating that normal
+            // ordering as a failed/suspended video session.
+            pipWasActiveDuringBackground = false
             let wasBackgrounded = applicationIsBackgrounded
             applicationIsBackgrounded = false
             enteredBackground = false
@@ -986,7 +1029,8 @@ final class PadConnectionModel: ObservableObject {
                 ? "Returning to SidecarBridge — restoring the encrypted session…"
                 : "Ready — PiP can keep the screen visible; return here for keyboard and trackpad control."
             if isPictureInPictureActive { videoDisplay.stopPictureInPicture() }
-            if shouldRestoreStream {
+            videoDisplay.setInterpolationForeground(true)
+            if needsVideoReset {
                 // Reset both halves of the video pipeline before resuming the
                 // encrypted socket. This prevents stale H.264 P-frames from
                 // being delivered into a new AVSampleBufferDisplayLayer while
@@ -994,6 +1038,10 @@ final class PadConnectionModel: ObservableObject {
                 peers.prepareForForegroundResume()
                 videoDisplay.prepareForForegroundResume()
                 beginForegroundResumePresentation()
+            } else if shouldRestoreStream {
+                // A healthy PiP session already has a live decoder and a
+                // valid encrypted link. Do not flush/redial it on every swipe.
+                finishForegroundResume()
             }
             // Returning to the foreground may restore a session the user
             // already started, but the initial active transition must never
@@ -1010,7 +1058,7 @@ final class PadConnectionModel: ObservableObject {
                 // capability so the Mac does not remain on the conservative
                 // 60-FPS startup default.
                 sendDisplayCapabilities()
-                peers.send(ControlMessage(.status, detail: "viewer-foreground"))
+                peers.send(ControlMessage(.status, detail: needsVideoReset ? "viewer-foreground" : liveForegroundStatus))
                 reconcileClipboardAfterForeground()
             }
             endBackgroundTask()
@@ -1058,7 +1106,9 @@ final class PadConnectionModel: ObservableObject {
         if !enteredBackground {
             enteredBackground = true
             restoreStreamAfterBackground = isStreaming
+            pipWasActiveDuringBackground = isPictureInPictureActive
         }
+        videoDisplay.setInterpolationForeground(false)
         beginBackgroundTransition()
     }
 
@@ -1699,6 +1749,7 @@ final class PadConnectionModel: ObservableObject {
         // Multipeer route. The Mac keeps legacy pacing until it receives this
         // capability, so older viewers remain compatible.
         peers.send(ControlMessage(.hello, detail: "video-ack"))
+        peers.send(ControlMessage(.hello, detail: "viewer-foreground-live-support"))
         peers.send(ControlMessage(.hello, detail: "display-width:\(nativeWidth)"))
         // Ultra mode must respect the receiving display's refresh capacity.
         // Sending 240 FPS to a 60-Hz iPad fills the display-layer queue and
@@ -1814,6 +1865,10 @@ final class PadConnectionModel: ObservableObject {
             return
         }
         guard command.kind == .status, let value = command.detail else { return }
+        if value == "viewer-foreground-live-supported" {
+            supportsLiveForegroundResume = true
+            return
+        }
         if nativeSidecarProgress.receive(value) {
             nativeSidecarTimeoutTask?.cancel()
             nativeSidecarTimeoutTask = nil

@@ -35,6 +35,9 @@ struct SidecarBridgePadApp: App {
                     model.appDidEnterBackground()
                 }
                 .onChange(of: scenePhase) { _, phase in model.scenePhaseChanged(phase) }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                    model.receivedMemoryWarning()
+                }
         }
     }
 }

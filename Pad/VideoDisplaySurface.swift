@@ -9,7 +9,9 @@ import UIKit
 final class VideoDisplayController: NSObject {
     var onPictureInPictureStateChanged: ((Bool, Bool, Bool) -> Void)?
     var onPictureInPictureError: ((String) -> Void)?
+    var onPictureInPictureStopped: (() -> Void)?
     var onLiveUpscalingStatusChanged: ((String) -> Void)?
+    var onInterpolationStatusChanged: ((String) -> Void)?
     /// Called when the H.264 decoder sees a missing frame or has to flush its
     /// dependency chain. The Mac responds with an immediate IDR frame.
     var onKeyFrameNeeded: (() -> Void)?
@@ -26,7 +28,11 @@ final class VideoDisplayController: NSObject {
     private var pendingPictureInPictureStart = false
     private var hasReceivedSampleBuffer = false
     private var pictureInPictureStartWatchdog: Task<Void, Never>?
-    private var pendingSamples: [CMSampleBuffer] = []
+    private struct PendingDisplaySample {
+        let sample: CMSampleBuffer
+        let isKeyFrame: Bool
+    }
+    private var pendingSamples: [PendingDisplaySample] = []
     // Keep a head index instead of repeatedly shifting the array with
     // removeFirst(). At 90/120 FPS that shift made the main-actor display
     // path do avoidable work for every sample.
@@ -45,6 +51,67 @@ final class VideoDisplayController: NSObject {
     private var formatWidth = 0
     private var formatHeight = 0
     private var liveUpscalingEnabled = false
+    private var interpolationEnabled = false
+    private var interpolationForeground = true
+    private var lastVideoArrival: TimeInterval = 0
+    private var playbackSessionActive = false
+    private lazy var interpolator: LiveFrameInterpolation = {
+        let player = LiveFrameInterpolation()
+        player.onSample = { [weak self] sample in
+            guard let self, let view = self.view,
+                  self.interpolationEnabled, self.interpolationForeground,
+                  view.displayLayer.isReadyForMoreMediaData else { return false }
+            view.enqueue(sample)
+            return true
+        }
+        player.onStatus = { [weak self] in self?.onInterpolationStatusChanged?($0) }
+        player.onFailure = { [weak self] in
+            self?.dropPendingSamplesAndAwaitKeyFrame()
+            self?.requestKeyFrameIfNeeded(force: true)
+        }
+        player.onRecoveryNeeded = { [weak self] in
+            // Recovery is local to the experimental decoder. Do not flush the
+            // ordinary display layer or interrupt input; only ask the Mac for
+            // an IDR so the experiment can resume by itself.
+            self?.requestKeyFrameIfNeeded(force: true)
+        }
+        return player
+    }()
+
+    var lastVideoFrameAge: TimeInterval {
+        lastVideoArrival > 0 ? ProcessInfo.processInfo.systemUptime - lastVideoArrival : .infinity
+    }
+
+    func setFrameInterpolationEnabled(_ enabled: Bool) {
+        guard interpolationEnabled != enabled else { return }
+        interpolationEnabled = enabled
+        resetDecoderForNewPresentationSurface(keepingImage: true)
+        onInterpolationStatusChanged?(enabled ? "Waiting for live H.264 video (1080p or lower)" : "Off")
+        requestKeyFrameIfNeeded(force: true)
+    }
+
+    func setInterpolationForeground(_ foreground: Bool) {
+        guard interpolationForeground != foreground else { return }
+        interpolationForeground = foreground
+        guard interpolationEnabled else { return }
+        resetDecoderForNewPresentationSurface(keepingImage: true)
+        onInterpolationStatusChanged?(foreground ? "Waiting for fresh live video" : "Paused for Picture in Picture — original video")
+        requestKeyFrameIfNeeded(force: true)
+    }
+
+    private func preparePlaybackSession() {
+        guard !playbackSessionActive else { return }
+        do {
+            let session = AVAudioSession.sharedInstance()
+            // This is the audio/video playback category required by AVKit
+            // PiP. We play no silent audio and do not interrupt other music.
+            try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
+            try session.setActive(true)
+            playbackSessionActive = true
+        } catch {
+            onPictureInPictureError?("Cannot prepare Picture in Picture: \(error.localizedDescription)")
+        }
+    }
 
     /// Keep the decoder close to the live edge while allowing a short burst
     /// during a local render hiccup. H.264 frames are dropped only from the
@@ -102,6 +169,7 @@ final class VideoDisplayController: NSObject {
 
     @discardableResult
     func enqueue(_ frame: VideoFrame) -> Bool {
+        lastVideoArrival = ProcessInfo.processInfo.systemUptime
         currentFrameRate = frame.frameRate
         guard acceptSequence(frame) else { return false }
         if frame.isKeyFrame,
@@ -150,11 +218,12 @@ final class VideoDisplayController: NSObject {
         needsKeyFrame = false
         let wasReadyForPictureInPicture = hasReceivedSampleBuffer
         lastReceivedSequence = frame.sequence
-        pendingSamples.append(sampleBuffer)
+        pendingSamples.append(PendingDisplaySample(sample: sampleBuffer, isKeyFrame: frame.isKeyFrame))
         hasReceivedSampleBuffer = true
         // This property is KVO-backed in AVKit. Setting it for every video
         // frame needlessly invalidates PiP state and competes with decoding.
         if !wasReadyForPictureInPicture {
+            preparePlaybackSession()
             pictureInPictureController?.canStartPictureInPictureAutomaticallyFromInline = automaticBackgroundStartEnabled
         }
         drainDisplayQueue()
@@ -170,6 +239,8 @@ final class VideoDisplayController: NSObject {
     /// or lower-bandwidth transport.
     @discardableResult
     func enqueueJPEG(_ image: UIImage) -> Bool {
+        lastVideoArrival = ProcessInfo.processInfo.systemUptime
+        if interpolationEnabled { onInterpolationStatusChanged?("JPEG stream — using original video") }
         guard let sampleBuffer = makeImageSampleBuffer(image) else { return false }
         if pendingSampleCount >= maximumPendingSamples {
             // JPEG frames are independent, so discard stale fallback frames
@@ -179,8 +250,9 @@ final class VideoDisplayController: NSObject {
         }
         let wasReadyForPictureInPicture = hasReceivedSampleBuffer
         hasReceivedSampleBuffer = true
-        pendingSamples.append(sampleBuffer)
+        pendingSamples.append(PendingDisplaySample(sample: sampleBuffer, isKeyFrame: true))
         if !wasReadyForPictureInPicture {
+            preparePlaybackSession()
             pictureInPictureController?.canStartPictureInPictureAutomaticallyFromInline = automaticBackgroundStartEnabled
         }
         drainDisplayQueue()
@@ -194,6 +266,11 @@ final class VideoDisplayController: NSObject {
         needsKeyFrame = true
         hasReceivedSampleBuffer = false
         resetDisplayQueue()
+        lastVideoArrival = 0
+        if playbackSessionActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            playbackSessionActive = false
+        }
     }
 
     /// Reset the sample-buffer decoder before returning from an iPadOS
@@ -216,7 +293,14 @@ final class VideoDisplayController: NSObject {
             return
         }
         while pendingSampleCount > 0, view.displayLayer.isReadyForMoreMediaData {
-            view.enqueue(pendingSamples[pendingSamplesHead])
+            let pending = pendingSamples[pendingSamplesHead]
+            let sample = pending.sample
+            interpolator.refreshRate = view.window?.screen.maximumFramesPerSecond ?? 60
+            let compressed = CMSampleBufferGetImageBuffer(sample) == nil
+            if !interpolationEnabled || !interpolationForeground || !compressed ||
+                !interpolator.enqueue(sample, isKeyFrame: pending.isKeyFrame) {
+                view.enqueue(sample)
+            }
             pendingSamplesHead += 1
         }
         if pendingSamplesHead == pendingSamples.count {
@@ -236,7 +320,8 @@ final class VideoDisplayController: NSObject {
         }
     }
 
-    private func resetDisplayQueue() {
+    private func resetDisplayQueue(keepingImage: Bool = false) {
+        interpolator.reset()
         displayDrainTask?.cancel()
         displayDrainTask = nil
         displayStallWatchdogTask?.cancel()
@@ -246,11 +331,12 @@ final class VideoDisplayController: NSObject {
         hasReceivedSampleBuffer = false
         lastReceivedSequence = nil
         nextPresentationTimestamp = .zero
-        view?.flush()
+        if keepingImage { view?.flushDecoderKeepingImage() }
+        else { view?.flush() }
     }
 
-    private func resetDecoderForNewPresentationSurface() {
-        resetDisplayQueue()
+    private func resetDecoderForNewPresentationSurface(keepingImage: Bool = false) {
+        resetDisplayQueue(keepingImage: keepingImage)
         formatDescription = nil
         parameterSets.removeAll(keepingCapacity: true)
         needsKeyFrame = true
@@ -331,6 +417,7 @@ final class VideoDisplayController: NSObject {
 
     @discardableResult
     func startPictureInPicture() -> Bool {
+        preparePlaybackSession()
         guard let pictureInPictureController else {
             onPictureInPictureError?("Picture in Picture is not available on this iPad.")
             return false
@@ -703,6 +790,7 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
     func pictureInPictureControllerWillStartPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
+        setInterpolationForeground(false)
         publishPictureInPictureState()
     }
 
@@ -721,6 +809,8 @@ extension VideoDisplayController: @preconcurrency AVPictureInPictureControllerDe
         pictureInPictureStartWatchdog?.cancel()
         pictureInPictureStartWatchdog = nil
         isStartingPictureInPicture = false
+        onPictureInPictureStopped?()
+        if UIApplication.shared.applicationState == .active { setInterpolationForeground(true) }
         publishPictureInPictureState()
     }
 

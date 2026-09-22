@@ -7,10 +7,10 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.3"
-    # App Store Connect requires the build number to increase across uploads.
-    # macOS 1.3 upload: build 105. Keep this sequence independent from iPadOS.
-    CURRENT_PROJECT_VERSION: "105"
+    MARKETING_VERSION: "1.4"
+    # macOS builds must increase across marketing versions. App Store Connect
+    # rejected 1.4 (1) because previous Mac builds are higher; continue at 106.
+    CURRENT_PROJECT_VERSION: "106"
     DEVELOPMENT_TEAM: LYK4LV2859
 targets:
   SidecarBridgeMac:
@@ -75,6 +75,9 @@ targets:
         NSCameraUsageDescription: Scan the temporary pairing QR code displayed by SidecarBridge on your Mac. Images are not saved or uploaded.
         UIApplicationSupportsIndirectInputEvents: true
         UIFileSharingEnabled: true
+        # Required for actual user-visible AVKit Picture in Picture video.
+        # No silent-audio keepalive; see FRAME_INTERPOLATION_AND_BACKGROUND.md.
+        UIBackgroundModes: [audio]
         LSSupportsOpeningDocumentsInPlace: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
@@ -98,9 +101,10 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
         PRODUCT_NAME: SidecarBridge
-        MARKETING_VERSION: "1.3"
-        # iPadOS 1.3 upload: build 30. Keep this sequence independent from macOS.
-        CURRENT_PROJECT_VERSION: "30"
+        MARKETING_VERSION: "1.4"
+        # iOS/iPadOS 1.4 started at build 1. Build 2 fixes automatic
+        # frame-interpolation decoder recovery under queue pressure.
+        CURRENT_PROJECT_VERSION: "2"
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
@@ -110,6 +114,7 @@ targets:
       - sdk: Network.framework
       - sdk: AVFoundation.framework
       - sdk: AVKit.framework
+      - sdk: VideoToolbox.framework
       - sdk: GameController.framework
       - sdk: Metal.framework
       - sdk: MetalKit.framework

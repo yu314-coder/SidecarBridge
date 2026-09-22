@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		04ADF9F911AEE1857DCA0295 /* FrameInterpolationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A943F84D4B5FAE4E54A0AFC1 /* FrameInterpolationPolicy.swift */; };
 		056CDFC7B8E5ECD9CD6A43C2 /* PairingQRCodeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 536356574331C1E229ABB10F /* PairingQRCodeView.swift */; };
 		05C40EDEFB916FC2A2DEB7A4 /* MacPeerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 068FB904EF6CA41BBDCF4992 /* MacPeerService.swift */; };
 		05F19BFE14C4860A55B704A9 /* RFBInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F660985C5FB0DF03F0C8ED6 /* RFBInput.swift */; };
@@ -16,6 +17,7 @@
 		0A32C958B3D5833B7F26E872 /* StreamQualityPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79AA12466ED5894ACD3234B3 /* StreamQualityPolicy.swift */; };
 		0A6EC89FFFAC699185EA8EB6 /* PacketCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C270B0D7506B1B8A83205AC3 /* PacketCodecTests.swift */; };
 		0B337B768F061F2FD7CB58D1 /* RemoteTextDelta.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2D5FA8EF5650AFCFE710FD8 /* RemoteTextDelta.swift */; };
+		0D149CDA67DA756F78E108FC /* LiveFrameInterpolation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03D583C264E2AB41DE3CD31A /* LiveFrameInterpolation.swift */; };
 		0F1A65FF0EB6D78056A41646 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6931674BFB3F75F81BCA5C59 /* Network.framework */; };
 		136F9FBF23D970658AD94CAD /* ScreenStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */; };
 		154E5AB99E78F33E381C5A3F /* RemoteInputLanguageState.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD61B12D30F5060118D8D060 /* RemoteInputLanguageState.swift */; };
@@ -61,6 +63,7 @@
 		5EC34767AC425C9C6475F973 /* KeyboardCursorFollowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B55B93F858AA6D4257F7B6FE /* KeyboardCursorFollowTests.swift */; };
 		605E1E80BBA2869CC7BD4D80 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2688DB8C49E0676ABEF1A885 /* PrivacyInfo.xcprivacy */; };
 		6324505FFF4FE32370FADEDE /* StreamPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C44B54C40FDA26838C3E88 /* StreamPreferences.swift */; };
+		636D413BAF9C1A9ED6C47B8B /* FrameInterpolationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78C23221A4A16CE77CC95A01 /* FrameInterpolationPolicyTests.swift */; };
 		6611C2566550F8C25E509AC5 /* MacConnectionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */; };
 		665FE1192C250DC97C98BCF8 /* NativeSidecarSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFB37684A758A8231391515D /* NativeSidecarSetup.swift */; };
 		68521A21B5C96F2D3EC95AEC /* DisplayUpscalingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 197C9AC7786B231EA458D65A /* DisplayUpscalingPolicy.swift */; };
@@ -94,6 +97,7 @@
 		A461F9BE2A202A46BD1AB1E1 /* BridgeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C128FA50735B8EF865A75273 /* BridgeProtocol.swift */; };
 		AA871BA53C816B7D0A42DC2A /* StreamPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C44B54C40FDA26838C3E88 /* StreamPreferences.swift */; };
 		AC3E9F309AB18E62924E7688 /* KeyboardCursorFollow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E09838A556E7F05473227C7 /* KeyboardCursorFollow.swift */; };
+		AC9C6030EA3B5190CF79CF1D /* FrameInterpolationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A943F84D4B5FAE4E54A0AFC1 /* FrameInterpolationPolicy.swift */; };
 		AE58CE3B6126833BE8F35893 /* SidecarBridgePadApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0498686ABD4560A441EB7B0A /* SidecarBridgePadApp.swift */; };
 		B26D658ECEA41AC9A0AB72E5 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9C3C6BBD3AFF9170F8DB3066 /* Metal.framework */; };
 		B3EB497F5D6CA7BE9944E643 /* MacShutdownCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56DF645E6C1593B359A7A622 /* MacShutdownCoordinator.swift */; };
@@ -131,12 +135,14 @@
 		DDD681F579FE17C68A57FF20 /* RemoteInputSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF5CC5AC64C27EA6514A906 /* RemoteInputSurface.swift */; };
 		DF2078A6A6B7ED10435B5DC9 /* DisplayUpscalingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 197C9AC7786B231EA458D65A /* DisplayUpscalingPolicy.swift */; };
 		E08AF6DC779247AF93BEC228 /* ConnectionSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CD740FBFF9B27BD0D60547D /* ConnectionSetup.swift */; };
+		E13301B28DABC6EBF443371E /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEC6BA7ABB96D39C476B1549 /* VideoToolbox.framework */; };
 		E1D1B7B4FE8A808BA5B4E0E2 /* MacPairingCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24C3F2C06962F3FC95B1BFF2 /* MacPairingCard.swift */; };
 		E277CF7C68908D7AB4FA2DC6 /* MacDeviceAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC5BF383941F9C156E7F434 /* MacDeviceAuthorization.swift */; };
 		E3D394BF419ABB4C3F3851D4 /* KeyboardCursorFollow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E09838A556E7F05473227C7 /* KeyboardCursorFollow.swift */; };
 		E551B38D19012BC797E5976E /* RemoteKeyboardToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 421938E4B6C3DFFF40C8081D /* RemoteKeyboardToolbar.swift */; };
 		E66E4CAC568A76AFDF04E4A0 /* RFBProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4356FE3C5148AB48C15C4BEB /* RFBProtocol.swift */; };
 		EA8158F53E520A5927D77346 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A8D4A60E360DEFDB2604E64D /* MetalKit.framework */; };
+		EED73DF6364643AB7AF4EAFD /* FrameInterpolationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A943F84D4B5FAE4E54A0AFC1 /* FrameInterpolationPolicy.swift */; };
 		EF96FEDBEB9021AEBB5607E4 /* VideoDisplaySurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECEBB8AE7F4ECF8E0D6ADF61 /* VideoDisplaySurface.swift */; };
 		F21D85957D037CD13A0BD638 /* ShutdownProtectionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F56B763694D517FFB925EA1F /* ShutdownProtectionPolicy.swift */; };
 		F53696C5A9D0E99ACEA17578 /* SystemInformation.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE7DA9C5B96E49B459CB9359 /* SystemInformation.swift */; };
@@ -146,6 +152,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		03D583C264E2AB41DE3CD31A /* LiveFrameInterpolation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveFrameInterpolation.swift; sourceTree = "<group>"; };
 		0498686ABD4560A441EB7B0A /* SidecarBridgePadApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidecarBridgePadApp.swift; sourceTree = "<group>"; };
 		068FB904EF6CA41BBDCF4992 /* MacPeerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPeerService.swift; sourceTree = "<group>"; };
 		09EF8EAB93178074C7D6559D /* ServiceManagement.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ServiceManagement.framework; path = System/Library/Frameworks/ServiceManagement.framework; sourceTree = SDKROOT; };
@@ -187,6 +194,7 @@
 		722C341A866CEB112E6AE410 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		74E92BAEB461529898894895 /* MacLANService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacLANService.swift; sourceTree = "<group>"; };
 		758757C21F3E11A422534273 /* ConnectionSetupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionSetupTests.swift; sourceTree = "<group>"; };
+		78C23221A4A16CE77CC95A01 /* FrameInterpolationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameInterpolationPolicyTests.swift; sourceTree = "<group>"; };
 		796A25DB4ABDCDB1108CC28F /* SidecarBridgeMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SidecarBridgeMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		79AA12466ED5894ACD3234B3 /* StreamQualityPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamQualityPolicy.swift; sourceTree = "<group>"; };
 		7BD1ADC1E0F10F5002DA2E64 /* PadNativeSidecarSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadNativeSidecarSetupView.swift; sourceTree = "<group>"; };
@@ -205,6 +213,7 @@
 		A605DAB3B8F6C917ABABB46F /* MacConnectionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacConnectionModel.swift; sourceTree = "<group>"; };
 		A8D4A60E360DEFDB2604E64D /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
 		A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferEngine.swift; sourceTree = "<group>"; };
+		A943F84D4B5FAE4E54A0AFC1 /* FrameInterpolationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameInterpolationPolicy.swift; sourceTree = "<group>"; };
 		ADB37E6EB752E6F75FD00F27 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		AE9882163FE972554DFD22C5 /* ScreenStreamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenStreamer.swift; sourceTree = "<group>"; };
 		B074CA5AC5C67EC30F9A42EA /* PadContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadContentView.swift; sourceTree = "<group>"; };
@@ -245,6 +254,7 @@
 				0F1A65FF0EB6D78056A41646 /* Network.framework in Frameworks */,
 				8D467B67CF7786EEA5045A38 /* AVFoundation.framework in Frameworks */,
 				875EB2F7C4A025AC74DAA63F /* AVKit.framework in Frameworks */,
+				E13301B28DABC6EBF443371E /* VideoToolbox.framework in Frameworks */,
 				F8B43CC43FFBE5550CF68338 /* GameController.framework in Frameworks */,
 				B26D658ECEA41AC9A0AB72E5 /* Metal.framework in Frameworks */,
 				EA8158F53E520A5927D77346 /* MetalKit.framework in Frameworks */,
@@ -309,6 +319,7 @@
 			children = (
 				758757C21F3E11A422534273 /* ConnectionSetupTests.swift */,
 				48B87660B4442B52AC436CBC /* EncodedVideoStorageTests.swift */,
+				78C23221A4A16CE77CC95A01 /* FrameInterpolationPolicyTests.swift */,
 				B55B93F858AA6D4257F7B6FE /* KeyboardCursorFollowTests.swift */,
 				9F91C5AE01019F06F1B48B17 /* MacPairingUITests.swift */,
 				581B355FE83160B947C4B330 /* NativeSidecarSetupTests.swift */,
@@ -333,6 +344,7 @@
 				197C9AC7786B231EA458D65A /* DisplayUpscalingPolicy.swift */,
 				D89A99FFA308C0FBDCEE9CAF /* EncodedVideoStorage.swift */,
 				A8DDD6EE222E3F6CF59A2A8A /* FileTransferEngine.swift */,
+				A943F84D4B5FAE4E54A0AFC1 /* FrameInterpolationPolicy.swift */,
 				6E09838A556E7F05473227C7 /* KeyboardCursorFollow.swift */,
 				CDA6F2EF107E07D5953BD5E3 /* LANProtocol.swift */,
 				C0A09A2C484EA8062D7FAD7C /* MainQueueExecutor.swift */,
@@ -379,6 +391,7 @@
 			children = (
 				5BFDF69103D50AB830DBBC34 /* Assets.xcassets */,
 				ADB37E6EB752E6F75FD00F27 /* Info.plist */,
+				03D583C264E2AB41DE3CD31A /* LiveFrameInterpolation.swift */,
 				2C990E58D2B971E578B2DB3D /* MacScreenSharingSession.swift */,
 				CAA199A69CB4050182217ACB /* MacScreenSharingView.swift */,
 				4CB808CBC405BD99D610F489 /* MetalFXLiveUpscaler.swift */,
@@ -557,6 +570,8 @@
 				27B017E5DE597D7B81E3F1D5 /* EncodedVideoStorage.swift in Sources */,
 				895319639EF126DB8ADA2D79 /* EncodedVideoStorageTests.swift in Sources */,
 				C5741A0FA3C65F02D5D6BB85 /* FileTransferEngine.swift in Sources */,
+				AC9C6030EA3B5190CF79CF1D /* FrameInterpolationPolicy.swift in Sources */,
+				636D413BAF9C1A9ED6C47B8B /* FrameInterpolationPolicyTests.swift in Sources */,
 				E3D394BF419ABB4C3F3851D4 /* KeyboardCursorFollow.swift in Sources */,
 				5EC34767AC425C9C6475F973 /* KeyboardCursorFollowTests.swift in Sources */,
 				D2ABD59672AAD0121B799154 /* LANProtocol.swift in Sources */,
@@ -603,6 +618,7 @@
 				68521A21B5C96F2D3EC95AEC /* DisplayUpscalingPolicy.swift in Sources */,
 				06591D17688848D21AA3142A /* EncodedVideoStorage.swift in Sources */,
 				4145B17A8C27484CAE6FA820 /* FileTransferEngine.swift in Sources */,
+				04ADF9F911AEE1857DCA0295 /* FrameInterpolationPolicy.swift in Sources */,
 				8BF65511D829825BA5768DE3 /* H264Encoder.swift in Sources */,
 				A2957308FA0E7D8BD0E22721 /* KeyboardCursorFollow.swift in Sources */,
 				28409B33478CD0C30D1765CC /* LANProtocol.swift in Sources */,
@@ -646,8 +662,10 @@
 				1FCB2C426F39C72A5D7E26B5 /* DisplayUpscalingPolicy.swift in Sources */,
 				707FB4967309E134DFF38B40 /* EncodedVideoStorage.swift in Sources */,
 				D28AEA0D9B85D39401C867CB /* FileTransferEngine.swift in Sources */,
+				EED73DF6364643AB7AF4EAFD /* FrameInterpolationPolicy.swift in Sources */,
 				AC3E9F309AB18E62924E7688 /* KeyboardCursorFollow.swift in Sources */,
 				4179193B540F02A36A7DF0DF /* LANProtocol.swift in Sources */,
+				0D149CDA67DA756F78E108FC /* LiveFrameInterpolation.swift in Sources */,
 				D304D021BADBA7516027F8E0 /* MacScreenSharingSession.swift in Sources */,
 				44B6D187D2B31C8CDBA7A43C /* MacScreenSharingView.swift in Sources */,
 				3F656BFEE9F000BE8F25F32A /* MainQueueExecutor.swift in Sources */,
@@ -717,7 +735,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 105;
+				CURRENT_PROJECT_VERSION = 106;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = LYK4LV2859;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -732,7 +750,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -787,13 +805,13 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 2;
 				INFOPLIST_FILE = Pad/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
 				PRODUCT_NAME = SidecarBridge;
 				SDKROOT = iphoneos;
@@ -824,13 +842,13 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 30;
+				CURRENT_PROJECT_VERSION = 2;
 				INFOPLIST_FILE = Pad/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = io.sidecarbridge.mac;
 				PRODUCT_NAME = SidecarBridge;
 				SDKROOT = iphoneos;
@@ -896,7 +914,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 105;
+				CURRENT_PROJECT_VERSION = 106;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = LYK4LV2859;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -917,7 +935,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

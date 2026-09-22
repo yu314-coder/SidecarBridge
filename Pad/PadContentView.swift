@@ -2688,6 +2688,22 @@ private struct PadSettingsPanel: View {
 
                 if developerModeEnabled {
                     Section {
+                        Toggle("Live frame interpolation (experimental)", isOn: Binding(
+                            get: { model.frameInterpolationEnabled },
+                            set: model.setFrameInterpolationEnabled
+                        ))
+                        Text(model.frameInterpolationStatus)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                        Text("Test during a real connection with H.264 at 1080p or lower. Generates intermediate frames on supported iOS 26+ devices; 60 → 120 needs a 120 Hz display. Native resolution and Mac capture FPS are unchanged. Decoder bursts recover automatically from a fresh keyframe. Unsupported formats, slow processing, and Picture in Picture use original video. Resets to off at app launch.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } header: {
+                        Text("Frame generation")
+                    } footer: {
+                        Text("The output counter measures submitted frames, including generated frames. Compare smoothness and input delay with this switch off; generated FPS is not received FPS.")
+                    }
+                    Section {
                         HStack(spacing: 10) {
                             Image(systemName: "wrench.and.screwdriver.fill")
                                 .foregroundStyle(.orange)
