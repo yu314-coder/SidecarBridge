@@ -20,7 +20,10 @@ enum FrameInterpolationPolicy {
                                   refreshRate: Int) -> Bool {
         interval.isFinite && processingTime.isFinite && interval >= 1.0 / 65
             && interval <= 1.0 / 25 && processingTime >= 0
-            && processingTime < interval * 0.75
+            // The processor runs after the source frame arrives. A modest
+            // presentation delay lets a 4K frame take longer than one source
+            // interval without making its midpoint unusable.
+            && processingTime < min(0.05, interval * 2.5)
             && Double(refreshRate) >= 1.8 / interval
     }
 

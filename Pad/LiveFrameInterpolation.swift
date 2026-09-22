@@ -164,10 +164,14 @@ final class LiveFrameInterpolation: NSObject {
         // queue. Dropping decoded images doesn't break H.264 dependencies.
         latest = frame
         if processing {
-            // In particular, keep native video moving while Apple's ML
-            // model is being loaded on the processor actor.
-            present(frame, generated: false)
-            previous = frame
+            // Presenting a newer source here makes the in-flight midpoint
+            // older than the displayed PTS, so it can never be shown. Only
+            // bypass processing when model loading has visibly stalled.
+            if let lastOutputTime, CACurrentMediaTime() - lastOutputTime > 0.10 {
+                present(frame, generated: false)
+                previous = frame
+                latest = nil
+            }
         }
         drain()
     }
@@ -177,7 +181,7 @@ final class LiveFrameInterpolation: NSObject {
         latest = nil
         let prior = previous
         previous = current
-        guard let prior else { present(current, generated: false); return }
+        guard let prior else { presentOrQueueOriginal(current); return }
         let interval = CMTimeGetSeconds(CMTimeSubtract(current.pts, prior.pts))
         let now = CACurrentMediaTime()
         guard now >= coolingUntil,
@@ -186,12 +190,12 @@ final class LiveFrameInterpolation: NSObject {
               ProcessInfo.processInfo.thermalState != .critical,
               FrameInterpolationPolicy.shouldInterpolate(interval: interval, processingTime: 0, refreshRate: refreshRate)
         else {
-            present(current, generated: false)
+            presentOrQueueOriginal(current)
             return
         }
         #if !targetEnvironment(simulator)
         guard #available(iOS 26.0, *), let processor = processorStorage as? LiveInterpolationProcessor else {
-            present(current, generated: false)
+            presentOrQueueOriginal(current)
             return
         }
         processing = true
@@ -205,19 +209,33 @@ final class LiveFrameInterpolation: NSObject {
                 let finished = CACurrentMediaTime()
                 // Initial ML loading and late processing must never delay the
                 // next fresh frame or replay an obsolete pair after resume.
-                if self.latest != nil || finished - current.arrival > interval * 1.5 {
-                    self.coolingUntil = finished + 1
-                    if self.latest == nil { self.present(current, generated: false) }
+                if finished - current.arrival > max(0.05, interval * 2.5) ||
+                   (self.lastPresentedPTS.map { CMTimeCompare(current.pts, $0) <= 0 } ?? false) {
+                    self.coolingUntil = finished + 0.20
+                    if self.latest == nil { self.presentOrQueueOriginal(current) }
                 } else if FrameInterpolationPolicy.shouldInterpolate(
                     interval: interval, processingTime: result.duration, refreshRate: self.refreshRate
                 ) {
-                    self.scheduled = [
-                        (finished, result.frame, true),
-                        (finished + interval / 2, current, false)
-                    ]
+                    if self.scheduled.count >= 4 {
+                        // The display is not consuming two frames per pair.
+                        // Drop the late experiment and return to the live edge.
+                        self.scheduled.removeAll(keepingCapacity: true)
+                        self.coolingUntil = finished + 0.20
+                        self.present(current, generated: false)
+                        self.drain()
+                        return
+                    }
+                    // Keep presentation PTS ordered even if another decoded
+                    // frame arrived while the GPU processed this pair. The
+                    // next pair may process while these two frames display.
+                    let displayInterval = 1.0 / Double(max(60, self.refreshRate))
+                    let nextDue = self.scheduled.last.map { $0.due + displayInterval } ?? finished
+                    let generatedDue = max(finished, nextDue)
+                    self.scheduled.append((generatedDue, result.frame, true))
+                    self.scheduled.append((generatedDue + displayInterval, current, false))
                 } else {
-                    self.coolingUntil = finished + 1
-                    self.present(current, generated: false)
+                    self.coolingUntil = finished + 0.20
+                    self.presentOrQueueOriginal(current)
                 }
                 self.drain()
             } catch {
@@ -237,14 +255,30 @@ final class LiveFrameInterpolation: NSObject {
         displayLink = link
     }
 
+    private func presentOrQueueOriginal(_ frame: DecodedInterpolationFrame) {
+        guard let last = scheduled.last else {
+            present(frame, generated: false)
+            return
+        }
+        if scheduled.count >= 4 {
+            scheduled.removeAll(keepingCapacity: true)
+            present(frame, generated: false)
+            return
+        }
+        // A rejected pair can arrive while a generated midpoint and its
+        // source are waiting for display. Keep their PTS order intact.
+        let displayInterval = 1.0 / Double(max(60, refreshRate))
+        scheduled.append((max(CACurrentMediaTime(), last.due + displayInterval), frame, false))
+    }
+
     fileprivate func tick(_ link: CADisplayLink) {
         let now = CACurrentMediaTime()
-        // At most the newest due frame is submitted per display tick.
-        var due: (due: Double, frame: DecodedInterpolationFrame, generated: Bool)?
-        while let first = scheduled.first, first.due <= now {
-            due = scheduled.removeFirst()
+        // Submit one frame per display refresh. Removing all overdue frames
+        // in one tick used to discard the generated frame before it appeared.
+        if let first = scheduled.first, first.due <= now {
+            scheduled.removeFirst()
+            present(first.frame, generated: first.generated, clearSchedule: false)
         }
-        if let due { present(due.frame, generated: due.generated, clearSchedule: false) }
         if now - windowStart >= 1 {
             let elapsed = now - windowStart
             let slowest = outputIntervals.sorted(by: >)

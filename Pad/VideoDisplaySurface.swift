@@ -86,7 +86,7 @@ final class VideoDisplayController: NSObject {
         guard interpolationEnabled != enabled else { return }
         interpolationEnabled = enabled
         resetDecoderForNewPresentationSurface(keepingImage: true)
-        onInterpolationStatusChanged?(enabled ? "Waiting for live H.264 video (1080p or lower)" : "Off")
+        onInterpolationStatusChanged?(enabled ? "Waiting for live H.264 video and device capability check" : "Off")
         requestKeyFrameIfNeeded(force: true)
     }
 

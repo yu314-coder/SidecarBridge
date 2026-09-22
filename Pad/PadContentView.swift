@@ -2695,7 +2695,7 @@ private struct PadSettingsPanel: View {
                         Text(model.frameInterpolationStatus)
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
-                        Text("Test during a real connection with H.264 at 1080p or lower. Generates intermediate frames on supported iOS 26+ devices; 60 → 120 needs a 120 Hz display. Native resolution and Mac capture FPS are unchanged. Decoder bursts recover automatically from a fresh keyframe. Unsupported formats, slow processing, and Picture in Picture use original video. Resets to off at app launch.")
+                        Text("Test during a real connection with H.264. Generates intermediate frames when this iPad's VideoToolbox processor supports the stream size; 60 → 120 needs a 120 Hz display and enough processing headroom. Native resolution and Mac capture FPS are unchanged. Decoder bursts recover automatically from a fresh keyframe. Unsupported formats, slow processing, and Picture in Picture use original video. Resets to off at app launch.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } header: {

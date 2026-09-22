@@ -24,7 +24,8 @@ final class FrameInterpolationPolicyTests: XCTestCase {
     func testGenerationNeedsHeadroomAndFreshFrames() {
         XCTAssertTrue(FrameInterpolationPolicy.shouldInterpolate(interval: 1/60, processingTime: 0.005, refreshRate: 120))
         XCTAssertTrue(FrameInterpolationPolicy.shouldInterpolate(interval: 1/30, processingTime: 0.005, refreshRate: 60))
-        XCTAssertFalse(FrameInterpolationPolicy.shouldInterpolate(interval: 1/60, processingTime: 0.020, refreshRate: 120))
+        XCTAssertTrue(FrameInterpolationPolicy.shouldInterpolate(interval: 1/60, processingTime: 0.020, refreshRate: 120))
+        XCTAssertFalse(FrameInterpolationPolicy.shouldInterpolate(interval: 1/60, processingTime: 0.050, refreshRate: 120))
         XCTAssertFalse(FrameInterpolationPolicy.shouldInterpolate(interval: 1/60, processingTime: 0.005, refreshRate: 60))
         XCTAssertFalse(FrameInterpolationPolicy.shouldInterpolate(interval: 1, processingTime: 0.005, refreshRate: 120))
         XCTAssertFalse(FrameInterpolationPolicy.shouldInterpolate(interval: .nan, processingTime: 0, refreshRate: 120))
