@@ -9,6 +9,18 @@ final class FrameInterpolationPolicyTests: XCTestCase {
         XCTAssertFalse(FrameInterpolationPolicy.supportsDimensions(width: 0, height: 1080))
     }
 
+    func testRuntimeDeviceLimitsPermitHigherResolution() {
+        let eightMegapixels = 3840 * 2160
+        XCTAssertTrue(FrameInterpolationPolicy.supportsDimensions(
+            width: 2560, height: 1440, maximumDimension: 4096, maximumPixelCount: eightMegapixels))
+        XCTAssertTrue(FrameInterpolationPolicy.supportsDimensions(
+            width: 3840, height: 2160, maximumDimension: 4096, maximumPixelCount: eightMegapixels))
+        XCTAssertFalse(FrameInterpolationPolicy.supportsDimensions(
+            width: 4097, height: 1080, maximumDimension: 4096, maximumPixelCount: 12_000_000))
+        XCTAssertFalse(FrameInterpolationPolicy.supportsDimensions(
+            width: 3840, height: 2160, maximumDimension: 4096, maximumPixelCount: 8_000_000))
+    }
+
     func testGenerationNeedsHeadroomAndFreshFrames() {
         XCTAssertTrue(FrameInterpolationPolicy.shouldInterpolate(interval: 1/60, processingTime: 0.005, refreshRate: 120))
         XCTAssertTrue(FrameInterpolationPolicy.shouldInterpolate(interval: 1/30, processingTime: 0.005, refreshRate: 60))

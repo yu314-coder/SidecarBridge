@@ -76,8 +76,14 @@ final class LiveFrameInterpolation: NSObject {
         }
         guard let format = CMSampleBufferGetFormatDescription(sample) else { return false }
         let size = CMVideoFormatDescriptionGetDimensions(format)
-        guard FrameInterpolationPolicy.supportsDimensions(width: Int(size.width), height: Int(size.height)) else {
-            status("Original video — experiment supports up to 1080p; resolution unchanged")
+        let limits = interpolationLimits()
+        guard FrameInterpolationPolicy.supportsDimensions(
+            width: Int(size.width), height: Int(size.height),
+            maximumDimension: limits.maximumDimension,
+            maximumPixelCount: limits.maximumPixelCount
+        ) else {
+            let megapixels = Double(limits.maximumPixelCount) / 1_000_000
+            status("Original video — \(size.width)×\(size.height) exceeds this device's interpolation limit (\(limits.maximumDimension) px / \(String(format: "%.1f", megapixels)) MP)")
             return false
         }
         let mirrorKeyFrameToOriginalPlayer = waitingForDecoderKeyFrame && isKeyFrame
@@ -91,7 +97,7 @@ final class LiveFrameInterpolation: NSObject {
         }
         if processorStorage == nil {
             processorStorage = LiveInterpolationProcessor()
-            status("Preparing live interpolation…")
+            status("Preparing live interpolation at \(size.width)×\(size.height)…")
         }
         startDisplayLink()
         let epoch = generation
@@ -113,6 +119,25 @@ final class LiveFrameInterpolation: NSObject {
         // processor resumes. Subsequent frames remain on one path only.
         return !mirrorKeyFrameToOriginalPlayer
         #endif
+    }
+
+    private func interpolationLimits() -> (maximumDimension: Int, maximumPixelCount: Int) {
+        #if !targetEnvironment(simulator)
+        if #available(iOS 27.0, *) {
+            let maximumDimension = VTLowLatencyFrameInterpolationConfiguration
+                .maximumDimension(forSpatialScaleFactor: 1)
+            let maximumPixelCount = VTLowLatencyFrameInterpolationConfiguration
+                .maximumPixelCount(forSpatialScaleFactor: 1)
+            if let maximumDimension, let maximumPixelCount,
+               maximumDimension > 0, maximumPixelCount > 0 {
+                return (maximumDimension, maximumPixelCount)
+            }
+        }
+        #endif
+        // The capability-query API arrived in iOS 27. Keep the documented
+        // conservative bound on iOS 26 instead of risking a processor failure.
+        return (FrameInterpolationPolicy.legacyMaximumDimension,
+                FrameInterpolationPolicy.legacyMaximumPixelCount)
     }
 
     private func recoverDecoder() {

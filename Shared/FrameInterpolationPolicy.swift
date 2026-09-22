@@ -1,11 +1,19 @@
 import Foundation
 
-/// Conservative live-video experiment. Never downscale a user's 4K stream
-/// merely to enable frame generation, and never synthesize across a stall.
+/// Live-video experiment. Never downscale a user's stream merely to enable
+/// frame generation, and never synthesize across a stall.
 enum FrameInterpolationPolicy {
-    static func supportsDimensions(width: Int, height: Int) -> Bool {
-        width > 0 && height > 0 && width <= 1920 && height <= 1920
-            && width * height <= 1920 * 1080
+    static let legacyMaximumDimension = 1920
+    static let legacyMaximumPixelCount = 1920 * 1080
+
+    static func supportsDimensions(width: Int, height: Int,
+                                   maximumDimension: Int = legacyMaximumDimension,
+                                   maximumPixelCount: Int = legacyMaximumPixelCount) -> Bool {
+        guard width > 0, height > 0, maximumDimension > 0, maximumPixelCount > 0,
+              width <= maximumDimension, height <= maximumDimension else { return false }
+        // Division avoids overflowing if a malformed format description reports
+        // an unexpectedly large dimension.
+        return width <= maximumPixelCount / height
     }
 
     static func shouldInterpolate(interval: Double, processingTime: Double,
