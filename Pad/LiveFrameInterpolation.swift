@@ -28,6 +28,9 @@ final class LiveFrameInterpolation: NSObject {
     private var outputs = 0
     private var generatedOutputs = 0
     private var processingMS = 0.0
+    private var sourceFPS = 0
+    private var skipReason = "waiting for a second source frame"
+    private var displayRefreshFPS = 60
     private var outputIntervals: [Double] = []
     private var lastOutputTime: Double?
     private var lastPresentedPTS: CMTime?
@@ -52,6 +55,10 @@ final class LiveFrameInterpolation: NSObject {
         displayLink = nil
         outputs = 0
         generatedOutputs = 0
+        processingMS = 0
+        sourceFPS = 0
+        skipReason = "waiting for a second source frame"
+        displayRefreshFPS = refreshRate
         outputIntervals.removeAll()
         lastOutputTime = nil
         lastPresentedPTS = nil
@@ -184,15 +191,37 @@ final class LiveFrameInterpolation: NSObject {
         guard let prior else { presentOrQueueOriginal(current); return }
         let interval = CMTimeGetSeconds(CMTimeSubtract(current.pts, prior.pts))
         let now = CACurrentMediaTime()
-        guard now >= coolingUntil,
-              now - current.arrival < 0.08,
-              ProcessInfo.processInfo.thermalState != .serious,
-              ProcessInfo.processInfo.thermalState != .critical,
-              FrameInterpolationPolicy.shouldInterpolate(interval: interval, processingTime: 0, refreshRate: refreshRate)
-        else {
+        if interval.isFinite, interval > 0 { sourceFPS = Int((1 / interval).rounded()) }
+        let thermalState = ProcessInfo.processInfo.thermalState
+        if now < coolingUntil {
+            skipReason = "brief recovery cooldown"
             presentOrQueueOriginal(current)
             return
         }
+        if now - current.arrival >= 0.08 {
+            skipReason = "source frame arrived late"
+            presentOrQueueOriginal(current)
+            return
+        }
+        if thermalState == .serious || thermalState == .critical {
+            skipReason = "paused for thermal pressure"
+            presentOrQueueOriginal(current)
+            return
+        }
+        let minimumDisplayRate = interval.isFinite && interval > 0 ? Int(ceil(1.8 / interval)) : 0
+        if displayRefreshFPS < minimumDisplayRate {
+            skipReason = "display \(displayRefreshFPS) Hz; need \(minimumDisplayRate) Hz for source cadence"
+            presentOrQueueOriginal(current)
+            return
+        }
+        guard FrameInterpolationPolicy.shouldInterpolate(
+            interval: interval, processingTime: 0, refreshRate: displayRefreshFPS
+        ) else {
+            skipReason = "unsupported source cadence (\(sourceFPS) FPS)"
+            presentOrQueueOriginal(current)
+            return
+        }
+        skipReason = "processing"
         #if !targetEnvironment(simulator)
         guard #available(iOS 26.0, *), let processor = processorStorage as? LiveInterpolationProcessor else {
             presentOrQueueOriginal(current)
@@ -212,15 +241,18 @@ final class LiveFrameInterpolation: NSObject {
                 if finished - current.arrival > max(0.05, interval * 2.5) ||
                    (self.lastPresentedPTS.map { CMTimeCompare(current.pts, $0) <= 0 } ?? false) {
                     self.coolingUntil = finished + 0.20
+                    self.skipReason = "processor result missed the live window"
                     if self.latest == nil { self.presentOrQueueOriginal(current) }
                 } else if FrameInterpolationPolicy.shouldInterpolate(
-                    interval: interval, processingTime: result.duration, refreshRate: self.refreshRate
+                    interval: interval, processingTime: result.duration, refreshRate: self.displayRefreshFPS
                 ) {
+                    self.skipReason = "running"
                     if self.scheduled.count >= 4 {
                         // The display is not consuming two frames per pair.
                         // Drop the late experiment and return to the live edge.
                         self.scheduled.removeAll(keepingCapacity: true)
                         self.coolingUntil = finished + 0.20
+                        self.skipReason = "display queue fell behind; using live video"
                         self.present(current, generated: false)
                         self.drain()
                         return
@@ -235,6 +267,7 @@ final class LiveFrameInterpolation: NSObject {
                     self.scheduled.append((generatedDue + displayInterval, current, false))
                 } else {
                     self.coolingUntil = finished + 0.20
+                    self.skipReason = "processing took \(Int(result.duration * 1000)) ms; over live budget"
                     self.presentOrQueueOriginal(current)
                 }
                 self.drain()
@@ -250,7 +283,11 @@ final class LiveFrameInterpolation: NSObject {
         guard displayLink == nil else { return }
         // Weak target breaks CADisplayLink's target-retain cycle.
         let link = CADisplayLink(target: WeakInterpolationTick(self), selector: #selector(WeakInterpolationTick.tick(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: Float(refreshRate), preferred: Float(refreshRate))
+        displayRefreshFPS = refreshRate
+        // This experimental mode is explicitly enabled by the user. Request
+        // the panel's full rate so ProMotion doesn't settle at 60 Hz.
+        link.preferredFrameRateRange = CAFrameRateRange(
+            minimum: Float(refreshRate), maximum: Float(refreshRate), preferred: Float(refreshRate))
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
@@ -273,6 +310,11 @@ final class LiveFrameInterpolation: NSObject {
 
     fileprivate func tick(_ link: CADisplayLink) {
         let now = CACurrentMediaTime()
+        let displayInterval = link.targetTimestamp - link.timestamp
+        if displayInterval.isFinite, displayInterval > 0 {
+            let observed = Int((1 / displayInterval).rounded())
+            if (30...240).contains(observed) { displayRefreshFPS = observed }
+        }
         // Submit one frame per display refresh. Removing all overdue frames
         // in one tick used to discard the generated frame before it appeared.
         if let first = scheduled.first, first.due <= now {
@@ -285,7 +327,7 @@ final class LiveFrameInterpolation: NSObject {
             let count = max(1, Int(ceil(Double(slowest.count) * 0.01)))
             let mean = slowest.prefix(count).reduce(0, +) / Double(count)
             let low = mean > 0 && outputs > 0 ? Int(1 / mean) : 0
-            status("Output \(Int(Double(outputs) / elapsed)) FPS (\(Int(Double(generatedOutputs) / elapsed)) generated) · 1% low \(low) · processing \(String(format: "%.1f", processingMS)) ms. Submission timing, not capture FPS.")
+            status("Output \(Int(Double(outputs) / elapsed)) FPS (\(Int(Double(generatedOutputs) / elapsed)) generated) · display \(displayRefreshFPS) Hz · source \(sourceFPS) FPS · 1% low \(low) · processing \(String(format: "%.1f", processingMS)) ms · \(skipReason)")
             outputs = 0
             generatedOutputs = 0
             windowStart = now

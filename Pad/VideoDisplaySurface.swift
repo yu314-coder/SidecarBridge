@@ -295,7 +295,9 @@ final class VideoDisplayController: NSObject {
         while pendingSampleCount > 0, view.displayLayer.isReadyForMoreMediaData {
             let pending = pendingSamples[pendingSamplesHead]
             let sample = pending.sample
-            interpolator.refreshRate = view.window?.screen.maximumFramesPerSecond ?? 60
+            interpolator.refreshRate = view.window?.windowScene?.screen.maximumFramesPerSecond
+                ?? view.window?.screen.maximumFramesPerSecond
+                ?? interpolator.refreshRate
             let compressed = CMSampleBufferGetImageBuffer(sample) == nil
             if !interpolationEnabled || !interpolationForeground || !compressed ||
                 !interpolator.enqueue(sample, isKeyFrame: pending.isKeyFrame) {
