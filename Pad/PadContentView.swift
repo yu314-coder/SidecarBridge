@@ -2688,6 +2688,18 @@ private struct PadSettingsPanel: View {
 
                 if developerModeEnabled {
                     Section {
+                        DeveloperFPSHistoryChart(
+                            samples: model.receivedFPSHistory,
+                            refreshRate: model.viewerRefreshRate
+                        )
+                        .padding(.vertical, 4)
+                    } header: {
+                        Text("FPS history")
+                    } footer: {
+                        Text("Received-frame rate at the iPad, sampled about twice per second. The chart shows the latest history and marks a stale stream as 0 FPS. The orange line is the iPad refresh ceiling; it is not the Mac send rate.")
+                    }
+
+                    Section {
                         Toggle("Live frame interpolation (experimental)", isOn: Binding(
                             get: { model.frameInterpolationEnabled },
                             set: model.setFrameInterpolationEnabled
@@ -3173,5 +3185,137 @@ private struct RequirementPill: View {
             .padding(.vertical, 7)
             .background(.white.opacity(0.045), in: Capsule())
             .accessibilityElement(children: .combine)
+    }
+}
+
+
+private struct DeveloperFPSHistoryChart: View {
+    let samples: [PadConnectionModel.FPSHistorySample]
+    let refreshRate: Int
+
+    private struct Point {
+        let uptime: Double
+        let fps: Int
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: Date(), by: 1.0)) { _ in
+            let now = ProcessInfo.processInfo.systemUptime
+            let points = visiblePoints(now: now)
+            let ceiling = chartCeiling(for: points)
+
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Label("Received FPS", systemImage: "waveform.path.ecg")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(points.last.map { "\($0.fps) FPS" } ?? "Waiting")
+                        .font(.caption.monospacedDigit().bold())
+                        .foregroundStyle(points.last?.fps == 0 ? .orange : .cyan)
+                }
+
+                Canvas { context, size in
+                    let left: CGFloat = 34
+                    let right: CGFloat = 4
+                    let top: CGFloat = 8
+                    let bottom: CGFloat = 16
+                    let plotWidth = max(1, size.width - left - right)
+                    let plotHeight = max(1, size.height - top - bottom)
+                    let xStart = max(now - 30, points.first?.uptime ?? now)
+                    let timeSpan = max(now - xStart, 0.5)
+
+                    func yPosition(_ fps: Double) -> CGFloat {
+                        top + plotHeight * (1 - CGFloat(min(max(fps, 0), Double(ceiling))) / CGFloat(ceiling))
+                    }
+
+                    for value in [0, ceiling / 2, ceiling] {
+                        let y = yPosition(Double(value))
+                        var grid = Path()
+                        grid.move(to: CGPoint(x: left, y: y))
+                        grid.addLine(to: CGPoint(x: size.width - right, y: y))
+                        context.stroke(grid, with: .color(.secondary.opacity(0.2)), lineWidth: 1)
+                        context.draw(
+                            Text("\(value)").font(.caption2).foregroundColor(.secondary),
+                            at: CGPoint(x: 0, y: y),
+                            anchor: .leading
+                        )
+                    }
+
+                    let refreshY = yPosition(Double(refreshRate))
+                    var refreshLine = Path()
+                    refreshLine.move(to: CGPoint(x: left, y: refreshY))
+                    refreshLine.addLine(to: CGPoint(x: size.width - right, y: refreshY))
+                    context.stroke(
+                        refreshLine,
+                        with: .color(.orange.opacity(0.72)),
+                        style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+                    )
+
+                    guard !points.isEmpty else { return }
+                    var line = Path()
+                    var lastPoint: CGPoint?
+                    for (index, point) in points.enumerated() {
+                        let progress = min(max((point.uptime - xStart) / timeSpan, 0), 1)
+                        let position = CGPoint(
+                            x: left + CGFloat(progress) * plotWidth,
+                            y: yPosition(Double(point.fps))
+                        )
+                        if index == 0 {
+                            line.move(to: position)
+                        } else {
+                            line.addLine(to: position)
+                        }
+                        lastPoint = position
+                    }
+                    context.stroke(
+                        line,
+                        with: .color(.cyan),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+                    )
+                    if let lastPoint {
+                        let dot = CGRect(x: lastPoint.x - 3, y: lastPoint.y - 3, width: 6, height: 6)
+                        context.fill(Path(ellipseIn: dot), with: .color(.cyan))
+                    }
+                }
+                .frame(height: 132)
+                .accessibilityLabel("Received frame rate history")
+                .accessibilityValue(points.last.map { "\($0.fps) frames per second" } ?? "Waiting for frames")
+
+                HStack(spacing: 16) {
+                    HStack(spacing: 5) {
+                        Capsule().fill(.cyan).frame(width: 16, height: 3)
+                        Text("Received").foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 5) {
+                        Capsule().fill(.orange).frame(width: 16, height: 2)
+                        Text("iPad \(refreshRate) Hz").foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text("30 s")
+                        .foregroundStyle(.tertiary)
+                }
+                .font(.caption2)
+            }
+            .padding(12)
+            .background(
+                Color(uiColor: .secondarySystemGroupedBackground).opacity(0.55),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+        }
+    }
+
+    private func visiblePoints(now: Double) -> [Point] {
+        var points = samples
+            .filter { $0.uptime >= now - 30 }
+            .map { Point(uptime: $0.uptime, fps: $0.fps) }
+        if let last = samples.last, now - last.uptime > 1 {
+            points.append(Point(uptime: now, fps: 0))
+        }
+        return points
+    }
+
+    private func chartCeiling(for points: [Point]) -> Int {
+        let highest = max(refreshRate, points.map(\.fps).max() ?? 0, 60)
+        return ((highest + 29) / 30) * 30
     }
 }
