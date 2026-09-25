@@ -12,6 +12,13 @@ final class PadConnectionModel: ObservableObject {
         var name: String { url.lastPathComponent }
     }
 
+    struct FPSHistorySample: Identifiable {
+        let uptime: TimeInterval
+        let fps: Int
+
+        var id: TimeInterval { uptime }
+    }
+
     /// A single pasteboard read. iPadOS can present its paste privacy alert
     /// when an app reads the general pasteboard, so callers must not read the
     /// same change once for its signature and again to transmit it.
@@ -51,6 +58,7 @@ final class PadConnectionModel: ObservableObject {
     @Published var pointerIsPressed = false
     @Published var showClickIndicator = false
     @Published var streamFPS = 0
+    @Published private(set) var receivedFPSHistory: [FPSHistorySample] = []
     /// Maximum refresh cadence reported by the screen currently hosting the
     /// active iPad scene. This is a physical presentation ceiling; Ultra can
     /// raise the Mac target only up to this value.
@@ -1629,6 +1637,10 @@ final class PadConnectionModel: ObservableObject {
             return
         }
         streamFPS = max(0, Int((Double(frameWindowCount) / duration).rounded()))
+        receivedFPSHistory.append(FPSHistorySample(uptime: now, fps: streamFPS))
+        if receivedFPSHistory.count > 60 {
+            receivedFPSHistory.removeFirst(receivedFPSHistory.count - 60)
+        }
         frameWindowCount = 0
         frameWindowStart = now
     }
@@ -1637,6 +1649,7 @@ final class PadConnectionModel: ObservableObject {
         frameWindowStart = ProcessInfo.processInfo.systemUptime
         frameWindowCount = 0
         streamFPS = 0
+        receivedFPSHistory.removeAll(keepingCapacity: true)
         videoAckBatchCount = 0
         lastVideoAckSequence = nil
         lastVideoAckSentAt = 0
