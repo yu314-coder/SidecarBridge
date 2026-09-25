@@ -27,7 +27,7 @@ struct FrameInterpolationPacingMetrics {
             averageFPS = Int((Double(valid.count) / totalDuration).rounded())
             let generatedCount = valid.reduce(0) { $0 + ($1.generated ? 1 : 0) }
             generatedFPS = Int((Double(generatedCount) / totalDuration).rounded())
-            slowestFrameMilliseconds = Int(((valid.map(\\.interval).max() ?? 0) * 1_000).rounded())
+            slowestFrameMilliseconds = Int(((valid.map(\.interval).max() ?? 0) * 1_000).rounded())
         } else {
             averageFPS = nil
             generatedFPS = nil
@@ -40,7 +40,7 @@ struct FrameInterpolationPacingMetrics {
         }
 
         let lowestPercentCount = max(1, Int(ceil(Double(valid.count) * 0.01)))
-        let slowestIntervals = valid.map(\\.interval).sorted(by: >).prefix(lowestPercentCount)
+        let slowestIntervals = valid.map(\.interval).sorted(by: >).prefix(lowestPercentCount)
         let slowestDuration = slowestIntervals.reduce(0.0, +)
         onePercentLowFPS = slowestDuration > 0
             ? Int((Double(lowestPercentCount) / slowestDuration).rounded())
