@@ -3315,7 +3315,7 @@ private struct DeveloperFPSHistoryChart: View {
     }
 
     private func chartCeiling(for points: [Point]) -> Int {
-        let highest = max(refreshRate, points.map(\.fps).max() ?? 0, 60)
+        let highest = max(60, max(refreshRate, points.map(\.fps).max() ?? 0))
         return ((highest + 29) / 30) * 30
     }
 }
