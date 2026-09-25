@@ -2689,14 +2689,15 @@ private struct PadSettingsPanel: View {
                 if developerModeEnabled {
                     Section {
                         DeveloperFPSHistoryChart(
-                            samples: model.receivedFPSHistory,
+                            receivedSamples: model.receivedFPSHistory,
+                            submittedSamples: model.submittedFPSHistory,
                             refreshRate: model.viewerRefreshRate
                         )
                         .padding(.vertical, 4)
                     } header: {
                         Text("FPS history")
                     } footer: {
-                        Text("Received-frame rate at the iPad, sampled about twice per second. The chart shows the latest history and marks a stale stream as 0 FPS. The orange line is the iPad refresh ceiling; it is not the Mac send rate.")
+                        Text("Received FPS is measured at the iPad; Submitted FPS uses the same one-second frame submissions as the interpolation metrics and includes generated frames. A stale series falls to 0 FPS. The orange line is iPad refresh, not the Mac send target.")
                     }
 
                     Section {
@@ -3190,7 +3191,8 @@ private struct RequirementPill: View {
 
 
 private struct DeveloperFPSHistoryChart: View {
-    let samples: [PadConnectionModel.FPSHistorySample]
+    let receivedSamples: [PadConnectionModel.FPSHistorySample]
+    let submittedSamples: [PadConnectionModel.FPSHistorySample]
     let refreshRate: Int
 
     private struct Point {
@@ -3201,17 +3203,21 @@ private struct DeveloperFPSHistoryChart: View {
     var body: some View {
         TimelineView(.periodic(from: Date(), by: 1.0)) { _ in
             let now = ProcessInfo.processInfo.systemUptime
-            let points = visiblePoints(now: now)
-            let ceiling = chartCeiling(for: points)
+            let received = visiblePoints(from: receivedSamples, now: now)
+            let submitted = visiblePoints(from: submittedSamples, now: now)
+            let allPoints = received + submitted
+            let ceiling = chartCeiling(for: allPoints)
+            let earliestPoint = min(received.first?.uptime ?? now, submitted.first?.uptime ?? now)
+            let xStart = max(now - 30, earliestPoint)
+            let span = max(now - xStart, 0.5)
 
             VStack(alignment: .leading, spacing: 9) {
                 HStack {
-                    Label("Received FPS", systemImage: "waveform.path.ecg")
+                    Label("FPS history", systemImage: "waveform.path.ecg")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
-                    Text(points.last.map { "\($0.fps) FPS" } ?? "Waiting")
+                    Text("RX \(currentFPS(from: receivedSamples, now: now).map(String.init) ?? "—")  ·  OUT \(currentFPS(from: submittedSamples, now: now).map(String.init) ?? "—")")
                         .font(.caption.monospacedDigit().bold())
-                        .foregroundStyle(points.last?.fps == 0 ? .orange : .cyan)
                 }
 
                 Canvas { context, size in
@@ -3219,10 +3225,7 @@ private struct DeveloperFPSHistoryChart: View {
                     let right: CGFloat = 4
                     let top: CGFloat = 8
                     let bottom: CGFloat = 16
-                    let plotWidth = max(1, size.width - left - right)
                     let plotHeight = max(1, size.height - top - bottom)
-                    let xStart = max(now - 30, points.first?.uptime ?? now)
-                    let timeSpan = max(now - xStart, 0.5)
 
                     func yPosition(_ fps: Double) -> CGFloat {
                         top + plotHeight * (1 - CGFloat(min(max(fps, 0), Double(ceiling))) / CGFloat(ceiling))
@@ -3251,48 +3254,64 @@ private struct DeveloperFPSHistoryChart: View {
                         style: StrokeStyle(lineWidth: 1, dash: [5, 4])
                     )
 
-                    guard !points.isEmpty else { return }
-                    var line = Path()
-                    var lastPoint: CGPoint?
-                    for (index, point) in points.enumerated() {
-                        let progress = min(max((point.uptime - xStart) / timeSpan, 0), 1)
-                        let position = CGPoint(
-                            x: left + CGFloat(progress) * plotWidth,
-                            y: yPosition(Double(point.fps))
-                        )
-                        if index == 0 {
-                            line.move(to: position)
-                        } else {
-                            line.addLine(to: position)
-                        }
-                        lastPoint = position
-                    }
+                    let receivedPlot = plotPath(
+                        for: received, now: now, start: xStart, span: span, size: size, ceiling: ceiling
+                    )
                     context.stroke(
-                        line,
+                        receivedPlot.path,
                         with: .color(.cyan),
                         style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
                     )
-                    if let lastPoint {
-                        let dot = CGRect(x: lastPoint.x - 3, y: lastPoint.y - 3, width: 6, height: 6)
-                        context.fill(Path(ellipseIn: dot), with: .color(.cyan))
+                    if let endpoint = receivedPlot.endpoint {
+                        context.fill(
+                            Path(ellipseIn: CGRect(x: endpoint.x - 3, y: endpoint.y - 3, width: 6, height: 6)),
+                            with: .color(.cyan)
+                        )
+                    }
+
+                    let submittedPlot = plotPath(
+                        for: submitted, now: now, start: xStart, span: span, size: size, ceiling: ceiling
+                    )
+                    context.stroke(
+                        submittedPlot.path,
+                        with: .color(.green),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+                    )
+                    if let endpoint = submittedPlot.endpoint {
+                        context.fill(
+                            Path(ellipseIn: CGRect(x: endpoint.x - 3, y: endpoint.y - 3, width: 6, height: 6)),
+                            with: .color(.green)
+                        )
                     }
                 }
                 .frame(height: 132)
-                .accessibilityLabel("Received frame rate history")
-                .accessibilityValue(points.last.map { "\($0.fps) frames per second" } ?? "Waiting for frames")
+                .overlay {
+                    if allPoints.isEmpty {
+                        Text("Waiting for stream frames")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityLabel("Received and submitted FPS history")
+                .accessibilityValue(
+                    "Received \(currentFPS(from: receivedSamples, now: now).map(String.init) ?? "not measured") FPS; submitted \(currentFPS(from: submittedSamples, now: now).map(String.init) ?? "not measured") FPS"
+                )
 
-                HStack(spacing: 16) {
+                HStack(spacing: 14) {
                     HStack(spacing: 5) {
                         Capsule().fill(.cyan).frame(width: 16, height: 3)
                         Text("Received").foregroundStyle(.secondary)
                     }
                     HStack(spacing: 5) {
-                        Capsule().fill(.orange).frame(width: 16, height: 2)
+                        Capsule().fill(.green).frame(width: 16, height: 3)
+                        Text("Submitted").foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 5) {
+                        Image(systemName: "line.diagonal").foregroundStyle(.orange)
                         Text("iPad \(refreshRate) Hz").foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    Text("30 s")
-                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
+                    Text("30 s").foregroundStyle(.tertiary)
                 }
                 .font(.caption2)
             }
@@ -3304,7 +3323,10 @@ private struct DeveloperFPSHistoryChart: View {
         }
     }
 
-    private func visiblePoints(now: Double) -> [Point] {
+    private func visiblePoints(
+        from samples: [PadConnectionModel.FPSHistorySample],
+        now: Double
+    ) -> [Point] {
         var points = samples
             .filter { $0.uptime >= now - 30 }
             .map { Point(uptime: $0.uptime, fps: $0.fps) }
@@ -3314,8 +3336,48 @@ private struct DeveloperFPSHistoryChart: View {
         return points
     }
 
+    private func currentFPS(
+        from samples: [PadConnectionModel.FPSHistorySample],
+        now: Double
+    ) -> Int? {
+        guard let last = samples.last else { return nil }
+        return now - last.uptime > 1 ? 0 : last.fps
+    }
+
     private func chartCeiling(for points: [Point]) -> Int {
         let highest = max(60, max(refreshRate, points.map(\.fps).max() ?? 0))
         return ((highest + 29) / 30) * 30
+    }
+
+    private func plotPath(
+        for points: [Point],
+        now: Double,
+        start: Double,
+        span: Double,
+        size: CGSize,
+        ceiling: Int
+    ) -> (path: Path, endpoint: CGPoint?) {
+        var path = Path()
+        var endpoint: CGPoint?
+        let left: CGFloat = 34
+        let right: CGFloat = 4
+        let top: CGFloat = 8
+        let bottom: CGFloat = 16
+        let plotWidth = max(1, size.width - left - right)
+        let plotHeight = max(1, size.height - top - bottom)
+
+        for (index, point) in points.enumerated() {
+            let progress = min(max((point.uptime - start) / span, 0), 1)
+            let x = left + CGFloat(progress) * plotWidth
+            let y = top + plotHeight * (1 - CGFloat(min(max(point.fps, 0), ceiling)) / CGFloat(ceiling))
+            let position = CGPoint(x: x, y: y)
+            if index == 0 {
+                path.move(to: position)
+            } else {
+                path.addLine(to: position)
+            }
+            endpoint = position
+        }
+        return (path, endpoint)
     }
 }
