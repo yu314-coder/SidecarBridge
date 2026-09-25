@@ -55,6 +55,7 @@ struct FrameInterpolationPacingMetrics {
 final class LiveFrameInterpolation: NSObject {
     var onSample: ((CMSampleBuffer) -> Bool)?
     var onStatus: ((String) -> Void)?
+    var onOutputFPS: ((Int) -> Void)?
     var onFailure: (() -> Void)?
     var onRecoveryNeeded: (() -> Void)?
     var refreshRate = 60
@@ -381,7 +382,9 @@ final class LiveFrameInterpolation: NSObject {
             let onePercentLow = metrics.onePercentLowFPS.map(String.init)
                 ?? "warming \(metrics.validSampleCount)/\(FrameInterpolationPacingMetrics.minimumSamplesForOnePercentLow)"
             let slowestFrame = metrics.slowestFrameMilliseconds.map(String.init) ?? "—"
-            status("Now \(Int(Double(outputs) / elapsed)) FPS (\(Int(Double(generatedOutputs) / elapsed)) generated) · rolling \(rollingFPS) FPS (\(generatedFPS) generated) · 1% low \(onePercentLow) · worst \(slowestFrame) ms · display \(displayRefreshFPS) Hz · source \(sourceFPS) FPS · processing \(String(format: "%.1f", processingMS)) ms · \(skipReason)")
+            let outputFPS = Int(Double(outputs) / elapsed)
+            onOutputFPS?(outputFPS)
+            status("Now \(outputFPS) FPS (\(Int(Double(generatedOutputs) / elapsed)) generated) · rolling \(rollingFPS) FPS (\(generatedFPS) generated) · 1% low \(onePercentLow) · worst \(slowestFrame) ms · display \(displayRefreshFPS) Hz · source \(sourceFPS) FPS · processing \(String(format: "%.1f", processingMS)) ms · \(skipReason)")
             outputs = 0
             generatedOutputs = 0
             windowStart = now
