@@ -2701,7 +2701,7 @@ private struct PadSettingsPanel: View {
                     } header: {
                         Text("Frame generation")
                     } footer: {
-                        Text("The output counter measures submitted frames, including generated frames. Compare smoothness and input delay with this switch off; generated FPS is not received FPS.")
+                        Text("Now FPS is the latest one-second submitted-frame rate. Rolling FPS and 1% low use the same latest 600 submitted-frame intervals; 1% low stays in warm-up until 100 samples. The worst interval is shown separately so brief stalls remain visible. These are submitted-frame metrics, not source FPS or panel scanout.")
                     }
                     Section {
                         HStack(spacing: 10) {
