@@ -102,9 +102,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: io.sidecarbridge.mac
         PRODUCT_NAME: SidecarBridge
         MARKETING_VERSION: "1.4"
-        # iOS/iPadOS 1.4 started at build 1. Build 2 fixes automatic
-        # frame-interpolation decoder recovery under queue pressure.
-        CURRENT_PROJECT_VERSION: "2"
+        # iOS/iPadOS 1.4 build 6 adds the Developer FPS history graph.
+        CURRENT_PROJECT_VERSION: "6"
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
