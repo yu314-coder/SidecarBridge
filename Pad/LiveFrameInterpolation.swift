@@ -3,6 +3,51 @@ import QuartzCore
 import UIKit
 import VideoToolbox
 
+struct FrameInterpolationPacingSample {
+    let interval: Double
+    let generated: Bool
+}
+
+/// Pacing statistics for the same bounded set of accepted output intervals.
+struct FrameInterpolationPacingMetrics {
+    static let minimumSamplesForOnePercentLow = 100
+
+    let validSampleCount: Int
+    let averageFPS: Int?
+    let generatedFPS: Int?
+    let onePercentLowFPS: Int?
+    let slowestFrameMilliseconds: Int?
+
+    init(samples: [FrameInterpolationPacingSample]) {
+        let valid = samples.filter { $0.interval.isFinite && $0.interval > 0 }
+        validSampleCount = valid.count
+
+        let totalDuration = valid.reduce(0.0) { $0 + $1.interval }
+        if totalDuration > 0 {
+            averageFPS = Int((Double(valid.count) / totalDuration).rounded())
+            let generatedCount = valid.reduce(0) { $0 + ($1.generated ? 1 : 0) }
+            generatedFPS = Int((Double(generatedCount) / totalDuration).rounded())
+            slowestFrameMilliseconds = Int(((valid.map(\\.interval).max() ?? 0) * 1_000).rounded())
+        } else {
+            averageFPS = nil
+            generatedFPS = nil
+            slowestFrameMilliseconds = nil
+        }
+
+        guard valid.count >= Self.minimumSamplesForOnePercentLow else {
+            onePercentLowFPS = nil
+            return
+        }
+
+        let lowestPercentCount = max(1, Int(ceil(Double(valid.count) * 0.01)))
+        let slowestIntervals = valid.map(\\.interval).sorted(by: >).prefix(lowestPercentCount)
+        let slowestDuration = slowestIntervals.reduce(0.0, +)
+        onePercentLowFPS = slowestDuration > 0
+            ? Int((Double(lowestPercentCount) / slowestDuration).rounded())
+            : nil
+    }
+}
+
 /// Experimental foreground-only player. H.264 is decoded once, then pairs
 /// of decoded frames are processed off the main actor. The ordinary player
 /// remains the fallback for PiP, unsupported formats and processor failures.
@@ -31,7 +76,10 @@ final class LiveFrameInterpolation: NSObject {
     private var sourceFPS = 0
     private var skipReason = "waiting for a second source frame"
     private var displayRefreshFPS = 60
-    private var outputIntervals: [Double] = []
+    private var outputIntervals = [FrameInterpolationPacingSample](
+        repeating: FrameInterpolationPacingSample(interval: 0, generated: false), count: 600)
+    private var outputIntervalCount = 0
+    private var nextOutputIntervalIndex = 0
     private var lastOutputTime: Double?
     private var lastPresentedPTS: CMTime?
     private var coolingUntil = 0.0
@@ -59,7 +107,8 @@ final class LiveFrameInterpolation: NSObject {
         sourceFPS = 0
         skipReason = "waiting for a second source frame"
         displayRefreshFPS = refreshRate
-        outputIntervals.removeAll()
+        outputIntervalCount = 0
+        nextOutputIntervalIndex = 0
         lastOutputTime = nil
         lastPresentedPTS = nil
         coolingUntil = 0
@@ -323,11 +372,16 @@ final class LiveFrameInterpolation: NSObject {
         }
         if now - windowStart >= 1 {
             let elapsed = now - windowStart
-            let slowest = outputIntervals.sorted(by: >)
-            let count = max(1, Int(ceil(Double(slowest.count) * 0.01)))
-            let mean = slowest.prefix(count).reduce(0, +) / Double(count)
-            let low = mean > 0 && outputs > 0 ? Int(1 / mean) : 0
-            status("Output \(Int(Double(outputs) / elapsed)) FPS (\(Int(Double(generatedOutputs) / elapsed)) generated) · display \(displayRefreshFPS) Hz · source \(sourceFPS) FPS · 1% low \(low) · processing \(String(format: "%.1f", processingMS)) ms · \(skipReason)")
+            let samples = outputIntervalCount == outputIntervals.count
+                ? outputIntervals
+                : Array(outputIntervals.prefix(outputIntervalCount))
+            let metrics = FrameInterpolationPacingMetrics(samples: samples)
+            let rollingFPS = metrics.averageFPS.map(String.init) ?? "—"
+            let generatedFPS = metrics.generatedFPS.map(String.init) ?? "—"
+            let onePercentLow = metrics.onePercentLowFPS.map(String.init)
+                ?? "warming \(metrics.validSampleCount)/\(FrameInterpolationPacingMetrics.minimumSamplesForOnePercentLow)"
+            let slowestFrame = metrics.slowestFrameMilliseconds.map(String.init) ?? "—"
+            status("Now \(Int(Double(outputs) / elapsed)) FPS (\(Int(Double(generatedOutputs) / elapsed)) generated) · rolling \(rollingFPS) FPS (\(generatedFPS) generated) · 1% low \(onePercentLow) · worst \(slowestFrame) ms · display \(displayRefreshFPS) Hz · source \(sourceFPS) FPS · processing \(String(format: "%.1f", processingMS)) ms · \(skipReason)")
             outputs = 0
             generatedOutputs = 0
             windowStart = now
@@ -342,8 +396,13 @@ final class LiveFrameInterpolation: NSObject {
         lastPresentedPTS = frame.pts
         let now = CACurrentMediaTime()
         if let lastOutputTime {
-            outputIntervals.append(now - lastOutputTime)
-            if outputIntervals.count > 600 { outputIntervals.removeFirst() }
+            let interval = now - lastOutputTime
+            if interval.isFinite, interval > 0 {
+                outputIntervals[nextOutputIntervalIndex] = FrameInterpolationPacingSample(
+                    interval: interval, generated: generated)
+                nextOutputIntervalIndex = (nextOutputIntervalIndex + 1) % outputIntervals.count
+                outputIntervalCount = min(outputIntervals.count, outputIntervalCount + 1)
+            }
         }
         lastOutputTime = now
         outputs += 1
