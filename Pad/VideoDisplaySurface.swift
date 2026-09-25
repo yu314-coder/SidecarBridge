@@ -12,6 +12,7 @@ final class VideoDisplayController: NSObject {
     var onPictureInPictureStopped: (() -> Void)?
     var onLiveUpscalingStatusChanged: ((String) -> Void)?
     var onInterpolationStatusChanged: ((String) -> Void)?
+    var onInterpolationFPSUpdated: ((Int) -> Void)?
     /// Called when the H.264 decoder sees a missing frame or has to flush its
     /// dependency chain. The Mac responds with an immediate IDR frame.
     var onKeyFrameNeeded: (() -> Void)?
@@ -65,6 +66,7 @@ final class VideoDisplayController: NSObject {
             return true
         }
         player.onStatus = { [weak self] in self?.onInterpolationStatusChanged?($0) }
+        player.onOutputFPS = { [weak self] in self?.onInterpolationFPSUpdated?($0) }
         player.onFailure = { [weak self] in
             self?.dropPendingSamplesAndAwaitKeyFrame()
             self?.requestKeyFrameIfNeeded(force: true)
