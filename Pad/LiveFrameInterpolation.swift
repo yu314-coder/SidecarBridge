@@ -10,7 +10,7 @@ struct FrameInterpolationPacingSample {
 
 /// Pacing statistics for the same bounded set of accepted output intervals.
 struct FrameInterpolationPacingMetrics {
-    static let minimumSamplesForOnePercentLow = 100
+    static let minimumSamplesForOnePercentLow = 500
 
     let validSampleCount: Int
     let averageFPS: Int?
