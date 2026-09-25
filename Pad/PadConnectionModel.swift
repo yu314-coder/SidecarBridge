@@ -59,6 +59,7 @@ final class PadConnectionModel: ObservableObject {
     @Published var showClickIndicator = false
     @Published var streamFPS = 0
     @Published private(set) var receivedFPSHistory: [FPSHistorySample] = []
+    @Published private(set) var submittedFPSHistory: [FPSHistorySample] = []
     /// Maximum refresh cadence reported by the screen currently hosting the
     /// active iPad scene. This is a physical presentation ceiling; Ultra can
     /// raise the Mac target only up to this value.
@@ -105,6 +106,7 @@ final class PadConnectionModel: ObservableObject {
 
     func setFrameInterpolationEnabled(_ enabled: Bool) {
         frameInterpolationEnabled = enabled
+        submittedFPSHistory.removeAll(keepingCapacity: true)
         videoDisplay.setFrameInterpolationEnabled(enabled)
     }
 
@@ -347,6 +349,9 @@ final class PadConnectionModel: ObservableObject {
         }
         videoDisplay.onInterpolationStatusChanged = { [weak self] status in
             self?.frameInterpolationStatus = status
+        }
+        videoDisplay.onInterpolationFPSUpdated = { [weak self] fps in
+            self?.recordSubmittedFPS(fps)
         }
         videoDisplay.setLiveUpscalingEnabled(liveUpscalingEnabled)
         videoDisplay.setAutomaticBackgroundStart(keepRunningInBackground)
@@ -1625,6 +1630,16 @@ final class PadConnectionModel: ObservableObject {
         }
     }
 
+    private func recordSubmittedFPS(_ fps: Int) {
+        submittedFPSHistory.append(FPSHistorySample(
+            uptime: ProcessInfo.processInfo.systemUptime,
+            fps: max(0, fps)
+        ))
+        if submittedFPSHistory.count > 60 {
+            submittedFPSHistory.removeFirst(submittedFPSHistory.count - 60)
+        }
+    }
+
     private func recordVideoFrame() {
         frameWindowCount += 1
         let now = ProcessInfo.processInfo.systemUptime
@@ -1650,6 +1665,7 @@ final class PadConnectionModel: ObservableObject {
         frameWindowCount = 0
         streamFPS = 0
         receivedFPSHistory.removeAll(keepingCapacity: true)
+        submittedFPSHistory.removeAll(keepingCapacity: true)
         videoAckBatchCount = 0
         lastVideoAckSequence = nil
         lastVideoAckSentAt = 0
