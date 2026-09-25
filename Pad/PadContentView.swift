@@ -3255,7 +3255,7 @@ private struct DeveloperFPSHistoryChart: View {
                     )
 
                     let receivedPlot = plotPath(
-                        for: received, now: now, start: xStart, span: span, size: size, ceiling: ceiling
+                        for: received, start: xStart, span: span, size: size, ceiling: ceiling
                     )
                     context.stroke(
                         receivedPlot.path,
@@ -3270,7 +3270,7 @@ private struct DeveloperFPSHistoryChart: View {
                     }
 
                     let submittedPlot = plotPath(
-                        for: submitted, now: now, start: xStart, span: span, size: size, ceiling: ceiling
+                        for: submitted, start: xStart, span: span, size: size, ceiling: ceiling
                     )
                     context.stroke(
                         submittedPlot.path,
@@ -3351,7 +3351,6 @@ private struct DeveloperFPSHistoryChart: View {
 
     private func plotPath(
         for points: [Point],
-        now: Double,
         start: Double,
         span: Double,
         size: CGSize,
